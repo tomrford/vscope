@@ -1,0 +1,54 @@
+{
+  "name": "vscope",
+  "version": "0.0.1",
+  "description": "Local daemon + Foldkit UI for the vscope embedded debug interface",
+  "keywords": [
+    "debug",
+    "embedded",
+    "mcp",
+    "oscilloscope",
+    "serial"
+  ],
+  "homepage": "https://github.com/tomrford/vscope#readme",
+  "bugs": {
+    "url": "https://github.com/tomrford/vscope/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tomrford/vscope.git"
+  },
+  "bin": {
+    "vscope": "bin/vscope.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "check": "pnpm run lint && pnpm run format:check && node bin/vscope.js --help > /dev/null && node bin/vscope.js --version > /dev/null",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint . --deny-warnings --no-error-on-unmatched-pattern",
+    "pack:dry": "pnpm pack --dry-run",
+    "prepublishOnly": "pnpm run check && pnpm run pack:dry"
+  },
+  "dependencies": {
+    "@effect/platform-browser": "4.0.0-beta.66",
+    "effect": "4.0.0-beta.66",
+    "foldkit": "0.104.1"
+  },
+  "devDependencies": {
+    "oxfmt": "0.53.0",
+    "oxlint": "1.68.0"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.5.1"
+}

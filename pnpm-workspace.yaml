@@ -1,0 +1,10 @@
+# No private workspace packages are required yet.
+# Add packages here only when a real build, dependency, or test boundary exists.
+packages:
+  - packages/*
+
+saveExact: true
+minimumReleaseAge: 10080
+strictDepBuilds: true
+allowBuilds:
+  msgpackr-extract: false
