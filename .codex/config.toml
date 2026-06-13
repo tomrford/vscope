@@ -1,0 +1,7 @@
+[mcp_servers.foldkit-devtools]
+command = "pnpm"
+args = ["exec", "foldkit-devtools-mcp"]
+
+[mcp_servers.foldkit-devtools.env]
+FOLDKIT_DEVTOOLS_MCP_HOST = "localhost"
+FOLDKIT_DEVTOOLS_MCP_PORT = "9988"

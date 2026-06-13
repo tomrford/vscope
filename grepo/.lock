@@ -1,0 +1,11 @@
+[repos.effect-smol]
+url = "https://github.com/Effect-TS/effect-smol.git"
+mode = "ref"
+ref = "main"
+commit = "ded0f5971e8ce9d03ef728b48f73d34811cf4a37"
+
+[repos.liveline]
+url = "https://github.com/benjitaylor/liveline.git"
+mode = "ref"
+ref = "main"
+commit = "069899598a11e00094ea1eb6b838404825f828be"

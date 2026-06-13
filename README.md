@@ -2,126 +2,75 @@
 
 Local daemon + browser UI for the vscope embedded debug interface.
 
-Status: the npm package name is reserved. The published package is a placeholder CLI while the runtime is built.
+`vscope` runs one local Node process that owns the device connection, persistence, browser UI assets, app RPC surface, and streamable HTTP MCP endpoint. The browser UI is a Foldkit SPA and never talks to serial devices directly.
 
-## Target
-
-```text
-npx vscope
-  -> starts one local Node process
-  -> serves a browser UI on 127.0.0.1
-  -> exposes REST/SSE for the UI
-  -> exposes HTTP MCP for agent control
-  -> talks to devices over USB serial
-```
-
-The product remains the same as the Python app: an embedded debug interface with a stored high-resolution virtual scope and live read/write RT buffers. High-resolution captures are stored on the device, downloaded as snapshots, persisted locally, and plotted or compared later. Live scope is lower resolution and optimized for control feedback, not oscilloscope-grade acquisition.
-
-## Successor Shape
-
-The earlier attempts each had useful parts:
-
-| Source           | Keep                                               | Drop                                        |
-| ---------------- | -------------------------------------------------- | ------------------------------------------- |
-| `vscope_py`      | product behavior, firmware/protocol reference      | PyQt desktop shell                          |
-| `v2scope`        | Svelte UI ideas, live plot engine, protocol work   | Tauri/Rust host split                       |
-| `v3scope`        | Effect runtime, serial service, SQLite persistence | Electron shell and native ABI rebuild split |
-| `cantraceviewer` | chartGPU snapshot interaction patterns             | unrelated CAN-specific surface              |
-
-The new architecture keeps one authoritative runtime in the local daemon. The browser UI holds presentation state only: selected route, form drafts, paused live view, plot viewport, and a synced projection of the server snapshot.
+Status: the package boundaries are in place. The runnable runtime server is still a scaffold.
 
 ## Architecture
 
 ```text
-Browser
-  Foldkit UI
-    POST /api/dispatch
-    GET  /api/snapshot
-    GET  /api/events
-    GET  /snapshots?ids=...
+bin/vscope.js
+  -> @vscope/runtime (scaffold)
+       -> @vscope/serial
+       -> @vscope/persistence
+       -> @vscope/shared
+       -> serves @vscope/ui build
+       -> serves RPC and MCP endpoints
 
-Node daemon
-  CLI
-  HTTP server
-  HTTP MCP server
-  App runtime
-  Protocol codec
-  Serial port service
-  SQLite persistence
-  Snapshot store
-
-Device
-  onboard vscope firmware module
+@vscope/ui
+  -> @vscope/shared
+  -> @vscope/liveplot
 ```
 
-Rules:
+Package boundaries:
 
-- Server owns device state, polling, consensus, command policy, and persistence.
-- UI never talks to serial directly.
-- MCP tools mirror the same command/request layer as the UI.
-- Snapshot plots are browser routes backed by persisted snapshot data.
-- Non-localhost bind requires an auth story before it ships.
+| Package               | Role                                                                 |
+| --------------------- | -------------------------------------------------------------------- |
+| `@vscope/shared`      | Effect Schemas for domain and wire data shared by runtime and UI     |
+| `@vscope/serial`      | Raw Effect wrapper around Node `serialport`                          |
+| `@vscope/persistence` | SQLite settings, preferences, saved ports, and snapshot persistence  |
+| `@vscope/liveplot`    | Browser-safe live plotting engine                                    |
+| `@vscope/ui`          | Foldkit SPA, built by Vite                                           |
+| `@vscope/runtime`     | Node composition root for HTTP/RPC, MCP, persistence, and serial I/O |
 
-## Package Plan
+The runtime is the source of truth. It reads persistence on startup, owns long-lived serial connections, applies user commands, persists settings and snapshots, and emits shared app-state/events to the UI. MCP tools use the same runtime command layer as the UI.
 
-Only one public npm package is planned: `vscope`.
+## Wire Shape
 
-Do not create private workspace packages just to mirror conceptual layers. Start with one package and normal source directories:
+The UI/runtime boundary is typed through `@vscope/shared`. Control/state traffic is intended to use Effect RPC over HTTP. Large snapshot samples are represented separately from snapshot metadata as `f32le-interleaved-v1` `Uint8Array` payloads, so a 40k-sample `Float32` capture can move as a binary/base64 wire payload rather than nested JSON arrays.
+
+Operational endpoints live in `@vscope/runtime`:
 
 ```text
-bin/
-  vscope.js
-src/
-  cli/
-  server/
-  runtime/
-  protocol/
-  serial/
-  persistence/
-  mcp/
-  ui/
-  plot-live/
+/health
+/rpc
+/mcp
+/snapshots
 ```
 
-Add private workspace packages only when a boundary earns its cost. Likely candidates:
+The MCP endpoint is expected to use streamable HTTP.
 
-| Package              | Condition                                                                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------- |
-| `packages/ui`        | Foldkit/Vite build isolation is cleaner than a root build                                         |
-| `packages/plot-live` | live plot engine is reused or tested independently                                                |
-| `packages/shared`    | schemas/protocol must be imported by both daemon and browser without dragging server dependencies |
-
-Avoid separate `core`, `contracts`, `protocol`, `serial`, `persistence`, and `server` packages until real build, dependency, or test isolation requires them.
-
-## Runtime Plan
-
-1. Port protocol bytes/codecs and command contracts into `src/protocol` and `src/runtime`, with tests.
-2. Port the headless runtime from `v3scope`: serial service, device registry, polling, command policy, settings, saved ports, snapshots.
-3. Add SQLite persistence with migrations and a conservative recovery policy. Do not wipe the DB for transient startup failures.
-4. Serve REST and SSE from one local HTTP server. Prove dispatch/snapshot flows with curl and mock serial.
-5. Add HTTP MCP at `/mcp` using the same command/request layer.
-6. Build the Foldkit UI shell: devices, scope controls, snapshot library, settings.
-7. Port live plotting from `v2scope`.
-8. Add chartGPU snapshot routes and compare view.
-9. Replace the placeholder npm package with the runnable daemon.
-
-## Commands
+## Development
 
 ```bash
 nix develop -c pnpm install
 nix develop -c pnpm run check
-nix develop -c pnpm run pack:dry
 ```
 
-Current `check` validates only the placeholder CLI. Broaden it as implementation lands.
+The Foldkit UI uses Vite for development and production asset builds:
 
-## Open Decisions
+```bash
+nix develop -c pnpm run dev:ui
+nix develop -c pnpm run build:ui
+```
 
-- Default local port.
-- Snapshot route shape: `/snapshots/:id` or `/snapshots?ids=...`.
-- Whether the first real workspace split is `packages/ui`.
-- Auth/token behavior for any non-localhost bind.
-- Final native dependency story for `serialport` and `better-sqlite3` in the published package.
+During UI development, Vite runs on `127.0.0.1:5173` and proxies `/health`, `/rpc`, `/mcp`, and `/snapshots` to the runtime port `127.0.0.1:5174`. Production runtime should serve the built UI assets directly.
+
+Foldkit DevTools MCP is configured in `.codex/config.toml`; the Vite plugin exposes the relay on port `9988`.
+
+## Reference Material
+
+The `reference/` directory contains firmware and previous SQLite/runtime source snapshots for porting. The `grepo/` directory is managed by `grepo`; its entries are read-only external reference snapshots.
 
 ## License
 

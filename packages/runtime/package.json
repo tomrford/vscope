@@ -1,0 +1,21 @@
+{
+  "name": "@vscope/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node runtime composition root for vscope",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@vscope/persistence": "workspace:*",
+    "@vscope/serial": "workspace:*",
+    "@vscope/shared": "workspace:*",
+    "effect": "4.0.0-beta.66"
+  }
+}
