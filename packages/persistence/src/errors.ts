@@ -1,49 +1,75 @@
-import { Data } from "effect";
+import { Schema } from "effect";
 
-export class PersistenceOpenError extends Data.TaggedError("PersistenceOpenError")<{
-  readonly path: string;
-  readonly reason: string;
-  readonly cause?: unknown;
-}> {}
+export class PersistenceOpenError extends Schema.TaggedErrorClass<PersistenceOpenError>()(
+  "PersistenceOpenError",
+  {
+    path: Schema.String,
+    reason: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect),
+  },
+) {}
 
-export class MigrationError extends Data.TaggedError("MigrationError")<{
-  readonly migration: string;
-  readonly reason: string;
-  readonly cause?: unknown;
-}> {}
+export class PersistenceMigrationError extends Schema.TaggedErrorClass<PersistenceMigrationError>()(
+  "PersistenceMigrationError",
+  {
+    migration: Schema.String,
+    reason: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect),
+  },
+) {}
 
-export class PersistenceQueryError extends Data.TaggedError("PersistenceQueryError")<{
-  readonly operation: string;
-  readonly reason: string;
-  readonly cause?: unknown;
-}> {}
+export class PersistenceQueryError extends Schema.TaggedErrorClass<PersistenceQueryError>()(
+  "PersistenceQueryError",
+  {
+    operation: Schema.String,
+    reason: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect),
+  },
+) {}
 
-export class PersistenceValidationError extends Data.TaggedError("PersistenceValidationError")<{
-  readonly operation: string;
-  readonly reason: string;
-  readonly cause?: unknown;
-}> {}
+export class PersistenceValidationError extends Schema.TaggedErrorClass<PersistenceValidationError>()(
+  "PersistenceValidationError",
+  {
+    operation: Schema.String,
+    reason: Schema.String,
+    cause: Schema.optionalKey(Schema.Defect),
+  },
+) {}
 
-export class SnapshotNotFoundError extends Data.TaggedError("SnapshotNotFoundError")<{
-  readonly id: number;
-}> {}
+export class PersistenceClosedError extends Schema.TaggedErrorClass<PersistenceClosedError>()(
+  "PersistenceClosedError",
+  {
+    operation: Schema.String,
+  },
+) {}
 
-export class PersistenceClosedError extends Data.TaggedError("PersistenceClosedError")<{
-  readonly operation: string;
-}> {}
+export class SnapshotNotFoundError extends Schema.TaggedErrorClass<SnapshotNotFoundError>()(
+  "SnapshotNotFoundError",
+  {
+    id: Schema.String,
+  },
+) {}
+
+export class SnapshotComparisonNotFoundError extends Schema.TaggedErrorClass<SnapshotComparisonNotFoundError>()(
+  "SnapshotComparisonNotFoundError",
+  {
+    id: Schema.String,
+  },
+) {}
 
 export type PersistenceError =
   | PersistenceOpenError
-  | MigrationError
+  | PersistenceMigrationError
   | PersistenceQueryError
   | PersistenceValidationError
+  | PersistenceClosedError
   | SnapshotNotFoundError
-  | PersistenceClosedError;
+  | SnapshotComparisonNotFoundError;
 
-export function errorReason(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
+export function errorReason(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.message;
   }
 
-  return String(error);
+  return String(cause);
 }

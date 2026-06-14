@@ -1,18 +1,41 @@
 import fs from "node:fs";
+import assert from "node:assert/strict";
 import os from "node:os";
 import nodePath from "node:path";
+import { describe, test } from "node:test";
 
-import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import { SqliteClient } from "@effect/sql-sqlite-node";
+import { Effect, Option } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   DEFAULT_PREFERENCES,
+  DEFAULT_SERIAL_CONFIG,
   DEFAULT_SETTINGS,
-  type PersistenceDatabase,
+  Persistence,
+  SavedDeviceDraft,
+  SNAPSHOT_SAMPLE_FORMAT,
+  SerialConfig,
+  SnapshotComparisonDraft,
+  SnapshotDeviceRef,
+  SnapshotDraft,
+  SnapshotSamplesWrite,
+  SnapshotTrigger,
+  UsbIdentity,
   initializePersistence,
-  openPersistence,
-} from ".";
-import { openSqliteDatabase } from "./sqlite";
+  makePersistenceLayer,
+} from "./index.ts";
+
+function expect<T>(actual: T) {
+  return {
+    toBe(expected: unknown) {
+      assert.equal(actual, expected);
+    },
+    toEqual(expected: unknown) {
+      assert.deepStrictEqual(actual, expected);
+    },
+  };
+}
 
 async function withTempPath<T>(run: (path: string) => Promise<T>) {
   const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vscope-persistence-"));
@@ -25,261 +48,526 @@ async function withTempPath<T>(run: (path: string) => Promise<T>) {
   }
 }
 
-async function withTempDatabase<T>(
-  run: (database: PersistenceDatabase, path: string) => Promise<T>,
-) {
-  return await withTempPath(async (path) => {
-    const database = await Effect.runPromise(openPersistence(path));
+async function runWithPersistence<A, E>(
+  path: string,
+  effect: Effect.Effect<A, E, Persistence>,
+): Promise<A> {
+  return await Effect.runPromise(
+    Effect.scoped(effect.pipe(Effect.provide(makePersistenceLayer({ path })))),
+  );
+}
 
-    try {
-      return await run(database, path);
-    } finally {
-      await Effect.runPromise(database.close());
-    }
+async function runWithSql<A, E>(
+  path: string,
+  effect: Effect.Effect<A, E, SqlClient.SqlClient>,
+): Promise<A> {
+  return await Effect.runPromise(
+    Effect.scoped(effect.pipe(Effect.provide(SqliteClient.layer({ filename: path })))),
+  );
+}
+
+function snapshotDraft(label: string, sampleCount: number): SnapshotDraft {
+  return SnapshotDraft.make({
+    label,
+    device: SnapshotDeviceRef.make({
+      deviceId: null,
+      name: "probe-a",
+      portPath: "/dev/tty.usbserial",
+    }),
+    channelCount: 2,
+    sampleCount,
+    sampleRateHz: 1_000,
+    divider: 1,
+    preTriggerSamples: 1,
+    channelMap: [0, 1],
+    trigger: SnapshotTrigger.make({
+      threshold: 0.5,
+      channel: 1,
+      mode: "rising",
+    }),
+    rtValues: [0, 1],
+    metadata: {
+      note: "first capture",
+    },
   });
 }
 
+function floatBytes(values: ReadonlyArray<number>): Uint8Array {
+  const floats = new Float32Array(values);
+  return new Uint8Array(floats.buffer.slice(0));
+}
+
 describe("@vscope/persistence", () => {
+  test("reports SQLite open defects as typed open errors", async () => {
+    await withTempPath(async (path) => {
+      fs.mkdirSync(path);
+
+      await assert.rejects(Effect.runPromise(initializePersistence({ path })), (error) => {
+        assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceOpenError");
+        return true;
+      });
+    });
+  });
+
+  test("reports migration defects as typed migration errors", async () => {
+    await withTempPath(async (path) => {
+      await runWithSql(
+        path,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`CREATE TABLE saved_devices_port_path_idx (id INTEGER PRIMARY KEY)`;
+        }),
+      );
+
+      await assert.rejects(Effect.runPromise(initializePersistence({ path })), (error) => {
+        assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceMigrationError");
+        return true;
+      });
+    });
+  });
+
   test("migrations create the persistence tables", async () => {
     await withTempPath(async (path) => {
-      await Effect.runPromise(initializePersistence(path));
-      const sqlite = await openSqliteDatabase(path);
-      const rows = sqlite
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .all() as Array<{ name: string }>;
-      sqlite.close();
+      await Effect.runPromise(initializePersistence({ path }));
 
-      expect(rows.map((row) => row.name)).toEqual([
+      const names = await runWithSql(
+        path,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{ name: string }>`
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+            ORDER BY name
+          `;
+
+          return rows.map((row) => row.name);
+        }),
+      );
+
+      expect(names).toEqual([
         "persistence_migrations",
         "preferences",
-        "saved_ports",
+        "saved_devices",
         "settings",
-        "snapshot_data",
-        "snapshot_meta",
+        "snapshot_comparison_snapshots",
+        "snapshot_comparisons",
+        "snapshot_samples",
+        "snapshots",
       ]);
     });
   });
 
-  test("settings round-trip, recover from corrupt data, and reset", async () => {
-    await withTempDatabase(async (database, path) => {
-      expect(await Effect.runPromise(database.readSettings())).toEqual(DEFAULT_SETTINGS);
+  test("settings and preferences round-trip, recover, and reset", async () => {
+    await withTempPath(async (path) => {
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
 
-      const updated = await Effect.runPromise(
-        database.updateSettings({
-          theme: "dark",
-          defaultDivider: 4,
-          triggerThreshold: 1.5,
+          const defaults = yield* persistence.readSettings;
+          expect(defaults.settings).toEqual(DEFAULT_SETTINGS);
+          expect(defaults.recovery.pending).toBe(false);
+          expect(defaults.recovery.message).toBe(null);
+
+          const settings = yield* persistence.patchSettings({ theme: "dark" });
+          expect(settings.settings.theme).toBe("dark");
+
+          const preferences = yield* persistence.patchPreferences({
+            recentPortPaths: ["/dev/tty.usbserial"],
+            showAdvancedControls: true,
+          });
+          expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial"]);
+          expect(preferences.preferences.showAdvancedControls).toBe(true);
         }),
       );
 
-      expect(updated).toEqual({
-        ...DEFAULT_SETTINGS,
-        theme: "dark",
-        defaultDivider: 4,
-        triggerThreshold: 1.5,
-      });
-      expect(await Effect.runPromise(database.readSettings())).toEqual(updated);
+      await runWithSql(
+        path,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE settings SET data_json = ${"{"} WHERE id = 1`;
+          yield* sql`UPDATE preferences SET data_json = ${"{"} WHERE id = 1`;
+        }),
+      );
 
-      await Effect.runPromise(database.close());
-      const sqlite = await openSqliteDatabase(path);
-      sqlite.prepare("UPDATE settings SET data_json = ? WHERE id = 1").run("{");
-      sqlite.close();
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const settings = yield* persistence.readSettings;
+          const preferences = yield* persistence.readPreferences;
 
-      const reopened = await Effect.runPromise(openPersistence(path));
-      const recovered = await Effect.runPromise(reopened.readSettingsState());
+          expect(settings.settings).toEqual(DEFAULT_SETTINGS);
+          expect(settings.recovery.pending).toBe(true);
+          expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
+          expect(preferences.preferences).toEqual(DEFAULT_PREFERENCES);
+          expect(preferences.recovery.pending).toBe(true);
+          expect(preferences.recovery.message).toBe("Corrupt preferences were reset to defaults.");
 
-      expect(recovered).toEqual({
-        settings: DEFAULT_SETTINGS,
-        recovery: {
-          pending: true,
-          message: "Corrupt settings were reset to defaults.",
-        },
-      });
+          const resetSettings = yield* persistence.resetSettings;
+          expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
+          expect(resetSettings.recovery.pending).toBe(false);
+          expect(resetSettings.recovery.message).toBe(null);
 
-      expect(await Effect.runPromise(reopened.resetSettings())).toEqual(DEFAULT_SETTINGS);
-      expect(await Effect.runPromise(reopened.readSettingsState())).toEqual({
-        settings: DEFAULT_SETTINGS,
-        recovery: {
-          pending: false,
-          message: null,
-        },
-      });
-      await Effect.runPromise(reopened.close());
+          const resetPreferences = yield* persistence.resetPreferences;
+          expect(resetPreferences.preferences).toEqual(DEFAULT_PREFERENCES);
+          expect(resetPreferences.recovery.pending).toBe(false);
+          expect(resetPreferences.recovery.message).toBe(null);
+        }),
+      );
     });
   });
 
-  test("preferences and saved ports round-trip", async () => {
-    await withTempDatabase(async (database) => {
-      const preferences = await Effect.runPromise(
-        database.updatePreferences({
-          recentPortPaths: ["/dev/tty.usbserial"],
-          lastPortPath: "/dev/tty.usbserial",
-          favoriteSnapshotIds: [1, 2],
-          showAdvancedControls: true,
-        }),
-      );
-
-      expect(preferences).toEqual({
-        recentPortPaths: ["/dev/tty.usbserial"],
-        lastPortPath: "/dev/tty.usbserial",
-        favoriteSnapshotIds: [1, 2],
-        showAdvancedControls: true,
-      });
-
-      const savedPort = await Effect.runPromise(
-        database.saveSavedPort("/dev/tty.usbserial", {
-          baudRate: 115200,
-          dataBits: 8,
-        }),
-      );
-
-      expect(savedPort.path).toBe("/dev/tty.usbserial");
-      expect(await Effect.runPromise(database.listSavedPorts())).toEqual([savedPort]);
-      await Effect.runPromise(database.forgetSavedPort("/dev/tty.usbserial"));
-      expect(await Effect.runPromise(database.listSavedPorts())).toEqual([]);
-      expect(await Effect.runPromise(database.resetPreferences())).toEqual(DEFAULT_PREFERENCES);
-    });
-  });
-
-  test("snapshots save, list, load, rename, overwrite data, and delete", async () => {
-    await withTempDatabase(async (database) => {
-      const snapshot = await Effect.runPromise(
-        database.saveSnapshot(
-          {
-            label: "Boot trace",
-            deviceNames: ["probe-a"],
-            channelCount: 2,
-            sampleCount: 3,
-            divider: 1,
-            preTrig: 1,
-            channelMap: [0, 1],
-            triggerThreshold: 0.5,
-            triggerChannel: 1,
-            triggerMode: "rising",
-            rtValues: [0, 1],
-            metadata: {
-              note: "first capture",
-            },
-            createdAt: "2026-06-13T08:00:00.000Z",
-          },
-          [
-            [1, 2],
-            [3.5, 4.5],
-            [5, 6],
-          ],
+  test("settings and preferences patches validate instead of defecting", async () => {
+    await withTempPath(async (path) => {
+      await assert.rejects(
+        runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            yield* persistence.patchSettings({ theme: "purple" as never });
+          }),
         ),
+        (error) => {
+          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
+          return true;
+        },
       );
 
-      expect(snapshot.id).toBeGreaterThan(0);
-      expect(await Effect.runPromise(database.listSnapshots())).toEqual([snapshot]);
-      expect(await Effect.runPromise(database.loadSnapshotSamples(snapshot))).toEqual([
-        [1, 2],
-        [3.5, 4.5],
-        [5, 6],
-      ]);
-
-      const renamed = await Effect.runPromise(database.renameSnapshot(snapshot.id, "Renamed"));
-      expect(renamed.label).toBe("Renamed");
-      expect((await Effect.runPromise(database.listSnapshots()))[0].label).toBe("Renamed");
-
-      await Effect.runPromise(
-        database.storeSnapshotSamples(renamed, [
-          [7, 8],
-          [9, 10],
-          [11, 12],
-        ]),
+      await assert.rejects(
+        runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            yield* persistence.patchPreferences({
+              favoriteSnapshotIds: ["" as never],
+            });
+          }),
+        ),
+        (error) => {
+          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
+          return true;
+        },
       );
-      expect(await Effect.runPromise(database.loadSnapshotSamples(renamed))).toEqual([
-        [7, 8],
-        [9, 10],
-        [11, 12],
-      ]);
-
-      const raw = new Uint8Array([1, 2, 3, 4]);
-      await Effect.runPromise(database.storeSnapshotBlob(renamed.id, raw));
-      const loadedBlob = await Effect.runPromise(database.loadSnapshotBlob(renamed.id));
-      expect(loadedBlob?.byteLength).toBe(4);
-      expect(Array.from(loadedBlob?.data ?? [])).toEqual([1, 2, 3, 4]);
-
-      await Effect.runPromise(database.deleteSnapshot(snapshot.id));
-      expect(await Effect.runPromise(database.listSnapshots())).toEqual([]);
-      expect(await Effect.runPromise(database.loadSnapshotBlob(snapshot.id))).toBeNull();
     });
   });
 
-  test("corrupt snapshot metadata is dropped without wiping the database", async () => {
-    await withTempDatabase(async (database, path) => {
-      const snapshot = await Effect.runPromise(
-        database.saveSnapshot({
-          label: "Valid trace",
-          deviceNames: ["probe-a"],
-          channelCount: 1,
-          sampleCount: 1,
-          divider: 1,
-          preTrig: 0,
-          channelMap: [0],
-          triggerThreshold: 0,
-          triggerChannel: 0,
-          triggerMode: "rising",
-          rtValues: [0],
-          metadata: {},
-          createdAt: "2026-06-13T08:00:00.000Z",
+  test("concurrent settings and preferences patches preserve independent fields", async () => {
+    await withTempPath(async (path) => {
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const serialConfig = SerialConfig.make({
+            ...DEFAULT_SERIAL_CONFIG,
+            baudRate: 57_600,
+          });
+
+          yield* Effect.all(
+            [
+              persistence.patchSettings({ theme: "dark" }),
+              persistence.patchSettings({ defaultSerialConfig: serialConfig }),
+            ],
+            { concurrency: 2 },
+          );
+
+          const settings = yield* persistence.readSettings;
+          expect(settings.settings.theme).toBe("dark");
+          expect(settings.settings.defaultSerialConfig.baudRate).toBe(57_600);
+
+          yield* Effect.all(
+            [
+              persistence.patchPreferences({ recentPortPaths: ["/dev/tty.usbserial-a"] }),
+              persistence.patchPreferences({ showAdvancedControls: true }),
+            ],
+            { concurrency: 2 },
+          );
+
+          const preferences = yield* persistence.readPreferences;
+          expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial-a"]);
+          expect(preferences.preferences.showAdvancedControls).toBe(true);
+        }),
+      );
+    });
+  });
+
+  test("saved devices round-trip through typed records", async () => {
+    await withTempPath(async (path) => {
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const first = yield* persistence.upsertSavedDevice(
+            SavedDeviceDraft.make({
+              portPath: "/dev/tty.usbserial",
+              displayName: "Probe A",
+              usb: UsbIdentity.make({
+                vendorId: "303a",
+                productId: "1001",
+                serialNumber: "abc",
+                manufacturer: "vscope",
+              }),
+              serialConfig: DEFAULT_SERIAL_CONFIG,
+              metadata: {
+                role: "bench",
+              },
+            }),
+          );
+
+          expect(first.id.startsWith("device:")).toBe(true);
+          expect(yield* persistence.listSavedDevices).toEqual([first]);
+
+          const updated = yield* persistence.upsertSavedDevice(
+            SavedDeviceDraft.make({
+              id: first.id,
+              portPath: first.portPath,
+              displayName: "Probe A1",
+              usb: first.usb,
+              serialConfig: first.serialConfig,
+              metadata: first.metadata,
+            }),
+          );
+          expect(updated.createdAt).toBe(first.createdAt);
+          expect(updated.displayName).toBe("Probe A1");
+
+          yield* persistence.forgetSavedDevice(first.id);
+          expect(yield* persistence.listSavedDevices).toEqual([]);
+        }),
+      );
+    });
+  });
+
+  test("snapshots store metadata and Float32 sample blobs", async () => {
+    await withTempPath(async (path) => {
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const samples = SnapshotSamplesWrite.make({
+            format: SNAPSHOT_SAMPLE_FORMAT,
+            data: floatBytes([1, 2, 3, 4, 5, 6]),
+          });
+          const snapshot = yield* persistence.createSnapshot(
+            snapshotDraft("Boot trace", 3),
+            samples,
+          );
+
+          expect(snapshot.sample.stored).toBe(true);
+          expect(snapshot.sample.byteLength).toBe(Float32Array.BYTES_PER_ELEMENT * 2 * 3);
+          expect(yield* persistence.listSnapshots()).toEqual([snapshot]);
+
+          const loaded = yield* persistence.readSnapshotSamples(snapshot.id);
+          if (Option.isNone(loaded)) {
+            throw new Error("expected snapshot samples");
+          }
+          expect(Array.from(loaded.value.data)).toEqual(Array.from(samples.data));
+
+          const renamed = yield* persistence.renameSnapshot(snapshot.id, "Renamed trace");
+          expect(renamed.label).toBe("Renamed trace");
+
+          const replacement = SnapshotSamplesWrite.make({
+            format: SNAPSHOT_SAMPLE_FORMAT,
+            data: floatBytes([7, 8, 9, 10, 11, 12]),
+          });
+          const rewritten = yield* persistence.writeSnapshotSamples(snapshot.id, replacement);
+          expect(rewritten.sample.stored).toBe(true);
+
+          const reloaded = yield* persistence.readSnapshotSamples(snapshot.id);
+          if (Option.isNone(reloaded)) {
+            throw new Error("expected rewritten snapshot samples");
+          }
+          expect(Array.from(reloaded.value.data)).toEqual(Array.from(replacement.data));
+
+          yield* persistence.deleteSnapshot(snapshot.id);
+          expect(yield* persistence.listSnapshots()).toEqual([]);
+        }),
+      );
+    });
+  });
+
+  test("rejects impossible snapshot metadata", async () => {
+    await withTempPath(async (path) => {
+      await assert.rejects(
+        runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            const invalid = SnapshotDraft.make({
+              ...snapshotDraft("Impossible trace", 1),
+              preTriggerSamples: 99,
+              trigger: SnapshotTrigger.make({
+                threshold: 0.5,
+                channel: 99,
+                mode: "rising",
+              }),
+              rtValues: [0],
+            });
+
+            yield* persistence.createSnapshot(invalid);
+          }),
+        ),
+        (error) => {
+          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
+          return true;
+        },
+      );
+
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          expect(yield* persistence.listSnapshots()).toEqual([]);
+        }),
+      );
+    });
+  });
+
+  test("snapshot comparisons round-trip as typed records", async () => {
+    await withTempPath(async (path) => {
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const first = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
+          const second = yield* persistence.createSnapshot(snapshotDraft("Trace B", 1));
+          const comparison = yield* persistence.createSnapshotComparison(
+            SnapshotComparisonDraft.make({
+              label: "A vs B",
+              snapshotIds: [first.id, second.id],
+              options: {
+                align: "trigger",
+              },
+              metadata: {},
+            }),
+          );
+
+          expect(comparison.id.startsWith("comparison:")).toBe(true);
+          expect(yield* persistence.listSnapshotComparisons).toEqual([comparison]);
+
+          const renamed = yield* persistence.renameSnapshotComparison(comparison.id, "Renamed");
+          expect(renamed.label).toBe("Renamed");
+
+          yield* persistence.deleteSnapshot(first.id);
+          expect(yield* persistence.listSnapshotComparisons).toEqual([]);
+
+          const third = yield* persistence.createSnapshot(snapshotDraft("Trace C", 1));
+          const replacement = yield* persistence.createSnapshotComparison(
+            SnapshotComparisonDraft.make({
+              label: "B vs C",
+              snapshotIds: [second.id, third.id],
+              options: {},
+              metadata: {},
+            }),
+          );
+          yield* persistence.deleteSnapshotComparison(replacement.id);
+          expect(yield* persistence.listSnapshotComparisons).toEqual([]);
+        }),
+      );
+    });
+  });
+
+  test("snapshot comparisons reject duplicate member ids before SQLite insert", async () => {
+    await withTempPath(async (path) => {
+      await assert.rejects(
+        runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            const snapshot = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
+
+            yield* persistence.createSnapshotComparison(
+              SnapshotComparisonDraft.make({
+                label: "Duplicate trace",
+                snapshotIds: [snapshot.id, snapshot.id],
+                options: {},
+                metadata: {},
+              }),
+            );
+          }),
+        ),
+        (error) => {
+          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
+          return true;
+        },
+      );
+    });
+  });
+
+  test("corrupt snapshot metadata is dropped without wiping valid captures", async () => {
+    await withTempPath(async (path) => {
+      const snapshot = await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          return yield* persistence.createSnapshot(snapshotDraft("Valid trace", 1));
         }),
       );
 
-      await Effect.runPromise(database.close());
-      const sqlite = await openSqliteDatabase(path);
-      sqlite
-        .prepare(
-          `
-            INSERT INTO snapshot_meta (
+      await runWithSql(
+        path,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`
+            INSERT INTO snapshots (
               id,
-              name,
-              device_names_json,
+              label,
+              device_id,
+              device_name,
+              port_path,
               channel_count,
               sample_count,
+              sample_format,
+              sample_rate_hz,
               divider,
-              pre_trig,
+              pre_trigger_samples,
               channel_map_json,
-              trigger_threshold,
-              trigger_channel,
-              trigger_mode,
+              trigger_json,
               rt_values_json,
               metadata_json,
               created_at,
               updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `,
-        )
-        .run(
-          99,
-          "Corrupt trace",
-          "{",
-          1,
-          1,
-          1,
-          0,
-          "[0]",
-          0,
-          0,
-          "rising",
-          "[0]",
-          "{}",
-          "2026-06-13T09:00:00.000Z",
-          "2026-06-13T09:00:00.000Z",
-        );
-      sqlite.close();
+            ) VALUES (
+              ${"snapshot:corrupt"},
+              ${"Corrupt trace"},
+              ${null},
+              ${"probe-a"},
+              ${"/dev/tty.usbserial"},
+              ${0},
+              ${1},
+              ${SNAPSHOT_SAMPLE_FORMAT},
+              ${1_000},
+              ${1},
+              ${0},
+              ${"["},
+              ${"{}"},
+              ${"[0]"},
+              ${"{}"},
+              ${"2026-06-13T08:00:00.000Z"},
+              ${"2026-06-13T08:00:00.000Z"}
+            )
+          `;
+        }),
+      );
 
-      const reopened = await Effect.runPromise(openPersistence(path));
-      expect(await Effect.runPromise(reopened.listSnapshots())).toEqual([snapshot]);
-      await Effect.runPromise(reopened.close());
+      await runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          expect(yield* persistence.listSnapshots()).toEqual([snapshot]);
+        }),
+      );
 
-      const verified = await openSqliteDatabase(path);
-      const rows = verified.prepare("SELECT id FROM snapshot_meta ORDER BY id").all() as Array<{
-        id: number;
-      }>;
-      verified.close();
-      expect(rows).toEqual([{ id: snapshot.id }]);
+      const ids = await runWithSql(
+        path,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{ id: string }>`SELECT id FROM snapshots ORDER BY id`;
+          return rows.map((row) => row.id);
+        }),
+      );
+
+      expect(ids).toEqual([snapshot.id]);
     });
   });
 });
