@@ -4,3 +4,6 @@ out/
 .DS_Store
 *.log
 .direnv
+grepo/*
+grepo/.mutate.lock
+!grepo/.lock

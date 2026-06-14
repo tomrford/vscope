@@ -27,6 +27,11 @@ export type VScopeSerialEvent =
   | {
       readonly _tag: "DeviceRemoved";
       readonly device: VScopeDeviceSummary;
+    }
+  | {
+      readonly _tag: "DeviceLost";
+      readonly device: VScopeDeviceSummary;
+      readonly cause: VScopeDeviceError;
     };
 
 export interface VScopeSerialOptions {
@@ -145,6 +150,23 @@ export function makeVScopeSerial(
         }),
       );
 
+    const publishLostDevice = (path: string, token: symbol, cause: VScopeDeviceError) =>
+      lock.withPermit(
+        Effect.gen(function* () {
+          const entries = yield* Ref.get(entriesRef);
+          const entry = entries.get(path);
+          if (!entry || entry.token !== token) {
+            return;
+          }
+
+          const summary = yield* summarize(entry.device);
+          yield* Scope.close(entry.scope, Exit.fail(cause)).pipe(Effect.ignore);
+          yield* deleteEntry(path);
+          const event: VScopeSerialEvent = { _tag: "DeviceLost", device: summary, cause };
+          yield* PubSub.publish(events, event);
+        }),
+      );
+
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const entries = yield* Ref.get(entriesRef);
@@ -189,6 +211,14 @@ export function makeVScopeSerial(
               });
               return next;
             });
+
+            yield* openedDevice.closed.pipe(
+              Effect.flip,
+              Effect.flatMap((cause) => publishLostDevice(openedDevice.path, token, cause)),
+              Effect.ignore,
+              Effect.forkScoped,
+              Scope.provide(deviceScope),
+            );
 
             const summary = yield* summarize(device);
             const event: VScopeSerialEvent = { _tag: "DeviceOpened", device: summary };

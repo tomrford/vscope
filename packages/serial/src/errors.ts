@@ -25,6 +25,12 @@ export class VScopeResponseTimeoutError extends Data.TaggedError("VScopeResponse
   readonly timeoutMillis: number;
 }> {}
 
+export class VScopeSessionClosedError extends Data.TaggedError("VScopeSessionClosedError")<{
+  readonly path: string;
+  readonly requestType: VScopeMessageType;
+  readonly reason: string;
+}> {}
+
 export class VScopeFirmwareError extends Data.TaggedError("VScopeFirmwareError")<{
   readonly path: string;
   readonly requestType: VScopeMessageType;
@@ -55,6 +61,7 @@ export class VScopeInvalidArgumentError extends Data.TaggedError("VScopeInvalidA
 export type VScopeDeviceError =
   | VScopeTransportError
   | VScopeResponseTimeoutError
+  | VScopeSessionClosedError
   | VScopeFirmwareError
   | VScopeDecodeError
   | VScopeUnexpectedResponseError

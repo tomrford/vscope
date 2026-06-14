@@ -99,5 +99,6 @@ export interface VScopeDevice {
   readonly setRtValue: (index: number, value: number) => Effect.Effect<number, VScopeDeviceError>;
   readonly getTrigger: Effect.Effect<VScopeTrigger, VScopeDeviceError>;
   readonly setTrigger: (trigger: VScopeTrigger) => Effect.Effect<VScopeTrigger, VScopeDeviceError>;
+  readonly closed: Effect.Effect<void, VScopeDeviceError>;
   readonly close: Effect.Effect<void, SerialCloseError>;
 }

@@ -1,4 +1,4 @@
-import { Cause, Effect, Queue, Ref, Semaphore, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Queue, Ref, Semaphore, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 
 import {
@@ -7,6 +7,7 @@ import {
   VScopeFirmwareError,
   VScopeInvalidArgumentError,
   VScopeResponseTimeoutError,
+  VScopeSessionClosedError,
   VScopeTransportError,
   VScopeUnexpectedResponseError,
 } from "./errors";
@@ -54,9 +55,44 @@ interface VScopeClient {
     responseType: VScopeMessageType,
     payload?: Uint8Array,
   ) => Effect.Effect<Uint8Array, VScopeDeviceError>;
+  readonly closed: Effect.Effect<void, VScopeDeviceError>;
+  readonly close: <E>(closeTransport: Effect.Effect<void, E>) => Effect.Effect<void, E>;
 }
 
 const UINT32_MAX = 0xffff_ffff;
+
+type ClientClosedState =
+  | {
+      readonly _tag: "Open";
+    }
+  | {
+      readonly _tag: "Closing";
+      readonly pendingError: VScopeDeviceError | undefined;
+    }
+  | {
+      readonly _tag: "Closed";
+      readonly reason: string;
+    };
+
+type SessionCompletion =
+  | {
+      readonly _tag: "None";
+    }
+  | {
+      readonly _tag: "Success";
+    }
+  | {
+      readonly _tag: "Failure";
+      readonly error: VScopeDeviceError;
+    };
+
+type CloseStart =
+  | {
+      readonly _tag: "AlreadyClosed";
+    }
+  | {
+      readonly _tag: "StartClose";
+    };
 
 export const openVScopeDevice = (
   options: OpenVScopeDeviceOptions,
@@ -66,6 +102,7 @@ export const openVScopeDevice = (
     const client = yield* makeVScopeClient(transport, {
       requestTimeoutMillis: options.requestTimeoutMillis,
     });
+    yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
     const info = yield* getInfo(transport.path, client);
     const littleEndian = info.endianness === VScopeEndianness.Little;
     const state = yield* getState(transport.path, client);
@@ -107,9 +144,114 @@ const makeVScopeClient = (
   Effect.gen(function* () {
     const frames = yield* Queue.unbounded<VScopeFrame, VScopeDeviceError | Cause.Done>();
     const requestLock = yield* Semaphore.make(1);
+    const closed = yield* Deferred.make<void, VScopeDeviceError>();
+    const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
     const parser = new VScopeFrameParser();
     const timeoutMillis = options.requestTimeoutMillis ?? 1000;
 
+    const ensureOpen = (requestType: VScopeMessageType) =>
+      Ref.get(closedState).pipe(
+        Effect.flatMap((state) =>
+          state._tag !== "Open"
+            ? Effect.fail(
+                new VScopeSessionClosedError({
+                  path: transport.path,
+                  requestType,
+                  reason: state._tag === "Closing" ? "closing" : state.reason,
+                }),
+              )
+            : Effect.void,
+        ),
+      );
+
+    const completeSession = (completion: SessionCompletion) =>
+      completion._tag === "None"
+        ? Effect.void
+        : completion._tag === "Success"
+          ? Queue.end(frames).pipe(
+              Effect.andThen(Deferred.succeed(closed, undefined)),
+              Effect.asVoid,
+            )
+          : Queue.fail(frames, completion.error).pipe(
+              Effect.andThen(Deferred.fail(closed, completion.error)),
+              Effect.asVoid,
+            );
+
+    const succeedSession = () =>
+      Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] =>
+        state._tag === "Closed"
+          ? [{ _tag: "None" }, state]
+          : [{ _tag: "Success" }, { _tag: "Closed", reason: "closed" }],
+      ).pipe(Effect.flatMap((completion) => completeSession(completion)));
+
+    const failSession = (error: VScopeDeviceError) =>
+      Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] => {
+        if (state._tag === "Closed") {
+          return [{ _tag: "None" }, state];
+        }
+
+        if (state._tag === "Closing") {
+          return [
+            { _tag: "None" },
+            {
+              _tag: "Closing",
+              pendingError: state.pendingError ?? error,
+            },
+          ];
+        }
+
+        return [
+          { _tag: "Failure", error },
+          { _tag: "Closed", reason: sessionCloseReason(error) },
+        ];
+      }).pipe(Effect.flatMap((completion) => completeSession(completion)));
+
+    const close = <E>(closeTransport: Effect.Effect<void, E>): Effect.Effect<void, E> =>
+      Effect.uninterruptible(
+        requestLock.withPermit(
+          Effect.gen(function* () {
+            const closeStart = yield* Ref.modify(
+              closedState,
+              (state): readonly [CloseStart, ClientClosedState] =>
+                state._tag === "Closed"
+                  ? [{ _tag: "AlreadyClosed" }, state]
+                  : [{ _tag: "StartClose" }, { _tag: "Closing", pendingError: undefined }],
+            );
+            if (closeStart._tag === "AlreadyClosed") {
+              yield* closeTransport;
+              return;
+            }
+
+            const closeExit = yield* Effect.exit(closeTransport);
+            if (Exit.isFailure(closeExit)) {
+              const pendingError = yield* Ref.modify(
+                closedState,
+                (state): readonly [VScopeDeviceError | undefined, ClientClosedState] => {
+                  if (state._tag !== "Closing") {
+                    return [undefined, state];
+                  }
+
+                  return state.pendingError
+                    ? [
+                        state.pendingError,
+                        {
+                          _tag: "Closed",
+                          reason: sessionCloseReason(state.pendingError),
+                        },
+                      ]
+                    : [undefined, { _tag: "Open" }];
+                },
+              );
+              if (pendingError) {
+                yield* completeSession({ _tag: "Failure", error: pendingError });
+              }
+              return yield* Effect.failCause(closeExit.cause);
+            }
+
+            yield* succeedSession();
+          }),
+        ),
+      );
     yield* Effect.gen(function* () {
       while (true) {
         const chunk = yield* transport.read.pipe(
@@ -121,7 +263,7 @@ const makeVScopeClient = (
         }
       }
     }).pipe(
-      Effect.catch((error) => Queue.fail(frames, error)),
+      Effect.catch((error) => failSession(error)),
       Effect.forkScoped,
     );
 
@@ -132,6 +274,7 @@ const makeVScopeClient = (
     ) =>
       requestLock.withPermit(
         Effect.gen(function* () {
+          yield* ensureOpen(requestType);
           const encoded = encodeVScopeFrame({ type: requestType, payload });
           yield* transport
             .write(encoded)
@@ -145,20 +288,28 @@ const makeVScopeClient = (
           return yield* takeResponse(transport.path, frames, requestType, responseType).pipe(
             Effect.timeoutOrElse({
               duration: `${timeoutMillis} millis`,
-              orElse: () =>
-                Effect.fail(
-                  new VScopeResponseTimeoutError({
-                    path: transport.path,
-                    requestType,
-                    timeoutMillis,
-                  }),
-                ),
+              orElse: () => {
+                const error = new VScopeResponseTimeoutError({
+                  path: transport.path,
+                  requestType,
+                  timeoutMillis,
+                });
+
+                return failSession(error).pipe(
+                  Effect.andThen(transport.close.pipe(Effect.ignore)),
+                  Effect.andThen(Effect.fail(error)),
+                );
+              },
             }),
           );
         }),
       );
 
-    return { request };
+    return {
+      request,
+      closed: Deferred.await(closed),
+      close,
+    };
   });
 
 const takeResponse = (
@@ -318,7 +469,8 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     setRtValue: (index, value) => setRtValue(path, client, info, littleEndian, index, value),
     getTrigger: getTrigger(path, client, littleEndian),
     setTrigger: (trigger) => setTrigger(path, client, info, littleEndian, trigger),
-    close: transport.close,
+    closed: client.closed,
+    close: client.close(transport.close),
   };
 };
 
@@ -960,5 +1112,16 @@ const statusName = (status: VScopeStatusValue | undefined): string => {
       return "NOT_READY";
     default:
       return "UNKNOWN";
+  }
+};
+
+const sessionCloseReason = (error: VScopeDeviceError): string => {
+  switch (error._tag) {
+    case "VScopeResponseTimeoutError":
+      return `request ${error.requestType} timed out after ${error.timeoutMillis}ms`;
+    case "VScopeTransportError":
+      return `transport ${error.cause._tag}`;
+    default:
+      return error._tag;
   }
 };

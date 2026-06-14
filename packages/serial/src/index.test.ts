@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { EventEmitter } from "node:events";
 
 import { describe, expect, test } from "bun:test";
-import { Effect, Stream } from "effect";
+import { Effect, Fiber, Stream } from "effect";
 
 import {
   encodeVScopeFrame,
@@ -13,11 +13,14 @@ import {
   VScopeFirmwareError,
   VScopeFrameParser,
   VScopeInvalidArgumentError,
+  VScopeResponseTimeoutError,
   VSCOPE_FRAME_TIMEOUT_MILLIS,
   VScopeMessageType,
   VScopeSerial,
+  VScopeSessionClosedError,
   VScopeState,
   VScopeStatus,
+  VScopeTransportError,
   VScopeTriggerMode,
   makeVScopeSerialLayer,
   writeF32,
@@ -109,6 +112,45 @@ describe("@vscope/serial device", () => {
     expect(metadata.variables).toEqual(["voltage", "current", "speed", "torque", "temp", "phase"]);
     expect(metadata.rtLabels).toEqual(["kp", "ki"]);
     expect(metadata.channelMap).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  test("completes the device close signal when the opening scope is released", async () => {
+    const firmware = fakeFirmware({
+      path: "/dev/tty.vscope-scoped-close",
+      deviceName: "scope-scoped-close",
+    });
+    const driver = fakeDriver([firmware]);
+    let closed: Effect.Effect<void, unknown> | undefined;
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-scoped-close",
+            baudRate: 115200,
+            driver,
+          });
+          closed = device.closed;
+        }),
+      ),
+    );
+
+    if (!closed) {
+      throw new Error("Device close signal was not captured");
+    }
+
+    const result = await Effect.runPromise(
+      closed.pipe(
+        Effect.as("closed"),
+        Effect.timeoutOrElse({
+          duration: "100 millis",
+          orElse: () => Effect.succeed("timeout"),
+        }),
+      ),
+    );
+
+    expect(result).toBe("closed");
+    expect(firmware.closeAttempts).toBe(1);
   });
 
   test("streams snapshot data in firmware-sized dense byte chunks", async () => {
@@ -229,6 +271,87 @@ describe("@vscope/serial device", () => {
       }
     }
   });
+
+  test("fails the device session after a response timeout so late frames cannot poison later requests", async () => {
+    const driver = fakeDriver([
+      fakeFirmware({
+        path: "/dev/tty.vscope-timeout",
+        deviceName: "scope-timeout",
+        frameResponseDelayMillis: 20,
+      }),
+    ]);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-timeout",
+            baudRate: 115200,
+            driver,
+            requestTimeoutMillis: 5,
+          });
+
+          const timedOutFrame = yield* Effect.exit(device.getFrame);
+          yield* Effect.sleep("30 millis");
+          const nextRequest = yield* Effect.exit(device.getState);
+
+          return { timedOutFrame, nextRequest };
+        }),
+      ),
+    );
+
+    expect(result.timedOutFrame._tag).toBe("Failure");
+    if (result.timedOutFrame._tag === "Failure") {
+      const errors = result.timedOutFrame.cause.reasons
+        .filter((reason) => reason._tag === "Fail")
+        .map((reason) => reason.error);
+      expect(errors[0]).toBeInstanceOf(VScopeResponseTimeoutError);
+    }
+
+    expect(result.nextRequest._tag).toBe("Failure");
+    if (result.nextRequest._tag === "Failure") {
+      const errors = result.nextRequest.cause.reasons
+        .filter((reason) => reason._tag === "Fail")
+        .map((reason) => reason.error);
+      expect(errors[0]).toBeInstanceOf(VScopeSessionClosedError);
+    }
+  });
+
+  test("still closes the native transport after a read-side session failure", async () => {
+    const firmware = fakeFirmware({
+      path: "/dev/tty.vscope-read-error",
+      deviceName: "scope-read-error",
+      errorAfterOpenMillis: 20,
+    });
+    const driver = fakeDriver([firmware]);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-read-error",
+            baudRate: 115200,
+            driver,
+          });
+
+          const closedExit = yield* Effect.exit(device.closed);
+          const closeExit = yield* Effect.exit(device.close);
+
+          return { closedExit, closeExit, closeAttempts: firmware.closeAttempts };
+        }),
+      ),
+    );
+
+    expect(result.closedExit._tag).toBe("Failure");
+    if (result.closedExit._tag === "Failure") {
+      const errors = result.closedExit.cause.reasons
+        .filter((reason) => reason._tag === "Fail")
+        .map((reason) => reason.error);
+      expect(errors[0]).toBeInstanceOf(VScopeTransportError);
+    }
+    expect(result.closeExit._tag).toBe("Success");
+    expect(result.closeAttempts).toBe(1);
+  });
 });
 
 describe("@vscope/serial manager", () => {
@@ -308,10 +431,11 @@ describe("@vscope/serial manager", () => {
       });
       const closeExit = yield* Effect.exit(device.close);
       const afterFailedClose = yield* manager.listDevices;
+      const stateAfterFailedClose = yield* device.getState;
       const retryExit = yield* Effect.exit(manager.removeDevice("/dev/tty.vscope-close-fail"));
       const afterRetry = yield* manager.listDevices;
 
-      return { closeExit, afterFailedClose, retryExit, afterRetry };
+      return { closeExit, afterFailedClose, stateAfterFailedClose, retryExit, afterRetry };
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
 
     const result = await Effect.runPromise(program);
@@ -326,6 +450,7 @@ describe("@vscope/serial manager", () => {
 
     expect(result.afterFailedClose).toHaveLength(1);
     expect(result.afterFailedClose[0]?.path).toBe("/dev/tty.vscope-close-fail");
+    expect(result.stateAfterFailedClose).toBe(VScopeState.Halted);
     expect(result.retryExit._tag).toBe("Success");
     expect(result.afterRetry).toEqual([]);
   });
@@ -358,7 +483,96 @@ describe("@vscope/serial manager", () => {
     expect(result.devices).toHaveLength(1);
     expect(result.devices[0]?.path).toBe("/dev/tty.vscope-stale");
   });
+
+  test("publishes DeviceLost and removes the entry on involuntary serial close", async () => {
+    const driver = fakeDriver([
+      fakeFirmware({
+        path: "/dev/tty.vscope-lost",
+        deviceName: "lost",
+        closeAfterOpenMillis: 20,
+      }),
+    ]);
+
+    const program = Effect.gen(function* () {
+      const manager = yield* VScopeSerial;
+      const eventsFiber = yield* manager.events.pipe(
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const device = yield* manager.openDevice({ path: "/dev/tty.vscope-lost", baudRate: 115200 });
+      const closedExit = yield* Effect.exit(device.closed);
+      const events = yield* Fiber.join(eventsFiber);
+      const devices = yield* manager.listDevices;
+
+      return { closedExit, devices, events };
+    }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
+
+    const result = await Effect.runPromise(Effect.scoped(program));
+
+    expect(result.closedExit._tag).toBe("Failure");
+    if (result.closedExit._tag === "Failure") {
+      const errors = result.closedExit.cause.reasons
+        .filter((reason) => reason._tag === "Fail")
+        .map((reason) => reason.error);
+      expect(errors[0]).toBeInstanceOf(VScopeTransportError);
+    }
+
+    expect(result.devices).toEqual([]);
+    expect(result.events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
+    const lost = result.events[1];
+    expect(lost?._tag).toBe("DeviceLost");
+    if (lost?._tag === "DeviceLost") {
+      expect(lost.device.path).toBe("/dev/tty.vscope-lost");
+      expect(lost.cause).toBeInstanceOf(VScopeTransportError);
+    }
+  });
+
+  test("removes the entry when a close failure races with serial loss", async () => {
+    const driver = fakeDriver([
+      fakeFirmware({
+        path: "/dev/tty.vscope-close-race",
+        deviceName: "close-race",
+        closeFailures: 1,
+        closeFailureEmitsClose: true,
+      }),
+    ]);
+
+    const program = Effect.gen(function* () {
+      const manager = yield* VScopeSerial;
+      const eventsFiber = yield* manager.events.pipe(
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const device = yield* manager.openDevice({
+        path: "/dev/tty.vscope-close-race",
+        baudRate: 115200,
+      });
+      const closeExit = yield* Effect.exit(device.close);
+      const events = yield* Fiber.join(eventsFiber);
+      const afterLost = yield* manager.listDevices;
+      const reopened = yield* manager.openDevice({
+        path: "/dev/tty.vscope-close-race",
+        baudRate: 115200,
+      });
+
+      return { closeExit, events, afterLost, reopened };
+    }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
+
+    const result = await Effect.runPromise(Effect.scoped(program));
+
+    expect(result.closeExit._tag).toBe("Failure");
+    expect(result.events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
+    expect(result.afterLost).toEqual([]);
+    expect(result.reopened.path).toBe("/dev/tty.vscope-close-race");
+  });
 });
+
+interface FakeFirmwareResponse {
+  readonly bytes: Uint8Array;
+  readonly delayMillis: number;
+}
 
 interface FakeFirmwareOptions {
   readonly path: string;
@@ -368,6 +582,10 @@ interface FakeFirmwareOptions {
   readonly endianness?: VScopeEndianness | undefined;
   readonly failRtRead?: boolean | undefined;
   readonly closeFailures?: number | undefined;
+  readonly closeFailureEmitsClose?: boolean | undefined;
+  readonly closeAfterOpenMillis?: number | undefined;
+  readonly errorAfterOpenMillis?: number | undefined;
+  readonly frameResponseDelayMillis?: number | undefined;
 }
 
 const fakeFirmware = (options: FakeFirmwareOptions): FakeFirmware => new FakeFirmware(options);
@@ -425,6 +643,23 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
     queueMicrotask(() => {
       this.emit("open");
       callback?.(undefined);
+      if (this.firmware.closeAfterOpenMillis !== undefined) {
+        setTimeout(() => {
+          if (!this.#isOpen) {
+            return;
+          }
+
+          this.#isOpen = false;
+          this.emit("close", null);
+        }, this.firmware.closeAfterOpenMillis);
+      }
+      if (this.firmware.errorAfterOpenMillis !== undefined) {
+        setTimeout(() => {
+          if (this.#isOpen) {
+            this.emit("error", new Error("read-side serial failure"));
+          }
+        }, this.firmware.errorAfterOpenMillis);
+      }
     });
   }
 
@@ -432,7 +667,17 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
     const responses = this.firmware.receive(Uint8Array.from(chunk));
     queueMicrotask(() => {
       for (const response of responses) {
-        this.emit("data", Buffer.from(response));
+        const emitResponse = () => {
+          if (this.#isOpen) {
+            this.emit("data", Buffer.from(response.bytes));
+          }
+        };
+
+        if (response.delayMillis > 0) {
+          setTimeout(emitResponse, response.delayMillis);
+        } else {
+          queueMicrotask(emitResponse);
+        }
       }
       callback?.(undefined);
     });
@@ -451,6 +696,10 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
     const closeError = this.firmware.nextCloseError();
     queueMicrotask(() => {
       if (closeError) {
+        if (this.firmware.closeFailureEmitsClose) {
+          this.#isOpen = false;
+          this.emit("close", closeError);
+        }
         callback?.(closeError);
         return;
       }
@@ -472,6 +721,11 @@ class FakeFirmware {
   readonly snapshot = Float32Array.from({ length: 1000 * 5 }, (_, index) => index);
   readonly parser = new VScopeFrameParser();
   readonly failRtRead: boolean;
+  readonly closeFailureEmitsClose: boolean;
+  readonly closeAfterOpenMillis: number | undefined;
+  readonly errorAfterOpenMillis: number | undefined;
+  readonly frameResponseDelayMillis: number;
+  closeAttempts = 0;
   #closeFailures: number;
   timing = { divider: 1, preTrig: 0 };
   state: VScopeStateValue = VScopeState.Halted;
@@ -492,10 +746,15 @@ class FakeFirmware {
     this.littleEndian = this.endianness === Endianness.Little;
     this.rtValues = Array.from({ length: this.rtLabels.length }, () => 0);
     this.failRtRead = options.failRtRead ?? false;
+    this.closeFailureEmitsClose = options.closeFailureEmitsClose ?? false;
+    this.closeAfterOpenMillis = options.closeAfterOpenMillis;
+    this.errorAfterOpenMillis = options.errorAfterOpenMillis;
+    this.frameResponseDelayMillis = options.frameResponseDelayMillis ?? 0;
     this.#closeFailures = options.closeFailures ?? 0;
   }
 
   nextCloseError(): Error | undefined {
+    this.closeAttempts += 1;
     if (this.#closeFailures <= 0) {
       return undefined;
     }
@@ -504,11 +763,11 @@ class FakeFirmware {
     return new Error("close failed");
   }
 
-  receive(bytes: Uint8Array): ReadonlyArray<Uint8Array> {
+  receive(bytes: Uint8Array): ReadonlyArray<FakeFirmwareResponse> {
     return this.parser.push(bytes).map((frame) => this.handle(frame.type, frame.payload));
   }
 
-  private handle(type: VScopeMessageType, payload: Uint8Array): Uint8Array {
+  private handle(type: VScopeMessageType, payload: Uint8Array): FakeFirmwareResponse {
     switch (type) {
       case VScopeMessageType.GetInfo:
         return this.response(type, this.infoPayload());
@@ -535,7 +794,11 @@ class FakeFirmware {
         this.state = VScopeState.Acquiring;
         return this.response(type, new Uint8Array());
       case VScopeMessageType.GetFrame:
-        return this.response(type, this.floatsPayload(this.snapshot.subarray(0, 5)));
+        return this.response(
+          type,
+          this.floatsPayload(this.snapshot.subarray(0, 5)),
+          this.frameResponseDelayMillis,
+        );
       case VScopeMessageType.GetSnapshotHeader:
         return this.response(type, this.snapshotHeaderPayload());
       case VScopeMessageType.GetSnapshotData:
@@ -581,15 +844,19 @@ class FakeFirmware {
     }
   }
 
-  private response(type: VScopeMessageType, payload: Uint8Array): Uint8Array {
-    return encodeVScopeFrame({ type, payload });
+  private response(
+    type: VScopeMessageType,
+    payload: Uint8Array,
+    delayMillis = 0,
+  ): FakeFirmwareResponse {
+    return {
+      bytes: encodeVScopeFrame({ type, payload }),
+      delayMillis,
+    };
   }
 
-  private error(status: VScopeStatus): Uint8Array {
-    return encodeVScopeFrame({
-      type: VScopeMessageType.Error,
-      payload: Uint8Array.of(status),
-    });
+  private error(status: VScopeStatus): FakeFirmwareResponse {
+    return this.response(VScopeMessageType.Error, Uint8Array.of(status));
   }
 
   private infoPayload(): Uint8Array {
@@ -635,7 +902,7 @@ class FakeFirmware {
     return payload;
   }
 
-  private snapshotData(payload: Uint8Array): Uint8Array {
+  private snapshotData(payload: Uint8Array): FakeFirmwareResponse {
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     const startSample = readU16(view, 0, this.littleEndian);
     const count = payload[2];
@@ -651,7 +918,7 @@ class FakeFirmware {
     type: VScopeMessageType,
     names: ReadonlyArray<string>,
     request: Uint8Array,
-  ): Uint8Array {
+  ): FakeFirmwareResponse {
     const start = request[0];
     const requested = request[1];
     const maxEntries = Math.floor((252 - 3) / 16);
