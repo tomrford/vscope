@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { TriggerMode } from "@vscope/shared";
 
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -27,7 +28,6 @@ export class SerialConfig extends Schema.Class<SerialConfig>("SerialConfig")({
   dataBits: Schema.Literals([5, 6, 7, 8]),
   stopBits: Schema.Literals([1, 1.5, 2]),
   parity: SerialParity,
-  rtscts: Schema.Boolean,
 }) {}
 
 export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
@@ -35,7 +35,6 @@ export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
   dataBits: 8,
   stopBits: 1,
   parity: "none",
-  rtscts: false,
 });
 
 export class PollingSettings extends Schema.Class<PollingSettings>("PollingSettings")({
@@ -166,6 +165,11 @@ export class SavedDevice extends Schema.Class<SavedDevice>("SavedDevice")({
   updatedAt: Timestamp,
 }) {}
 
+export class SavedDeviceIdentity extends Schema.Class<SavedDeviceIdentity>("SavedDeviceIdentity")({
+  portPath: Schema.NullOr(Schema.String),
+  usb: UsbIdentity,
+}) {}
+
 export class SnapshotDeviceRef extends Schema.Class<SnapshotDeviceRef>("SnapshotDeviceRef")({
   deviceId: Schema.NullOr(PersistentId),
   name: Schema.String,
@@ -175,7 +179,7 @@ export class SnapshotDeviceRef extends Schema.Class<SnapshotDeviceRef>("Snapshot
 export class SnapshotTrigger extends Schema.Class<SnapshotTrigger>("SnapshotTrigger")({
   threshold: Schema.Finite,
   channel: NonNegativeInt,
-  mode: NonEmptyString,
+  mode: TriggerMode,
 }) {}
 
 export class SnapshotSampleDescriptor extends Schema.Class<SnapshotSampleDescriptor>(

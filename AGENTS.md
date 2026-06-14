@@ -43,6 +43,6 @@ Snapshot plots are browser routes backed by persisted daemon data. Live scope is
 - [x] `@vscope/serial`: C-derived protocol/types, Effect serial transport, VScope device client, device manager, dense snapshot stream, and fake-firmware tests are in place.
 - [ ] `@vscope/runtime`: build the daemon composition root over serial, persistence, and shared schemas; own device fan-out/fan-in policy, REST/SSE, and MCP command paths.
 - [ ] `@vscope/shared`: define the runtime/UI/MCP wire contracts around the serial device model and persisted snapshot shapes.
-- [ ] `@vscope/persistence`: align SQLite storage with runtime-owned settings, devices, downloaded snapshots, and comparison metadata.
+- [x] `@vscope/persistence`: SQLite storage, migrations, runtime-owned settings, saved devices, downloaded snapshots, and comparison metadata are in place.
 - [ ] `@vscope/liveplot`: settle the reusable plotting core for live RT buffers and persisted high-resolution snapshot inspection.
 - [ ] `@vscope/ui`: rebuild the browser shell against the runtime contract as a presentation layer only.

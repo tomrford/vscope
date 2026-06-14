@@ -1,12 +1,9 @@
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import type { TriggerMode } from "@vscope/shared";
 
 import type { VScopeDeviceError } from "./errors";
-import type {
-  VScopeEndianness,
-  VScopeState as VScopeStateValue,
-  VScopeTriggerMode,
-} from "./protocol";
+import type { VScopeEndianness, VScopeState as VScopeStateValue } from "./protocol";
 import type { OpenSerialTransportOptions, SerialCloseError } from "./transport";
 
 export interface VScopeDeviceInfo {
@@ -29,7 +26,7 @@ export interface VScopeTiming {
 export interface VScopeTrigger {
   readonly threshold: number;
   readonly channel: number;
-  readonly mode: VScopeTriggerMode;
+  readonly mode: TriggerMode;
 }
 
 export interface VScopeSnapshotHeader {

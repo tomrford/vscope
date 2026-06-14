@@ -8,6 +8,7 @@ import type {
   PreferencesState,
   SavedDevice,
   SavedDeviceDraft,
+  SavedDeviceIdentity,
   Settings,
   SettingsPatch,
   SettingsState,
@@ -40,6 +41,12 @@ export type PersistenceService = {
   ) => Effect.Effect<PreferencesState, PersistenceError>;
   readonly resetPreferences: Effect.Effect<PreferencesState, PersistenceError>;
   readonly listSavedDevices: Effect.Effect<ReadonlyArray<SavedDevice>, PersistenceError>;
+  readonly getSavedDevice: (
+    id: PersistentId,
+  ) => Effect.Effect<Option.Option<SavedDevice>, PersistenceError>;
+  readonly findSavedDeviceByIdentity: (
+    identity: SavedDeviceIdentity,
+  ) => Effect.Effect<Option.Option<SavedDevice>, PersistenceError>;
   readonly upsertSavedDevice: (
     draft: SavedDeviceDraft,
   ) => Effect.Effect<SavedDevice, PersistenceError>;

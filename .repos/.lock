@@ -1,4 +1,4 @@
-[repos.effect-smol]
+[repos.effect]
 url = "https://github.com/Effect-TS/effect-smol.git"
 mode = "ref"
 ref = "main"

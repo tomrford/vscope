@@ -14,6 +14,7 @@ import {
   DEFAULT_SETTINGS,
   Persistence,
   SavedDeviceDraft,
+  SavedDeviceIdentity,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotComparisonDraft,
@@ -317,6 +318,38 @@ describe("@vscope/persistence", () => {
 
           expect(first.id.startsWith("device:")).toBe(true);
           expect(yield* persistence.listSavedDevices).toEqual([first]);
+          const byId = yield* persistence.getSavedDevice(first.id);
+          if (Option.isNone(byId)) {
+            throw new Error("expected saved device by id");
+          }
+          expect(byId.value).toEqual(first);
+
+          const byUsb = yield* persistence.findSavedDeviceByIdentity(
+            SavedDeviceIdentity.make({
+              portPath: "/dev/tty.reenumerated",
+              usb: first.usb,
+            }),
+          );
+          if (Option.isNone(byUsb)) {
+            throw new Error("expected saved device by usb identity");
+          }
+          expect(byUsb.value).toEqual(first);
+
+          const byPort = yield* persistence.findSavedDeviceByIdentity(
+            SavedDeviceIdentity.make({
+              portPath: first.portPath,
+              usb: UsbIdentity.make({
+                vendorId: null,
+                productId: null,
+                serialNumber: null,
+                manufacturer: null,
+              }),
+            }),
+          );
+          if (Option.isNone(byPort)) {
+            throw new Error("expected saved device by port path");
+          }
+          expect(byPort.value).toEqual(first);
 
           const updated = yield* persistence.upsertSavedDevice(
             SavedDeviceDraft.make({
@@ -405,6 +438,29 @@ describe("@vscope/persistence", () => {
             });
 
             yield* persistence.createSnapshot(invalid);
+          }),
+        ),
+        (error) => {
+          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
+          return true;
+        },
+      );
+
+      await assert.rejects(
+        runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            const invalid = {
+              ...snapshotDraft("Invalid trigger mode", 1),
+              trigger: {
+                threshold: 0.5,
+                channel: 0,
+                mode: "edge" as never,
+              },
+            };
+
+            yield* persistence.createSnapshot(invalid as never);
           }),
         ),
         (error) => {

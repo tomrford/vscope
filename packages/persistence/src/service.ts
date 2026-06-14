@@ -13,6 +13,7 @@ import {
   PreferencesState,
   SavedDevice,
   SavedDeviceDraft,
+  SavedDeviceIdentity,
   SerialConfig,
   Settings,
   SettingsState,
@@ -308,6 +309,97 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     }
 
     return devices;
+  });
+
+  const decodeSavedDeviceOption = Effect.fn("Persistence.decodeSavedDeviceOption")(function* (
+    operation: string,
+    row: unknown | undefined,
+  ) {
+    if (row === undefined) {
+      return Option.none<SavedDevice>();
+    }
+
+    return yield* decodeSavedDeviceRow(row).pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Effect.gen(function* () {
+            const id = stringProperty(row, "id");
+            if (id === null) {
+              return yield* error;
+            }
+
+            yield* runSql(
+              `drop corrupt saved device during ${operation}`,
+              sql`DELETE FROM saved_devices WHERE id = ${id}`,
+            );
+            yield* Effect.logWarning(`Corrupt saved device dropped: ${id}`);
+            return Option.none<SavedDevice>();
+          }),
+        onSuccess: (device) => Effect.succeed(Option.some(device)),
+      }),
+    );
+  });
+
+  const getSavedDevice = Effect.fn("Persistence.getSavedDevice")(function* (id: PersistentId) {
+    const decodedId = yield* decodeWith(PersistentId, "get saved device", id);
+    const rows = yield* runSql(
+      "get saved device",
+      sql`
+        SELECT *
+        FROM saved_devices
+        WHERE id = ${decodedId}
+      `,
+    );
+
+    return yield* decodeSavedDeviceOption("get saved device", rows[0]);
+  });
+
+  const findSavedDeviceByIdentity = Effect.fn("Persistence.findSavedDeviceByIdentity")(function* (
+    identity: SavedDeviceIdentity,
+  ) {
+    const decodedIdentity = yield* decodeWith(
+      SavedDeviceIdentity,
+      "find saved device by identity",
+      identity,
+    );
+    const { productId, serialNumber, vendorId } = decodedIdentity.usb;
+
+    if (vendorId !== null && productId !== null && serialNumber !== null) {
+      const rows = yield* runSql(
+        "find saved device by usb identity",
+        sql`
+          SELECT *
+          FROM saved_devices
+          WHERE vendor_id = ${vendorId}
+            AND product_id = ${productId}
+            AND serial_number = ${serialNumber}
+          ORDER BY updated_at DESC, id DESC
+          LIMIT 1
+        `,
+      );
+      const device = yield* decodeSavedDeviceOption("find saved device by usb identity", rows[0]);
+
+      if (Option.isSome(device) || decodedIdentity.portPath === null) {
+        return device;
+      }
+    }
+
+    if (decodedIdentity.portPath === null) {
+      return Option.none<SavedDevice>();
+    }
+
+    const rows = yield* runSql(
+      "find saved device by port path",
+      sql`
+        SELECT *
+        FROM saved_devices
+        WHERE port_path = ${decodedIdentity.portPath}
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+      `,
+    );
+
+    return yield* decodeSavedDeviceOption("find saved device by port path", rows[0]);
   });
 
   const upsertSavedDevice = Effect.fn("Persistence.upsertSavedDevice")(function* (
@@ -978,6 +1070,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     patchPreferences,
     resetPreferences: writePreferences(DEFAULT_PREFERENCES),
     listSavedDevices: listSavedDevices(),
+    getSavedDevice,
+    findSavedDeviceByIdentity,
     upsertSavedDevice,
     forgetSavedDevice,
     createSnapshot,

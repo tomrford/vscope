@@ -15,7 +15,6 @@
   "dependencies": {
     "@vscope/persistence": "workspace:*",
     "@vscope/serial": "workspace:*",
-    "@vscope/shared": "workspace:*",
     "effect": "4.0.0-beta.66"
   }
 }

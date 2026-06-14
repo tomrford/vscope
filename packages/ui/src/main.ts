@@ -4,8 +4,6 @@ import type { Document } from "foldkit/html";
 import { html } from "foldkit/html";
 import { m } from "foldkit/message";
 
-import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS } from "@vscope/shared";
-
 export const Model = Schema.Struct({
   appName: Schema.String,
   status: Schema.String,
@@ -55,12 +53,6 @@ export const view = (model: Model): Document => {
       [
         h.h1([h.Class("text-3xl font-semibold tracking-normal")], [model.appName]),
         h.p([h.Class("text-sm text-zinc-300")], [model.status]),
-        h.p(
-          [h.Class("text-xs text-zinc-500")],
-          [
-            `Default theme: ${DEFAULT_SETTINGS.theme}; recent ports: ${DEFAULT_PREFERENCES.recentPortPaths.length}`,
-          ],
-        ),
       ],
     ),
   };

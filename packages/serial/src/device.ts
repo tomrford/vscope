@@ -1,5 +1,6 @@
 import { Cause, Deferred, Effect, Exit, Queue, Ref, Semaphore, Stream } from "effect";
 import type * as Scope from "effect/Scope";
+import type { TriggerMode } from "@vscope/shared";
 
 import {
   VScopeDecodeError,
@@ -25,7 +26,8 @@ import {
   type VScopeState as VScopeStateValue,
   VScopeStatus,
   type VScopeStatus as VScopeStatusValue,
-  type VScopeTriggerMode,
+  VScopeTriggerMode,
+  type VScopeTriggerMode as VScopeWireTriggerMode,
   writeF32,
   writeU16,
   writeU32,
@@ -606,7 +608,7 @@ const getSnapshotHeader = (
         trigger: {
           threshold: readF32(view, offset + 8, littleEndian),
           channel: payload[offset + 12],
-          mode: payload[offset + 13] as VScopeTriggerMode,
+          mode: decodeTriggerMode(path, VScopeMessageType.GetSnapshotHeader, payload[offset + 13]),
         },
         rtValues: Array.from(
           decodeFloatArray(
@@ -792,24 +794,19 @@ const setTrigger = (
   littleEndian: boolean,
   trigger: VScopeTrigger,
 ): Effect.Effect<VScopeTrigger, VScopeDeviceError> =>
-  validateTrigger(path, info, trigger).pipe(
-    Effect.andThen(
-      Effect.sync(() => {
-        const payload = new Uint8Array(6);
-        writeF32(payload, 0, trigger.threshold, littleEndian);
-        payload[4] = trigger.channel;
-        payload[5] = trigger.mode;
-        return payload;
-      }),
-    ),
-    Effect.flatMap((payload) =>
-      client.request(VScopeMessageType.SetTrigger, VScopeMessageType.SetTrigger, payload),
-    ),
-    Effect.map((payload) =>
-      decodeTrigger(path, VScopeMessageType.SetTrigger, payload, littleEndian),
-    ),
-    catchDecode(path, VScopeMessageType.SetTrigger),
-  );
+  Effect.gen(function* () {
+    const mode = yield* validateTrigger(path, info, trigger);
+    const payload = new Uint8Array(6);
+    writeF32(payload, 0, trigger.threshold, littleEndian);
+    payload[4] = trigger.channel;
+    payload[5] = mode;
+    const response = yield* client.request(
+      VScopeMessageType.SetTrigger,
+      VScopeMessageType.SetTrigger,
+      payload,
+    );
+    return decodeTrigger(path, VScopeMessageType.SetTrigger, response, littleEndian);
+  }).pipe(catchDecode(path, VScopeMessageType.SetTrigger));
 
 const pollState = (
   path: string,
@@ -882,9 +879,47 @@ const decodeTrigger = (
   return {
     threshold: readF32(view, 0, littleEndian),
     channel: payload[4],
-    mode: payload[5] as VScopeTriggerMode,
+    mode: decodeTriggerMode(path, messageType, payload[5]),
   };
 };
+
+function encodeTriggerMode(mode: TriggerMode): VScopeWireTriggerMode | null {
+  switch (mode) {
+    case "disabled":
+      return VScopeTriggerMode.Disabled;
+    case "rising":
+      return VScopeTriggerMode.Rising;
+    case "falling":
+      return VScopeTriggerMode.Falling;
+    case "both":
+      return VScopeTriggerMode.Both;
+    default:
+      return null;
+  }
+}
+
+function decodeTriggerMode(
+  path: string,
+  messageType: VScopeMessageType,
+  mode: number,
+): TriggerMode {
+  switch (mode) {
+    case VScopeTriggerMode.Disabled:
+      return "disabled";
+    case VScopeTriggerMode.Rising:
+      return "rising";
+    case VScopeTriggerMode.Falling:
+      return "falling";
+    case VScopeTriggerMode.Both:
+      return "both";
+    default:
+      throw new VScopeDecodeError({
+        path,
+        messageType,
+        reason: `Invalid trigger mode ${mode}`,
+      });
+  }
+}
 
 const decodeFirmwareError = (
   path: string,
@@ -1006,7 +1041,7 @@ const validateTrigger = (
   path: string,
   info: VScopeDeviceInfo,
   trigger: VScopeTrigger,
-): Effect.Effect<void, VScopeInvalidArgumentError> => {
+): Effect.Effect<VScopeWireTriggerMode, VScopeInvalidArgumentError> => {
   if (!Number.isFinite(trigger.threshold)) {
     return invalid(path, "setTrigger", "threshold must be finite");
   }
@@ -1017,10 +1052,11 @@ const validateTrigger = (
   ) {
     return invalid(path, "setTrigger", `channel must be between 0 and ${info.channelCount - 1}`);
   }
-  if (!Number.isInteger(trigger.mode) || trigger.mode < 0 || trigger.mode > 3) {
-    return invalid(path, "setTrigger", "mode must be Disabled, Rising, Falling, or Both");
+  const mode = encodeTriggerMode(trigger.mode);
+  if (mode === null) {
+    return invalid(path, "setTrigger", "mode must be disabled, rising, falling, or both");
   }
-  return Effect.void;
+  return Effect.succeed(mode);
 };
 
 const validateSnapshotRequest = (

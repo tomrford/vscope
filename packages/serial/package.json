@@ -13,6 +13,7 @@
     "test": "bun test src"
   },
   "dependencies": {
+    "@vscope/shared": "workspace:*",
     "effect": "4.0.0-beta.66",
     "serialport": "13.0.0"
   },

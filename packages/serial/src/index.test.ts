@@ -114,6 +114,37 @@ describe("@vscope/serial device", () => {
     expect(metadata.channelMap).toEqual([0, 1, 2, 3, 4]);
   });
 
+  test("maps trigger modes between wire values and shared semantic values", async () => {
+    const driver = fakeDriver([
+      fakeFirmware({
+        path: "/dev/tty.vscope-trigger",
+        deviceName: "scope-trigger",
+      }),
+    ]);
+
+    const { trigger, updatedTrigger } = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-trigger",
+            baudRate: 115200,
+            driver,
+          });
+          const trigger = yield* device.getTrigger;
+          const updatedTrigger = yield* device.setTrigger({
+            threshold: 1,
+            channel: 1,
+            mode: "rising",
+          });
+          return { trigger, updatedTrigger };
+        }),
+      ),
+    );
+
+    expect(trigger.mode).toBe("disabled");
+    expect(updatedTrigger.mode).toBe("rising");
+  });
+
   test("completes the device close signal when the opening scope is released", async () => {
     const firmware = fakeFirmware({
       path: "/dev/tty.vscope-scoped-close",
@@ -248,20 +279,24 @@ describe("@vscope/serial device", () => {
             device.setTiming({ divider: 0x1_0000_0000, preTrig: 0 }),
           );
           const fractionalState = yield* Effect.exit(device.setState(1.5 as VScopeStateValue));
-          const nanTriggerMode = yield* Effect.exit(
+          const invalidTriggerMode = yield* Effect.exit(
             device.setTrigger({
               threshold: 0,
               channel: 0,
-              mode: Number.NaN as VScopeTriggerModeValue,
+              mode: "edge" as never,
             }),
           );
 
-          return { oversizedDivider, fractionalState, nanTriggerMode };
+          return { oversizedDivider, fractionalState, invalidTriggerMode };
         }),
       ),
     );
 
-    for (const exit of [result.oversizedDivider, result.fractionalState, result.nanTriggerMode]) {
+    for (const exit of [
+      result.oversizedDivider,
+      result.fractionalState,
+      result.invalidTriggerMode,
+    ]) {
       expect(exit._tag).toBe("Failure");
       if (exit._tag === "Failure") {
         const errors = exit.cause.reasons
