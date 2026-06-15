@@ -29,6 +29,15 @@ export interface VScopeTrigger {
   readonly mode: TriggerMode;
 }
 
+export interface VScopeControlStatus {
+  readonly state: VScopeStateValue;
+  readonly requestedState: VScopeStateValue;
+  readonly snapshotValid: boolean;
+  readonly requestPending: boolean;
+  readonly triggerEnabled: boolean;
+  readonly flags: number;
+}
+
 export interface VScopeSnapshotHeader {
   readonly channelMap: ReadonlyArray<number>;
   readonly divider: number;
@@ -68,15 +77,18 @@ export interface VScopeDevice {
   readonly metadata: Effect.Effect<VScopeStaticMetadata>;
   readonly getTiming: Effect.Effect<VScopeTiming, VScopeDeviceError>;
   readonly setTiming: (timing: VScopeTiming) => Effect.Effect<VScopeTiming, VScopeDeviceError>;
+  readonly getStatus: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getState: Effect.Effect<VScopeStateValue, VScopeDeviceError>;
   readonly setState: (
     state: VScopeStateValue,
-  ) => Effect.Effect<VScopeStateValue, VScopeDeviceError>;
+  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly start: (
     options?: StateWaitOptions,
-  ) => Effect.Effect<VScopeStateValue, VScopeDeviceError>;
-  readonly stop: (options?: StateWaitOptions) => Effect.Effect<VScopeStateValue, VScopeDeviceError>;
-  readonly trigger: Effect.Effect<void, VScopeDeviceError>;
+  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
+  readonly stop: (
+    options?: StateWaitOptions,
+  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
+  readonly trigger: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getFrame: Effect.Effect<Float32Array, VScopeDeviceError>;
   readonly getSnapshotHeader: Effect.Effect<VScopeSnapshotHeader, VScopeDeviceError>;
   readonly snapshotBytes: (

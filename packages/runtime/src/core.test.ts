@@ -1,0 +1,528 @@
+import { describe, expect, test } from "bun:test";
+import {
+  DEFAULT_PREFERENCES,
+  DEFAULT_SETTINGS,
+  Persistence,
+  PollingSettings,
+  Preferences,
+  PreferencesState,
+  Settings,
+  SettingsState,
+  noRecovery,
+  type PersistenceService,
+} from "@vscope/persistence";
+import { Effect, Layer, Option, PubSub, Stream } from "effect";
+import type * as Scope from "effect/Scope";
+import {
+  VScopeDeviceAlreadyOpenError,
+  VScopeDeviceNotFoundError,
+  VScopeEndianness,
+  VScopeInvalidArgumentError,
+  VScopeSerial,
+  VScopeState,
+  type SerialPortInfo,
+  type VScopeControlStatus,
+  type VScopeDevice,
+  type VScopeDeviceInfo,
+  type VScopeSerialEvent,
+  type VScopeSerialService,
+  type VScopeState as VScopeStateValue,
+  type VScopeStaticMetadata,
+  type VScopeTiming,
+  type VScopeTrigger,
+} from "@vscope/serial";
+
+import { RuntimeCore, RuntimeCoreLive } from ".";
+
+describe("@vscope/runtime core", () => {
+  test("hydrates persistent state and lists ports through the serial service", async () => {
+    const result = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const snapshot = yield* core.getSnapshot;
+        const ports = yield* core.query({ type: "ports/list" });
+        return { snapshot, ports };
+      }),
+    );
+
+    expect(result.snapshot.settings).toEqual(testSettings);
+    expect(result.snapshot.preferences).toEqual(DEFAULT_PREFERENCES);
+    expect(result.snapshot.permissions.mode).toBe("empty");
+    expect(result.ports).toEqual({
+      type: "ports/list",
+      ports: [fakePort],
+    });
+  });
+
+  test("keeps runtime/core to one active device", async () => {
+    const result = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        const duplicate = yield* Effect.exit(
+          core.dispatch({
+            type: "devices/connect",
+            path: "/dev/tty.second",
+          }),
+        );
+        return { connected, duplicate };
+      }),
+      fakeSerialLayer([fakePort, secondPort]),
+    );
+
+    expect(result.connected.device?.path).toBe(fakePort.path);
+    expect(result.connected.permissions.mode).toBe("halted");
+    expect(result.duplicate._tag).toBe("Failure");
+  });
+
+  test("observes the run-trigger-capture lifecycle through status polling", async () => {
+    const result = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        const running = yield* core.dispatch({ type: "devices/run" });
+        const triggered = yield* core.dispatch({ type: "devices/trigger" });
+        yield* Effect.sleep("80 millis");
+        const captured = yield* core.getSnapshot;
+        return { running, triggered, captured };
+      }),
+    );
+
+    expect(result.running.device?.state).toBe(VScopeState.Running);
+    expect(result.running.device?.snapshotAvailability).toBe("not-ready");
+    expect(result.triggered.device?.requestedState).toBe(VScopeState.Acquiring);
+    expect(result.triggered.device?.intent?.status).toBe("pending");
+    expect(result.captured.device?.state).toBe(VScopeState.Halted);
+    expect(result.captured.device?.snapshotAvailability).toBe("ready");
+    expect(result.captured.device?.intent?.status).toBe("settled");
+  });
+
+  test("persists settings patches through the core dispatch boundary", async () => {
+    const snapshot = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        return yield* core.dispatch({
+          type: "settings/patch",
+          patch: { theme: "dark" },
+        });
+      }),
+    );
+
+    expect(snapshot.settings.theme).toBe("dark");
+  });
+});
+
+async function runWithCore<A, E>(
+  effect: Effect.Effect<A, E, RuntimeCore | Scope.Scope>,
+  serialLayer = fakeSerialLayer([fakePort]),
+): Promise<A> {
+  return await Effect.runPromise(
+    Effect.scoped(
+      effect.pipe(
+        Effect.provide(
+          RuntimeCoreLive.pipe(Layer.provide(Layer.mergeAll(fakePersistenceLayer(), serialLayer))),
+        ),
+      ),
+    ),
+  );
+}
+
+const fakePort: SerialPortInfo = {
+  path: "/dev/tty.vscope",
+  manufacturer: "vscope",
+  serialNumber: "test-serial",
+  pnpId: undefined,
+  locationId: undefined,
+  productId: "0001",
+  vendorId: "0002",
+};
+
+const secondPort: SerialPortInfo = {
+  path: "/dev/tty.second",
+  manufacturer: "vscope",
+  serialNumber: "test-serial-2",
+  pnpId: undefined,
+  locationId: undefined,
+  productId: "0001",
+  vendorId: "0002",
+};
+
+const fakeInfo: VScopeDeviceInfo = {
+  channelCount: 2,
+  bufferSize: 1000,
+  isrKHz: 20,
+  variableCount: 2,
+  rtCount: 2,
+  rtBufferCapacity: 16,
+  nameLength: 16,
+  endianness: VScopeEndianness.Little,
+  deviceName: "scope-a",
+};
+
+const fakeMetadata: VScopeStaticMetadata = {
+  info: fakeInfo,
+  variables: ["voltage", "current"],
+  rtLabels: ["kp", "ki"],
+  channelMap: [0, 1],
+};
+
+const fakeTiming: VScopeTiming = {
+  divider: 2,
+  preTrig: 10,
+};
+
+const fakeTrigger: VScopeTrigger = {
+  threshold: 0.5,
+  channel: 1,
+  mode: "rising",
+};
+
+const testSettings = Settings.make({
+  ...DEFAULT_SETTINGS,
+  polling: PollingSettings.make({
+    stateHz: 60,
+    frameHz: DEFAULT_SETTINGS.polling.frameHz,
+    frameTimeoutMs: DEFAULT_SETTINGS.polling.frameTimeoutMs,
+    crcRetryAttempts: DEFAULT_SETTINGS.polling.crcRetryAttempts,
+  }),
+});
+
+function fakePersistenceLayer() {
+  let settings = testSettings;
+  let preferences = DEFAULT_PREFERENCES;
+
+  const service: PersistenceService = {
+    path: "memory",
+    readSettings: Effect.sync(() =>
+      SettingsState.make({
+        settings,
+        recovery: noRecovery,
+      }),
+    ),
+    writeSettings: (nextSettings) =>
+      Effect.sync(() => {
+        settings = nextSettings;
+        return SettingsState.make({
+          settings,
+          recovery: noRecovery,
+        });
+      }),
+    patchSettings: (patch) =>
+      Effect.sync(() => {
+        settings = Settings.make({
+          theme: patch.theme ?? settings.theme,
+          defaultSerialConfig: patch.defaultSerialConfig ?? settings.defaultSerialConfig,
+          polling: patch.polling ?? settings.polling,
+          snapshots: patch.snapshots ?? settings.snapshots,
+          liveView: patch.liveView ?? settings.liveView,
+        });
+        return SettingsState.make({
+          settings,
+          recovery: noRecovery,
+        });
+      }),
+    resetSettings: Effect.sync(() => {
+      settings = DEFAULT_SETTINGS;
+      return SettingsState.make({
+        settings,
+        recovery: noRecovery,
+      });
+    }),
+    readPreferences: Effect.sync(() =>
+      PreferencesState.make({
+        preferences,
+        recovery: noRecovery,
+      }),
+    ),
+    writePreferences: (nextPreferences) =>
+      Effect.sync(() => {
+        preferences = nextPreferences;
+        return PreferencesState.make({
+          preferences,
+          recovery: noRecovery,
+        });
+      }),
+    patchPreferences: (patch) =>
+      Effect.sync(() => {
+        preferences = Preferences.make({
+          recentPortPaths: patch.recentPortPaths ?? preferences.recentPortPaths,
+          favoriteSnapshotIds: patch.favoriteSnapshotIds ?? preferences.favoriteSnapshotIds,
+          favoriteDeviceIds: patch.favoriteDeviceIds ?? preferences.favoriteDeviceIds,
+          showAdvancedControls: patch.showAdvancedControls ?? preferences.showAdvancedControls,
+        });
+        return PreferencesState.make({
+          preferences,
+          recovery: noRecovery,
+        });
+      }),
+    resetPreferences: Effect.sync(() => {
+      preferences = DEFAULT_PREFERENCES;
+      return PreferencesState.make({
+        preferences,
+        recovery: noRecovery,
+      });
+    }),
+    listSavedDevices: Effect.succeed([]),
+    getSavedDevice: () => Effect.succeed(Option.none()),
+    findSavedDeviceByIdentity: () => Effect.succeed(Option.none()),
+    upsertSavedDevice: () => Effect.die("fake persistence upsertSavedDevice is not implemented"),
+    forgetSavedDevice: () => Effect.void,
+    createSnapshot: () => Effect.die("fake persistence createSnapshot is not implemented"),
+    listSnapshots: () => Effect.succeed([]),
+    getSnapshot: () => Effect.succeed(Option.none()),
+    renameSnapshot: () => Effect.die("fake persistence renameSnapshot is not implemented"),
+    deleteSnapshot: () => Effect.void,
+    writeSnapshotSamples: () =>
+      Effect.die("fake persistence writeSnapshotSamples is not implemented"),
+    readSnapshotSamples: () => Effect.succeed(Option.none()),
+    createSnapshotComparison: () =>
+      Effect.die("fake persistence createSnapshotComparison is not implemented"),
+    listSnapshotComparisons: Effect.succeed([]),
+    renameSnapshotComparison: () =>
+      Effect.die("fake persistence renameSnapshotComparison is not implemented"),
+    deleteSnapshotComparison: () => Effect.void,
+  };
+
+  return Layer.succeed(Persistence, service);
+}
+
+function fakeSerialLayer(ports: ReadonlyArray<SerialPortInfo>) {
+  const devices = new Map<string, VScopeDevice>();
+  const portsByPath = new Map(ports.map((port) => [port.path, port]));
+
+  return Layer.effect(
+    VScopeSerial,
+    Effect.gen(function* () {
+      const events = yield* PubSub.bounded<VScopeSerialEvent>({
+        capacity: 64,
+        replay: 16,
+      });
+
+      const service: VScopeSerialService = {
+        listPorts: Effect.succeed(ports),
+        openDevice: (openOptions) =>
+          Effect.gen(function* () {
+            if (!portsByPath.has(openOptions.path)) {
+              return yield* Effect.die(`No fake port for ${openOptions.path}`);
+            }
+            if (devices.has(openOptions.path)) {
+              return yield* new VScopeDeviceAlreadyOpenError({ path: openOptions.path });
+            }
+
+            const device = fakeDevice(openOptions.path);
+            devices.set(openOptions.path, device);
+            yield* PubSub.publish(events, {
+              _tag: "DeviceOpened",
+              device: {
+                path: device.path,
+                deviceName: device.deviceName,
+                metadata: fakeMetadata,
+              },
+            });
+            return device;
+          }),
+        getDevice: (identifier) =>
+          Effect.flatMap(
+            Effect.sync(() => findDevice(devices, identifier)),
+            (device) =>
+              device
+                ? Effect.succeed(device)
+                : Effect.fail(new VScopeDeviceNotFoundError({ identifier })),
+          ),
+        getDeviceByPath: (path) =>
+          Effect.flatMap(
+            Effect.sync(() => devices.get(path)),
+            (device) =>
+              device
+                ? Effect.succeed(device)
+                : Effect.fail(new VScopeDeviceNotFoundError({ identifier: path })),
+          ),
+        removeDevice: (identifier) =>
+          Effect.gen(function* () {
+            const device = findDevice(devices, identifier);
+            if (!device) {
+              return yield* new VScopeDeviceNotFoundError({ identifier });
+            }
+            devices.delete(device.path);
+            yield* PubSub.publish(events, {
+              _tag: "DeviceRemoved",
+              device: {
+                path: device.path,
+                deviceName: device.deviceName,
+                metadata: fakeMetadata,
+              },
+            });
+          }),
+        closeAll: Effect.gen(function* () {
+          for (const device of devices.values()) {
+            yield* PubSub.publish(events, {
+              _tag: "DeviceRemoved",
+              device: {
+                path: device.path,
+                deviceName: device.deviceName,
+                metadata: fakeMetadata,
+              },
+            });
+          }
+          devices.clear();
+        }),
+        listDevices: Effect.sync(() =>
+          Array.from(devices.values()).map((device) => ({
+            path: device.path,
+            deviceName: device.deviceName,
+            metadata: fakeMetadata,
+          })),
+        ),
+        events: Stream.fromPubSub(events),
+      };
+
+      return service;
+    }),
+  );
+}
+
+function findDevice(
+  devices: ReadonlyMap<string, VScopeDevice>,
+  identifier: string,
+): VScopeDevice | undefined {
+  return (
+    devices.get(identifier) ??
+    Array.from(devices.values()).find((device) => device.deviceName === identifier)
+  );
+}
+
+function fakeDevice(path: string): VScopeDevice {
+  let state: VScopeStateValue = VScopeState.Halted;
+  let requestedState: VScopeStateValue = VScopeState.Halted;
+  let snapshotValid = false;
+  let acquisitionPollsRemaining = 0;
+  const rtValues = new Map<number, number>([
+    [0, 1],
+    [1, 2],
+  ]);
+
+  const status = (): VScopeControlStatus => ({
+    state,
+    requestedState,
+    snapshotValid,
+    requestPending: state !== requestedState,
+    triggerEnabled: fakeTrigger.mode !== "disabled",
+    flags:
+      (snapshotValid ? 1 : 0) |
+      (state !== requestedState ? 2 : 0) |
+      (fakeTrigger.mode !== "disabled" ? 4 : 0),
+  });
+
+  const advanceStatus = () => {
+    if (requestedState === VScopeState.Acquiring) {
+      if (state === VScopeState.Running) {
+        state = VScopeState.Acquiring;
+      }
+      if (acquisitionPollsRemaining > 0) {
+        acquisitionPollsRemaining -= 1;
+      }
+      if (acquisitionPollsRemaining === 0) {
+        state = VScopeState.Halted;
+        requestedState = VScopeState.Halted;
+        snapshotValid = true;
+      }
+    }
+  };
+
+  const failIfMisconfigured = (operation: string) =>
+    state === VScopeState.Misconfigured
+      ? Effect.fail(
+          new VScopeInvalidArgumentError({
+            path,
+            operation,
+            reason: "Device is misconfigured.",
+          }),
+        )
+      : Effect.void;
+
+  return {
+    path,
+    deviceName: fakeInfo.deviceName,
+    info: fakeMetadata.info,
+    metadata: Effect.succeed(fakeMetadata),
+    getTiming: failIfMisconfigured("getTiming").pipe(Effect.as(fakeTiming)),
+    setTiming: (timing) => failIfMisconfigured("setTiming").pipe(Effect.as(timing)),
+    getStatus: Effect.sync(() => {
+      advanceStatus();
+      return status();
+    }),
+    getState: Effect.sync(() => state),
+    setState: (nextState) =>
+      Effect.sync(() => {
+        requestedState = nextState;
+        state = nextState;
+        if (state === VScopeState.Running) {
+          snapshotValid = false;
+        }
+        return status();
+      }),
+    start: () =>
+      Effect.sync(() => {
+        requestedState = VScopeState.Running;
+        state = VScopeState.Running;
+        snapshotValid = false;
+        return status();
+      }),
+    stop: () =>
+      Effect.sync(() => {
+        requestedState = VScopeState.Halted;
+        state = VScopeState.Halted;
+        return status();
+      }),
+    trigger: Effect.gen(function* () {
+      if (state !== VScopeState.Running) {
+        return yield* new VScopeInvalidArgumentError({
+          path,
+          operation: "trigger",
+          reason: "Device must be running.",
+        });
+      }
+      requestedState = VScopeState.Acquiring;
+      acquisitionPollsRemaining = 2;
+      return status();
+    }),
+    getFrame: failIfMisconfigured("getFrame").pipe(Effect.as(Float32Array.from([1, 2, 3, 4]))),
+    getSnapshotHeader: Effect.succeed({
+      channelMap: fakeMetadata.channelMap,
+      divider: fakeTiming.divider,
+      preTrig: fakeTiming.preTrig,
+      trigger: fakeTrigger,
+      rtValues: [1, 2],
+      channelCount: fakeInfo.channelCount,
+      sampleCount: fakeInfo.bufferSize,
+      byteLength: fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
+    }),
+    snapshotBytes: () => Stream.empty,
+    collectSnapshotBytes: () => Effect.succeed(new Uint8Array()),
+    getVariableCatalog: Effect.succeed(fakeMetadata.variables),
+    getChannelMap: failIfMisconfigured("getChannelMap").pipe(Effect.as(fakeMetadata.channelMap)),
+    setChannelMap: (channel, variable) =>
+      failIfMisconfigured("setChannelMap").pipe(
+        Effect.as(
+          fakeMetadata.channelMap.map((current, index) => (index === channel ? variable : current)),
+        ),
+      ),
+    getRtLabels: Effect.succeed(fakeMetadata.rtLabels),
+    getRtValue: (index) => Effect.succeed(rtValues.get(index) ?? 0),
+    setRtValue: (index, value) =>
+      Effect.sync(() => {
+        rtValues.set(index, value);
+        return value;
+      }),
+    getTrigger: failIfMisconfigured("getTrigger").pipe(Effect.as(fakeTrigger)),
+    setTrigger: (trigger) => failIfMisconfigured("setTrigger").pipe(Effect.as(trigger)),
+    closed: Effect.never,
+    close: Effect.void,
+  };
+}

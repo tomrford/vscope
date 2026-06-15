@@ -22,6 +22,7 @@ import {
   VScopeFrameParser,
   VScopeMessageType,
   VSCOPE_MAX_PAYLOAD,
+  VScopeStatusFlag,
   VScopeState,
   type VScopeState as VScopeStateValue,
   VScopeStatus,
@@ -43,6 +44,7 @@ import type {
   OpenVScopeDeviceOptions,
   SnapshotBytesOptions,
   StateWaitOptions,
+  VScopeControlStatus,
   VScopeDevice,
   VScopeDeviceInfo,
   VScopeSnapshotHeader,
@@ -107,7 +109,8 @@ export const openVScopeDevice = (
     yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
     const info = yield* getInfo(transport.path, client);
     const littleEndian = info.endianness === VScopeEndianness.Little;
-    const state = yield* getState(transport.path, client);
+    const status = yield* getStatus(transport.path, client);
+    const state = status.state;
     const variables = yield* getNames(transport.path, client, {
       requestType: VScopeMessageType.GetVarList,
       expectedTotal: info.variableCount,
@@ -360,7 +363,8 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
   const path = transport.path;
 
   const getTimingEffect = getTiming(path, client, littleEndian);
-  const getStateEffect = getState(path, client);
+  const getStatusEffect = getStatus(path, client);
+  const getStateEffect = getStatusEffect.pipe(Effect.map((status) => status.state));
   const getSnapshotHeaderEffect = getSnapshotHeader(path, client, info, littleEndian);
   const getVariableCatalogEffect = getNames(path, client, {
     requestType: VScopeMessageType.GetVarList,
@@ -379,12 +383,13 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
       Effect.andThen(
         client
           .request(VScopeMessageType.SetState, VScopeMessageType.SetState, Uint8Array.of(state))
-          .pipe(Effect.map((payload) => decodeState(path, VScopeMessageType.SetState, payload))),
+          .pipe(Effect.map((payload) => decodeStatus(path, VScopeMessageType.SetState, payload))),
       ),
+      catchDecode(path, VScopeMessageType.SetState),
     );
 
   const waitForState = (state: VScopeStateValue, options?: StateWaitOptions) =>
-    pollState(path, getStateEffect, state, options);
+    pollStatus(path, getStatusEffect, state, options);
 
   const setChannelMap = (channel: number, variable: number) =>
     validateChannelMap(path, info, channel, variable).pipe(
@@ -448,6 +453,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     metadata: Ref.get(metadataRef),
     getTiming: getTimingEffect,
     setTiming: (timing) => setTiming(path, client, info, littleEndian, timing),
+    getStatus: getStatusEffect,
     getState: getStateEffect,
     setState,
     start: (options) =>
@@ -456,9 +462,10 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
       ),
     stop: (options) =>
       setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
-    trigger: client
-      .request(VScopeMessageType.Trigger, VScopeMessageType.Trigger)
-      .pipe(Effect.asVoid),
+    trigger: client.request(VScopeMessageType.Trigger, VScopeMessageType.Trigger).pipe(
+      Effect.map((payload) => decodeStatus(path, VScopeMessageType.Trigger, payload)),
+      catchDecode(path, VScopeMessageType.Trigger),
+    ),
     getFrame: getFrame(path, client, info, littleEndian),
     getSnapshotHeader: getSnapshotHeaderEffect,
     snapshotBytes,
@@ -568,13 +575,14 @@ const setTiming = (
     catchDecode(path, VScopeMessageType.SetTiming),
   );
 
-const getState = (
+const getStatus = (
   path: string,
   client: VScopeClient,
-): Effect.Effect<VScopeStateValue, VScopeDeviceError> =>
-  client
-    .request(VScopeMessageType.GetState, VScopeMessageType.GetState)
-    .pipe(Effect.map((payload) => decodeState(path, VScopeMessageType.GetState, payload)));
+): Effect.Effect<VScopeControlStatus, VScopeDeviceError> =>
+  client.request(VScopeMessageType.GetStatus, VScopeMessageType.GetStatus).pipe(
+    Effect.map((payload) => decodeStatus(path, VScopeMessageType.GetStatus, payload)),
+    catchDecode(path, VScopeMessageType.GetStatus),
+  );
 
 const getFrame = (
   path: string,
@@ -808,19 +816,19 @@ const setTrigger = (
     return decodeTrigger(path, VScopeMessageType.SetTrigger, response, littleEndian);
   }).pipe(catchDecode(path, VScopeMessageType.SetTrigger));
 
-const pollState = (
+const pollStatus = (
   path: string,
-  getStateEffect: Effect.Effect<VScopeStateValue, VScopeDeviceError>,
+  getStatusEffect: Effect.Effect<VScopeControlStatus, VScopeDeviceError>,
   target: VScopeStateValue,
   options: StateWaitOptions = {},
-): Effect.Effect<VScopeStateValue, VScopeDeviceError> => {
+): Effect.Effect<VScopeControlStatus, VScopeDeviceError> => {
   const timeoutMillis = options.timeoutMillis ?? 2000;
   const pollIntervalMillis = options.pollIntervalMillis ?? 20;
 
-  const loop: Effect.Effect<VScopeStateValue, VScopeDeviceError> = Effect.gen(function* () {
-    const state = yield* getStateEffect;
-    if (state === target) {
-      return state;
+  const loop: Effect.Effect<VScopeControlStatus, VScopeDeviceError> = Effect.gen(function* () {
+    const status = yield* getStatusEffect;
+    if (status.state === target) {
+      return status;
     }
 
     yield* Effect.sleep(`${pollIntervalMillis} millis`);
@@ -834,7 +842,7 @@ const pollState = (
         Effect.fail(
           new VScopeResponseTimeoutError({
             path,
-            requestType: VScopeMessageType.GetState,
+            requestType: VScopeMessageType.GetStatus,
             timeoutMillis,
           }),
         ),
@@ -842,13 +850,15 @@ const pollState = (
   );
 };
 
-const decodeState = (
+const decodeStatus = (
   path: string,
   messageType: VScopeMessageType,
   payload: Uint8Array,
-): VScopeStateValue => {
-  expectLength(path, messageType, payload, 1);
+): VScopeControlStatus => {
+  expectLength(path, messageType, payload, 3);
   const state = payload[0];
+  const requestedState = payload[1];
+  const flags = payload[2];
   if (state > VScopeState.Misconfigured) {
     throw new VScopeDecodeError({
       path,
@@ -856,7 +866,21 @@ const decodeState = (
       reason: `Unknown state ${state}`,
     });
   }
-  return state as VScopeStateValue;
+  if (requestedState > VScopeState.Acquiring) {
+    throw new VScopeDecodeError({
+      path,
+      messageType,
+      reason: `Unknown requested state ${requestedState}`,
+    });
+  }
+  return {
+    state: state as VScopeStateValue,
+    requestedState: requestedState as VScopeStateValue,
+    snapshotValid: (flags & VScopeStatusFlag.SnapshotValid) !== 0,
+    requestPending: (flags & VScopeStatusFlag.RequestPending) !== 0,
+    triggerEnabled: (flags & VScopeStatusFlag.TriggerEnabled) !== 0,
+    flags,
+  };
 };
 
 const decodeSetChannelMap = (

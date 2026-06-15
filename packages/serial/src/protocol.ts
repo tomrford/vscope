@@ -43,11 +43,19 @@ export const VScopeStatus = {
 
 export type VScopeStatus = (typeof VScopeStatus)[keyof typeof VScopeStatus];
 
+export const VScopeStatusFlag = {
+  SnapshotValid: 1 << 0,
+  RequestPending: 1 << 1,
+  TriggerEnabled: 1 << 2,
+} as const;
+
+export type VScopeStatusFlag = (typeof VScopeStatusFlag)[keyof typeof VScopeStatusFlag];
+
 export const VScopeMessageType = {
   GetInfo: 0x01,
   GetTiming: 0x02,
   SetTiming: 0x03,
-  GetState: 0x04,
+  GetStatus: 0x04,
   SetState: 0x05,
   Trigger: 0x06,
   GetFrame: 0x07,

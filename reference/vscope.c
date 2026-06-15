@@ -21,6 +21,9 @@
 #define VSCOPE_FRAME_TIMEOUT_US 10000
 #define VSCOPE_RT_BUFFER_LEN 16
 #define VSCOPE_SYNC_BYTE (uint8_t)(0xC8)
+#define VSCOPE_STATUS_FLAG_SNAPSHOT_VALID (uint8_t)(1U << 0U)
+#define VSCOPE_STATUS_FLAG_REQUEST_PENDING (uint8_t)(1U << 1U)
+#define VSCOPE_STATUS_FLAG_TRIGGER_ENABLED (uint8_t)(1U << 2U)
 
 // State enum for the state machine in the ISR function
 typedef enum {
@@ -51,7 +54,7 @@ typedef enum {
     VSCOPE_MSG_GET_INFO = 0x01,
     VSCOPE_MSG_GET_TIMING = 0x02,
     VSCOPE_MSG_SET_TIMING = 0x03,
-    VSCOPE_MSG_GET_STATE = 0x04,
+    VSCOPE_MSG_GET_STATUS = 0x04,
     VSCOPE_MSG_SET_STATE = 0x05,
     VSCOPE_MSG_TRIGGER = 0x06,
     VSCOPE_MSG_GET_FRAME = 0x07,
@@ -345,16 +348,32 @@ static void vscope_handle_set_timing(const uint8_t* payload, uint16_t payload_le
     vscope_send_timing(VSCOPE_MSG_SET_TIMING);
 }
 
-// STATE
+// STATUS + STATE
 
-static void vscope_send_state(uint8_t type) {
-    uint8_t data[1];
+static uint8_t vscope_status_flags(void) {
+    uint8_t flags = 0U;
+    if (snapshot_valid) {
+        flags = (uint8_t)(flags | VSCOPE_STATUS_FLAG_SNAPSHOT_VALID);
+    }
+    if (vscope_state != vscope_request) {
+        flags = (uint8_t)(flags | VSCOPE_STATUS_FLAG_REQUEST_PENDING);
+    }
+    if (vscope_trigger_mode != VSCOPE_TRG_DISABLED) {
+        flags = (uint8_t)(flags | VSCOPE_STATUS_FLAG_TRIGGER_ENABLED);
+    }
+    return flags;
+}
+
+static void vscope_send_status(uint8_t type) {
+    uint8_t data[3];
     data[0] = (uint8_t)vscope_state;
+    data[1] = (uint8_t)vscope_request;
+    data[2] = vscope_status_flags();
     vscope_send_payload(type, data, sizeof(data));
 }
 
-static void vscope_handle_get_state(void) {
-    vscope_send_state(VSCOPE_MSG_GET_STATE);
+static void vscope_handle_get_status(void) {
+    vscope_send_status(VSCOPE_MSG_GET_STATUS);
 }
 
 static void vscope_handle_set_state(const uint8_t* payload, uint16_t payload_len) {
@@ -369,15 +388,30 @@ static void vscope_handle_set_state(const uint8_t* payload, uint16_t payload_len
         return;
     }
 
+    if (requested == VSCOPE_RUNNING && vscope_state != VSCOPE_HALTED && vscope_state != VSCOPE_RUNNING) {
+        vscope_send_error(VSCOPE_ERR_NOT_READY);
+        return;
+    }
+
+    if (requested == VSCOPE_ACQUIRING && vscope_state != VSCOPE_RUNNING) {
+        vscope_send_error(VSCOPE_ERR_NOT_READY);
+        return;
+    }
+
     vscope_request = (VscopeState)requested;
-    vscope_send_state(VSCOPE_MSG_SET_STATE);
+    vscope_send_status(VSCOPE_MSG_SET_STATE);
 }
 
 // TRIGGER
 
 static void vscope_handle_trigger(void) {
+    if (vscope_state != VSCOPE_RUNNING) {
+        vscope_send_error(VSCOPE_ERR_NOT_READY);
+        return;
+    }
+
     vscopeTrigger();
-    vscope_send_payload(VSCOPE_MSG_TRIGGER, NULL, 0U);
+    vscope_send_status(VSCOPE_MSG_TRIGGER);
 }
 
 // FRAME
@@ -659,7 +693,7 @@ static void vscope_handle_set_trigger(const uint8_t* payload, uint16_t payload_l
 static void vscope_handle_frame(uint8_t type, const uint8_t* payload, uint16_t payload_len) {
     // When misconfigured, only allow diagnostic queries
     if (vscope_state == VSCOPE_MISCONFIGURED) {
-        if (type != VSCOPE_MSG_GET_INFO && type != VSCOPE_MSG_GET_STATE && type != VSCOPE_MSG_GET_VAR_LIST) {
+        if (type != VSCOPE_MSG_GET_INFO && type != VSCOPE_MSG_GET_STATUS && type != VSCOPE_MSG_GET_VAR_LIST) {
             vscope_send_error(VSCOPE_ERR_NOT_READY);
             return;
         }
@@ -683,11 +717,11 @@ static void vscope_handle_frame(uint8_t type, const uint8_t* payload, uint16_t p
         case VSCOPE_MSG_SET_TIMING:
             vscope_handle_set_timing(payload, payload_len);
             break;
-        case VSCOPE_MSG_GET_STATE:
+        case VSCOPE_MSG_GET_STATUS:
             if (payload_len != 0U) {
                 vscope_send_error(VSCOPE_ERR_BAD_LEN);
             } else {
-                vscope_handle_get_state();
+                vscope_handle_get_status();
             }
             break;
         case VSCOPE_MSG_SET_STATE:
@@ -958,6 +992,7 @@ void vscopeAcquire(void) {
                 vscope_capture_snapshot_meta();
                 if (vscope_acq_time == 0U) {
                     vscope_state = VSCOPE_HALTED;
+                    vscope_request = VSCOPE_HALTED;
                     vscope_first_element = vscope_index;
                     snapshot_valid = true;
                 } else {
@@ -970,6 +1005,7 @@ void vscopeAcquire(void) {
         case VSCOPE_ACQUIRING:
             if (run_index == vscope_acq_time) {
                 vscope_state = VSCOPE_HALTED;
+                vscope_request = VSCOPE_HALTED;
                 vscope_first_element = vscope_index;
                 snapshot_valid = true;
             } else {

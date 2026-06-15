@@ -19,6 +19,7 @@ import {
   VScopeSerial,
   VScopeSessionClosedError,
   VScopeState,
+  VScopeStatusFlag,
   VScopeStatus,
   VScopeTransportError,
   VScopeTriggerMode,
@@ -41,7 +42,7 @@ import { readF32, readU16, VScopeEndianness as Endianness } from "./protocol";
 describe("@vscope/serial protocol", () => {
   test("encodes and parses split C-compatible frames", () => {
     const encoded = encodeVScopeFrame({
-      type: VScopeMessageType.GetState,
+      type: VScopeMessageType.GetStatus,
       payload: Uint8Array.of(1, 2, 3),
     });
     const parser = new VScopeFrameParser();
@@ -51,7 +52,7 @@ describe("@vscope/serial protocol", () => {
 
     expect(frames).toEqual([
       {
-        type: VScopeMessageType.GetState,
+        type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
       },
     ]);
@@ -59,7 +60,7 @@ describe("@vscope/serial protocol", () => {
 
   test("resets stale partial frames using the firmware RX timeout", () => {
     const encoded = encodeVScopeFrame({
-      type: VScopeMessageType.GetState,
+      type: VScopeMessageType.GetStatus,
       payload: Uint8Array.of(1, 2, 3),
     });
     const parser = new VScopeFrameParser();
@@ -70,7 +71,7 @@ describe("@vscope/serial protocol", () => {
 
     expect(frames).toEqual([
       {
-        type: VScopeMessageType.GetState,
+        type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
       },
     ]);
@@ -621,6 +622,9 @@ interface FakeFirmwareOptions {
   readonly closeAfterOpenMillis?: number | undefined;
   readonly errorAfterOpenMillis?: number | undefined;
   readonly frameResponseDelayMillis?: number | undefined;
+  readonly stateTransitionStatusReads?: number | undefined;
+  readonly acquisitionStatusReads?: number | undefined;
+  readonly snapshotValid?: boolean | undefined;
 }
 
 const fakeFirmware = (options: FakeFirmwareOptions): FakeFirmware => new FakeFirmware(options);
@@ -760,10 +764,16 @@ class FakeFirmware {
   readonly closeAfterOpenMillis: number | undefined;
   readonly errorAfterOpenMillis: number | undefined;
   readonly frameResponseDelayMillis: number;
+  readonly stateTransitionStatusReads: number;
+  readonly acquisitionStatusReads: number;
   closeAttempts = 0;
   #closeFailures: number;
   timing = { divider: 1, preTrig: 0 };
   state: VScopeStateValue = VScopeState.Halted;
+  requestedState: VScopeStateValue = VScopeState.Halted;
+  stateTransitionReadsRemaining = 0;
+  acquisitionReadsRemaining = 0;
+  snapshotValid: boolean;
   channelMap = [0, 1, 2, 3, 4];
   trigger: { threshold: number; channel: number; mode: VScopeTriggerModeValue } = {
     threshold: 0,
@@ -785,6 +795,9 @@ class FakeFirmware {
     this.closeAfterOpenMillis = options.closeAfterOpenMillis;
     this.errorAfterOpenMillis = options.errorAfterOpenMillis;
     this.frameResponseDelayMillis = options.frameResponseDelayMillis ?? 0;
+    this.stateTransitionStatusReads = options.stateTransitionStatusReads ?? 1;
+    this.acquisitionStatusReads = options.acquisitionStatusReads ?? 1;
+    this.snapshotValid = options.snapshotValid ?? true;
     this.#closeFailures = options.closeFailures ?? 0;
   }
 
@@ -820,14 +833,18 @@ class FakeFirmware {
           ),
         };
         return this.response(type, this.timingPayload());
-      case VScopeMessageType.GetState:
-        return this.response(type, Uint8Array.of(this.state));
+      case VScopeMessageType.GetStatus:
+        this.advanceStatus();
+        return this.response(type, this.statusPayload());
       case VScopeMessageType.SetState:
-        this.state = payload[0] as VScopeStateValue;
-        return this.response(type, Uint8Array.of(this.state));
+        return this.setRequestedState(payload[0] as VScopeStateValue, type);
       case VScopeMessageType.Trigger:
-        this.state = VScopeState.Acquiring;
-        return this.response(type, new Uint8Array());
+        if (this.state !== VScopeState.Running) {
+          return this.error(VScopeStatus.NotReady);
+        }
+        this.requestedState = VScopeState.Acquiring;
+        this.stateTransitionReadsRemaining = this.stateTransitionStatusReads;
+        return this.response(type, this.statusPayload());
       case VScopeMessageType.GetFrame:
         return this.response(
           type,
@@ -835,6 +852,9 @@ class FakeFirmware {
           this.frameResponseDelayMillis,
         );
       case VScopeMessageType.GetSnapshotHeader:
+        if (!this.snapshotValid) {
+          return this.error(VScopeStatus.NotReady);
+        }
         return this.response(type, this.snapshotHeaderPayload());
       case VScopeMessageType.GetSnapshotData:
         return this.snapshotData(payload);
@@ -877,6 +897,63 @@ class FakeFirmware {
       default:
         return this.error(VScopeStatus.BadParam);
     }
+  }
+
+  private setRequestedState(
+    requestedState: VScopeStateValue,
+    responseType: VScopeMessageType,
+  ): FakeFirmwareResponse {
+    if (requestedState === VScopeState.Running) {
+      if (this.state !== VScopeState.Halted && this.state !== VScopeState.Running) {
+        return this.error(VScopeStatus.NotReady);
+      }
+    }
+
+    if (requestedState === VScopeState.Acquiring && this.state !== VScopeState.Running) {
+      return this.error(VScopeStatus.NotReady);
+    }
+
+    this.requestedState = requestedState;
+    this.stateTransitionReadsRemaining =
+      requestedState === this.state ? 0 : this.stateTransitionStatusReads;
+    return this.response(responseType, this.statusPayload());
+  }
+
+  private advanceStatus(): void {
+    if (this.stateTransitionReadsRemaining > 0) {
+      this.stateTransitionReadsRemaining -= 1;
+      if (this.stateTransitionReadsRemaining === 0) {
+        if (this.requestedState === VScopeState.Running) {
+          this.state = VScopeState.Running;
+          this.snapshotValid = false;
+        } else if (this.requestedState === VScopeState.Halted) {
+          this.state = VScopeState.Halted;
+        } else {
+          this.state = VScopeState.Acquiring;
+          this.acquisitionReadsRemaining = this.acquisitionStatusReads;
+        }
+      }
+      return;
+    }
+
+    if (this.state === VScopeState.Acquiring) {
+      if (this.acquisitionReadsRemaining > 0) {
+        this.acquisitionReadsRemaining -= 1;
+      }
+      if (this.acquisitionReadsRemaining === 0) {
+        this.state = VScopeState.Halted;
+        this.requestedState = VScopeState.Halted;
+        this.snapshotValid = true;
+      }
+    }
+  }
+
+  private statusPayload(): Uint8Array {
+    const flags =
+      (this.snapshotValid ? VScopeStatusFlag.SnapshotValid : 0) |
+      (this.state !== this.requestedState ? VScopeStatusFlag.RequestPending : 0) |
+      (this.trigger.mode !== VScopeTriggerMode.Disabled ? VScopeStatusFlag.TriggerEnabled : 0);
+    return Uint8Array.of(this.state, this.requestedState, flags);
   }
 
   private response(
