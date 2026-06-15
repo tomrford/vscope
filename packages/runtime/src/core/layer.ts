@@ -173,8 +173,7 @@ const makeRuntimeCore = Effect.gen(function* () {
 
       const now = timestamp();
       const intent =
-        intentStatus === "settled" ||
-        (!status.requestPending && snapshot.device.intent?.status === "pending")
+        intentStatus === "settled" || shouldSettleIntentFromStatus(snapshot.device.intent, status)
           ? settleIntent(snapshot.device.intent, "settled", now, null)
           : snapshot.device.intent;
 
@@ -420,11 +419,8 @@ const makeRuntimeCore = Effect.gen(function* () {
     ).pipe(
       Stream.runForEach(() =>
         device.getFrame.pipe(
-          Effect.timeout(`${polling.frameTimeoutMs} millis`),
           Effect.flatMap((frame) => applyFrame(device.path, frame)),
-          Effect.mapError(
-            (cause) => new RuntimeCoreSerialError({ operation: "devices/frame", cause }),
-          ),
+          Effect.catch(() => Effect.void),
         ),
       ),
     );
@@ -934,6 +930,15 @@ function settleIntent(
     settledAt: now,
     error,
   };
+}
+
+function shouldSettleIntentFromStatus(
+  intent: DeviceIntent | null,
+  status: VScopeControlStatus,
+): boolean {
+  return (
+    !status.requestPending && intent?.status === "pending" && intent.kind !== "captureSnapshot"
+  );
 }
 
 function snapshotAvailability(status: VScopeControlStatus): SnapshotAvailability {

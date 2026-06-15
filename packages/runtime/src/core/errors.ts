@@ -1,4 +1,4 @@
-import { Cause, Data } from "effect";
+import { Data } from "effect";
 import type { PersistenceError } from "@vscope/persistence";
 import type {
   SerialCloseError,
@@ -17,7 +17,6 @@ export class RuntimeCorePersistenceError extends Data.TaggedError("RuntimeCorePe
 export class RuntimeCoreSerialError extends Data.TaggedError("RuntimeCoreSerialError")<{
   readonly operation: string;
   readonly cause:
-    | Cause.TimeoutError
     | SerialCloseError
     | SerialListError
     | SerialOpenError

@@ -18,7 +18,7 @@ import {
   type PersistenceService,
   type SnapshotListQuery,
 } from "@vscope/persistence";
-import { Effect, Layer, Option, PubSub, Schema, Stream } from "effect";
+import { Effect, Fiber, Layer, Option, PubSub, Schema, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import {
   VScopeDeviceAlreadyOpenError,
@@ -129,6 +129,27 @@ describe("@vscope/runtime core", () => {
     expect(snapshot.refreshed.device?.rtValues.get(0)).toBe(1);
   });
 
+  test("keeps the device connected when frame polling fails", async () => {
+    const snapshot = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* Effect.sleep("80 millis");
+        const refreshed = yield* core.getSnapshot;
+        return { connected, refreshed };
+      }),
+      fakeSerialLayer([fakePort], { device: { failFramesAfter: 1 } }),
+    );
+
+    expect(snapshot.connected.device?.frame?.[0]).toBe(1);
+    expect(snapshot.refreshed.device?.connectionStatus).toBe("connected");
+    expect(snapshot.refreshed.device?.frame?.[0]).toBe(1);
+    expect(snapshot.refreshed.warnings).toEqual([]);
+  });
+
   test("captures ready snapshots into persistence and reads samples lazily", async () => {
     const result = await runWithCore(
       Effect.gen(function* () {
@@ -170,6 +191,38 @@ describe("@vscope/runtime core", () => {
     expect(result.samples.samples?.data.byteLength).toBe(
       fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
     );
+  });
+
+  test("keeps snapshot capture intent pending until download completes", async () => {
+    const result = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        yield* Effect.sleep("80 millis");
+        const capture = yield* core
+          .dispatch({
+            type: "snapshots/capture",
+            label: "Slow trace",
+          })
+          .pipe(Effect.forkScoped);
+        yield* Effect.sleep("50 millis");
+        const during = yield* core.getSnapshot;
+        const captured = yield* Fiber.join(capture);
+        return { during, captured };
+      }),
+      fakeSerialLayer([fakePort], { device: { collectSnapshotDelayMillis: 150 } }),
+    );
+
+    expect(result.during.device?.intent?.kind).toBe("captureSnapshot");
+    expect(result.during.device?.intent?.status).toBe("pending");
+    expect(result.during.permissions.captureSnapshot).toBe(false);
+    expect(result.captured.device?.intent?.kind).toBe("captureSnapshot");
+    expect(result.captured.device?.intent?.status).toBe("settled");
   });
 
   test("persists settings patches through the core dispatch boundary", async () => {
@@ -438,7 +491,19 @@ function snapshotSampleBytes(): Uint8Array {
   return new Uint8Array(samples.buffer.slice(0));
 }
 
-function fakeSerialLayer(ports: ReadonlyArray<SerialPortInfo>) {
+interface FakeSerialLayerOptions {
+  readonly device?: FakeDeviceOptions | undefined;
+}
+
+interface FakeDeviceOptions {
+  readonly failFramesAfter?: number | undefined;
+  readonly collectSnapshotDelayMillis?: number | undefined;
+}
+
+function fakeSerialLayer(
+  ports: ReadonlyArray<SerialPortInfo>,
+  options: FakeSerialLayerOptions = {},
+) {
   const devices = new Map<string, VScopeDevice>();
   const portsByPath = new Map(ports.map((port) => [port.path, port]));
 
@@ -461,7 +526,7 @@ function fakeSerialLayer(ports: ReadonlyArray<SerialPortInfo>) {
               return yield* new VScopeDeviceAlreadyOpenError({ path: openOptions.path });
             }
 
-            const device = fakeDevice(openOptions.path);
+            const device = fakeDevice(openOptions.path, options.device);
             devices.set(openOptions.path, device);
             yield* PubSub.publish(events, {
               _tag: "DeviceOpened",
@@ -543,7 +608,7 @@ function findDevice(
   );
 }
 
-function fakeDevice(path: string): VScopeDevice {
+function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice {
   let state: VScopeStateValue = VScopeState.Halted;
   let requestedState: VScopeStateValue = VScopeState.Halted;
   let snapshotValid = false;
@@ -641,7 +706,15 @@ function fakeDevice(path: string): VScopeDevice {
     }),
     getFrame: failIfMisconfigured("getFrame").pipe(
       Effect.andThen(
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          if (options.failFramesAfter !== undefined && frameReads >= options.failFramesAfter) {
+            return yield* new VScopeInvalidArgumentError({
+              path,
+              operation: "getFrame",
+              reason: "Frame read failed.",
+            });
+          }
+
           frameReads += 1;
           return Float32Array.from([frameReads, 2, 3, 4]);
         }),
@@ -658,7 +731,12 @@ function fakeDevice(path: string): VScopeDevice {
       byteLength: fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
     }),
     snapshotBytes: () => Stream.fromIterable([snapshotSampleBytes()]),
-    collectSnapshotBytes: () => Effect.succeed(snapshotSampleBytes()),
+    collectSnapshotBytes: () =>
+      options.collectSnapshotDelayMillis === undefined
+        ? Effect.succeed(snapshotSampleBytes())
+        : Effect.sleep(`${options.collectSnapshotDelayMillis} millis`).pipe(
+            Effect.as(snapshotSampleBytes()),
+          ),
     getVariableCatalog: Effect.succeed(fakeMetadata.variables),
     getChannelMap: failIfMisconfigured("getChannelMap").pipe(Effect.as(fakeMetadata.channelMap)),
     setChannelMap: (channel, variable) =>
