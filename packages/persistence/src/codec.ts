@@ -46,9 +46,7 @@ export const SavedDeviceRow = Schema.Struct({
 export const SnapshotRow = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
-  device_id: Schema.NullOr(Schema.String),
   device_name: Schema.String,
-  port_path: Schema.NullOr(Schema.String),
   channel_count: Schema.Number,
   sample_count: Schema.Number,
   sample_format: Schema.String,

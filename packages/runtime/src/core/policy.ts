@@ -23,6 +23,7 @@ export interface CommandPermissions {
   readonly trigger: boolean;
   readonly run: boolean;
   readonly stop: boolean;
+  readonly captureSnapshot: boolean;
 }
 
 export type CommandDecision =
@@ -90,11 +91,20 @@ export function permissionsForMode(mode: ControlMode): CommandPermissions {
     trigger: running,
     run: halted,
     stop: connected,
+    captureSnapshot: false,
   };
 }
 
 export function permissionsForDevice(device: CoreDevice | null): CommandPermissions {
-  return permissionsForMode(controlModeForDevice(device));
+  const permissions = permissionsForMode(controlModeForDevice(device));
+  return {
+    ...permissions,
+    captureSnapshot:
+      device?.connectionStatus === "connected" &&
+      device.snapshotAvailability === "ready" &&
+      !device.requestPending &&
+      device.intent?.status !== "pending",
+  };
 }
 
 export function decideDeviceControl(

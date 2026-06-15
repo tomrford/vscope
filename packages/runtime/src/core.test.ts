@@ -3,15 +3,22 @@ import {
   DEFAULT_PREFERENCES,
   DEFAULT_SETTINGS,
   Persistence,
+  PersistentId,
   PollingSettings,
   Preferences,
   PreferencesState,
+  SNAPSHOT_SAMPLE_FORMAT,
   Settings,
   SettingsState,
+  SnapshotRecord,
+  SnapshotSampleBlob,
+  SnapshotSampleDescriptor,
+  Timestamp,
   noRecovery,
   type PersistenceService,
+  type SnapshotListQuery,
 } from "@vscope/persistence";
-import { Effect, Layer, Option, PubSub, Stream } from "effect";
+import { Effect, Layer, Option, PubSub, Schema, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import {
   VScopeDeviceAlreadyOpenError,
@@ -101,6 +108,68 @@ describe("@vscope/runtime core", () => {
     expect(result.captured.device?.state).toBe(VScopeState.Halted);
     expect(result.captured.device?.snapshotAvailability).toBe("ready");
     expect(result.captured.device?.intent?.status).toBe("settled");
+  });
+
+  test("refreshes live frames without polling RT values", async () => {
+    const snapshot = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* Effect.sleep("80 millis");
+        const refreshed = yield* core.getSnapshot;
+        return { connected, refreshed };
+      }),
+    );
+
+    expect(snapshot.connected.device?.frame?.[0]).toBe(1);
+    expect(snapshot.refreshed.device?.frame?.[0]).toBeGreaterThan(1);
+    expect(snapshot.refreshed.device?.rtValues.get(0)).toBe(1);
+  });
+
+  test("captures ready snapshots into persistence and reads samples lazily", async () => {
+    const result = await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        yield* Effect.sleep("80 millis");
+        const captured = yield* core.dispatch({
+          type: "snapshots/capture",
+          label: "Boot trace",
+        });
+        const listed = yield* core.query({ type: "snapshots/list" });
+        if (listed.type !== "snapshots/list") {
+          throw new Error("Expected snapshots/list result");
+        }
+        const samples = yield* core.query({
+          type: "snapshots/readSamples",
+          id: listed.snapshots[0].id,
+        });
+        return { captured, listed, samples };
+      }),
+    );
+
+    expect(result.captured.snapshots.length).toBe(1);
+    expect(result.captured.device?.intent?.kind).toBe("captureSnapshot");
+    expect(result.captured.device?.intent?.status).toBe("settled");
+    expect(result.listed.snapshots[0].label).toBe("Boot trace");
+    expect(result.listed.snapshots[0].device).toMatchObject({
+      name: fakeInfo.deviceName,
+    });
+    expect(result.listed.snapshots[0].sample.stored).toBe(true);
+    if (result.samples.type !== "snapshots/readSamples") {
+      throw new Error("Expected snapshots/readSamples result");
+    }
+    expect(result.samples.samples?.data.byteLength).toBe(
+      fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
+    );
   });
 
   test("persists settings patches through the core dispatch boundary", async () => {
@@ -196,6 +265,9 @@ const testSettings = Settings.make({
 function fakePersistenceLayer() {
   let settings = testSettings;
   let preferences = DEFAULT_PREFERENCES;
+  const snapshots: Array<SnapshotRecord> = [];
+  const snapshotSamples = new Map<PersistentId, SnapshotSampleBlob>();
+  let snapshotCounter = 0;
 
   const service: PersistenceService = {
     path: "memory",
@@ -273,14 +345,65 @@ function fakePersistenceLayer() {
     findSavedDeviceByIdentity: () => Effect.succeed(Option.none()),
     upsertSavedDevice: () => Effect.die("fake persistence upsertSavedDevice is not implemented"),
     forgetSavedDevice: () => Effect.void,
-    createSnapshot: () => Effect.die("fake persistence createSnapshot is not implemented"),
-    listSnapshots: () => Effect.succeed([]),
-    getSnapshot: () => Effect.succeed(Option.none()),
+    createSnapshot: (draft, samples) =>
+      Effect.sync(() => {
+        const id = persistentId(`snapshot:${(snapshotCounter += 1)}`);
+        const now = timestamp();
+        const record = SnapshotRecord.make({
+          id,
+          label: draft.label,
+          device: draft.device,
+          sample: SnapshotSampleDescriptor.make({
+            format: SNAPSHOT_SAMPLE_FORMAT,
+            channelCount: draft.channelCount,
+            sampleCount: draft.sampleCount,
+            byteLength: draft.channelCount * draft.sampleCount * Float32Array.BYTES_PER_ELEMENT,
+            stored: samples !== undefined,
+          }),
+          sampleRateHz: draft.sampleRateHz,
+          divider: draft.divider,
+          preTriggerSamples: draft.preTriggerSamples,
+          channelMap: draft.channelMap,
+          trigger: draft.trigger,
+          rtValues: draft.rtValues,
+          metadata: draft.metadata,
+          createdAt: now,
+          updatedAt: now,
+        });
+        snapshots.unshift(record);
+
+        if (samples) {
+          snapshotSamples.set(
+            id,
+            SnapshotSampleBlob.make({
+              snapshotId: id,
+              format: samples.format,
+              channelCount: record.sample.channelCount,
+              sampleCount: record.sample.sampleCount,
+              byteLength: samples.data.byteLength,
+              data: samples.data,
+              updatedAt: now,
+            }),
+          );
+        }
+
+        return record;
+      }),
+    listSnapshots: (query) => Effect.sync(() => filterSnapshots(snapshots, query)),
+    getSnapshot: (id) =>
+      Effect.sync(() => {
+        const snapshot = snapshots.find((candidate) => candidate.id === id);
+        return snapshot ? Option.some(snapshot) : Option.none();
+      }),
     renameSnapshot: () => Effect.die("fake persistence renameSnapshot is not implemented"),
     deleteSnapshot: () => Effect.void,
     writeSnapshotSamples: () =>
       Effect.die("fake persistence writeSnapshotSamples is not implemented"),
-    readSnapshotSamples: () => Effect.succeed(Option.none()),
+    readSnapshotSamples: (id) =>
+      Effect.sync(() => {
+        const samples = snapshotSamples.get(id);
+        return samples ? Option.some(samples) : Option.none();
+      }),
     createSnapshotComparison: () =>
       Effect.die("fake persistence createSnapshotComparison is not implemented"),
     listSnapshotComparisons: Effect.succeed([]),
@@ -290,6 +413,29 @@ function fakePersistenceLayer() {
   };
 
   return Layer.succeed(Persistence, service);
+}
+
+function filterSnapshots(
+  snapshots: ReadonlyArray<SnapshotRecord>,
+  query: SnapshotListQuery | undefined,
+): ReadonlyArray<SnapshotRecord> {
+  return query?.limit === undefined ? snapshots : snapshots.slice(0, query.limit);
+}
+
+function persistentId(value: string): PersistentId {
+  return Schema.decodeUnknownSync(PersistentId)(value);
+}
+
+function timestamp() {
+  return Schema.decodeUnknownSync(Timestamp)(new Date().toISOString());
+}
+
+function snapshotSampleBytes(): Uint8Array {
+  const samples = new Float32Array(fakeInfo.channelCount * fakeInfo.bufferSize);
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = index;
+  }
+  return new Uint8Array(samples.buffer.slice(0));
 }
 
 function fakeSerialLayer(ports: ReadonlyArray<SerialPortInfo>) {
@@ -402,6 +548,7 @@ function fakeDevice(path: string): VScopeDevice {
   let requestedState: VScopeStateValue = VScopeState.Halted;
   let snapshotValid = false;
   let acquisitionPollsRemaining = 0;
+  let frameReads = 0;
   const rtValues = new Map<number, number>([
     [0, 1],
     [1, 2],
@@ -492,7 +639,14 @@ function fakeDevice(path: string): VScopeDevice {
       acquisitionPollsRemaining = 2;
       return status();
     }),
-    getFrame: failIfMisconfigured("getFrame").pipe(Effect.as(Float32Array.from([1, 2, 3, 4]))),
+    getFrame: failIfMisconfigured("getFrame").pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          frameReads += 1;
+          return Float32Array.from([frameReads, 2, 3, 4]);
+        }),
+      ),
+    ),
     getSnapshotHeader: Effect.succeed({
       channelMap: fakeMetadata.channelMap,
       divider: fakeTiming.divider,
@@ -503,8 +657,8 @@ function fakeDevice(path: string): VScopeDevice {
       sampleCount: fakeInfo.bufferSize,
       byteLength: fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
     }),
-    snapshotBytes: () => Stream.empty,
-    collectSnapshotBytes: () => Effect.succeed(new Uint8Array()),
+    snapshotBytes: () => Stream.fromIterable([snapshotSampleBytes()]),
+    collectSnapshotBytes: () => Effect.succeed(snapshotSampleBytes()),
     getVariableCatalog: Effect.succeed(fakeMetadata.variables),
     getChannelMap: failIfMisconfigured("getChannelMap").pipe(Effect.as(fakeMetadata.channelMap)),
     setChannelMap: (channel, variable) =>

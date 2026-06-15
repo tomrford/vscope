@@ -171,9 +171,7 @@ export class SavedDeviceIdentity extends Schema.Class<SavedDeviceIdentity>("Save
 }) {}
 
 export class SnapshotDeviceRef extends Schema.Class<SnapshotDeviceRef>("SnapshotDeviceRef")({
-  deviceId: Schema.NullOr(PersistentId),
   name: Schema.String,
-  portPath: Schema.NullOr(Schema.String),
 }) {}
 
 export class SnapshotTrigger extends Schema.Class<SnapshotTrigger>("SnapshotTrigger")({
@@ -243,7 +241,6 @@ export class SnapshotSampleBlob extends Schema.Class<SnapshotSampleBlob>("Snapsh
 
 export class SnapshotListQuery extends Schema.Class<SnapshotListQuery>("SnapshotListQuery")({
   limit: Schema.optionalKey(PositiveInt),
-  deviceId: Schema.optionalKey(PersistentId),
 }) {}
 
 export class SnapshotComparisonDraft extends Schema.Class<SnapshotComparisonDraft>(

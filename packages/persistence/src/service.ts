@@ -490,10 +490,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
 
   const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (row: unknown) {
     const decodedRow = yield* decodeWith(SnapshotRow, "decode snapshot row", row);
-    const deviceId =
-      decodedRow.device_id === null
-        ? null
-        : yield* decodeWith(PersistentId, "decode snapshot device id", decodedRow.device_id);
     const channelMap = yield* decodeJson(
       Schema.Array(Schema.Number),
       "decode snapshot channel map",
@@ -519,9 +515,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       id: decodedRow.id,
       label: decodedRow.label,
       device: {
-        deviceId,
         name: decodedRow.device_name,
-        portPath: decodedRow.port_path,
       },
       sample: {
         format: decodedRow.sample_format,
@@ -666,9 +660,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
             INSERT INTO snapshots (
               id,
               label,
-              device_id,
               device_name,
-              port_path,
               channel_count,
               sample_count,
               sample_format,
@@ -684,9 +676,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
             ) VALUES (
               ${record.id},
               ${record.label},
-              ${record.device.deviceId},
               ${record.device.name},
-              ${record.device.portPath},
               ${record.sample.channelCount},
               ${record.sample.sampleCount},
               ${record.sample.format},
@@ -731,7 +721,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     const decodedQuery = yield* decodeWith(SnapshotListQuery, "list snapshots query", query);
     const rows = yield* runSql(
       "list snapshots",
-      decodedQuery.deviceId === undefined && decodedQuery.limit === undefined
+      decodedQuery.limit === undefined
         ? sql`
             SELECT
               snapshots.*,
@@ -740,36 +730,15 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
             LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
             ORDER BY snapshots.created_at DESC, snapshots.id DESC
           `
-        : decodedQuery.deviceId !== undefined && decodedQuery.limit === undefined
-          ? sql`
-              SELECT
-                snapshots.*,
-                CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-              FROM snapshots
-              LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-              WHERE snapshots.device_id = ${decodedQuery.deviceId}
-              ORDER BY snapshots.created_at DESC, snapshots.id DESC
-            `
-          : decodedQuery.deviceId === undefined && decodedQuery.limit !== undefined
-            ? sql`
-                SELECT
-                  snapshots.*,
-                  CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-                FROM snapshots
-                LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-                ORDER BY snapshots.created_at DESC, snapshots.id DESC
-                LIMIT ${decodedQuery.limit}
-              `
-            : sql`
-                SELECT
-                  snapshots.*,
-                  CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-                FROM snapshots
-                LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-                WHERE snapshots.device_id = ${decodedQuery.deviceId}
-                ORDER BY snapshots.created_at DESC, snapshots.id DESC
-                LIMIT ${decodedQuery.limit}
-              `,
+        : sql`
+            SELECT
+              snapshots.*,
+              CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
+            FROM snapshots
+            LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
+            ORDER BY snapshots.created_at DESC, snapshots.id DESC
+            LIMIT ${decodedQuery.limit}
+          `,
     );
 
     const snapshots: Array<SnapshotRecord> = [];

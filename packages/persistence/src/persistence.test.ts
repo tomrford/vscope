@@ -18,7 +18,6 @@ import {
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotComparisonDraft,
-  SnapshotDeviceRef,
   SnapshotDraft,
   SnapshotSamplesWrite,
   SnapshotTrigger,
@@ -70,11 +69,9 @@ async function runWithSql<A, E>(
 function snapshotDraft(label: string, sampleCount: number): SnapshotDraft {
   return SnapshotDraft.make({
     label,
-    device: SnapshotDeviceRef.make({
-      deviceId: null,
+    device: {
       name: "probe-a",
-      portPath: "/dev/tty.usbserial",
-    }),
+    },
     channelCount: 2,
     sampleCount,
     sampleRateHz: 1_000,
@@ -568,9 +565,7 @@ describe("@vscope/persistence", () => {
             INSERT INTO snapshots (
               id,
               label,
-              device_id,
               device_name,
-              port_path,
               channel_count,
               sample_count,
               sample_format,
@@ -586,9 +581,7 @@ describe("@vscope/persistence", () => {
             ) VALUES (
               ${"snapshot:corrupt"},
               ${"Corrupt trace"},
-              ${null},
               ${"probe-a"},
-              ${"/dev/tty.usbserial"},
               ${0},
               ${1},
               ${SNAPSHOT_SAMPLE_FORMAT},

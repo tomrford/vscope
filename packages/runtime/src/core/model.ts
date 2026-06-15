@@ -1,11 +1,13 @@
 import type {
   Preferences,
   PreferencesPatch,
+  PersistentId,
   RecoveryState,
   SavedDevice,
   SerialConfig,
   Settings,
   SettingsPatch,
+  SnapshotSampleBlob,
   SnapshotRecord,
 } from "@vscope/persistence";
 import type {
@@ -33,7 +35,8 @@ export type DeviceIntentKind =
   | "setTiming"
   | "setTrigger"
   | "setRtValue"
-  | "setChannelMap";
+  | "setChannelMap"
+  | "captureSnapshot";
 
 export type DeviceIntentStatus = "pending" | "settled" | "failed";
 
@@ -95,6 +98,11 @@ export interface CoreState {
   readonly logs: ReadonlyArray<RuntimeLogEntry>;
 }
 
+export interface SnapshotCaptureCommand {
+  readonly type: "snapshots/capture";
+  readonly label?: string | undefined;
+}
+
 export type DeviceControlCommand =
   | {
       readonly type: "devices/run";
@@ -144,6 +152,7 @@ export type CoreCommand =
   | {
       readonly type: "devices/disconnect";
     }
+  | SnapshotCaptureCommand
   | DeviceControlCommand;
 
 export type CoreQuery =
@@ -152,6 +161,10 @@ export type CoreQuery =
     }
   | {
       readonly type: "snapshots/list";
+    }
+  | {
+      readonly type: "snapshots/readSamples";
+      readonly id: PersistentId;
     };
 
 export type CoreQueryResult =
@@ -162,4 +175,8 @@ export type CoreQueryResult =
   | {
       readonly type: "snapshots/list";
       readonly snapshots: ReadonlyArray<SnapshotRecord>;
+    }
+  | {
+      readonly type: "snapshots/readSamples";
+      readonly samples: SnapshotSampleBlob | null;
     };

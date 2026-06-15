@@ -49,9 +49,7 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
       CREATE TABLE IF NOT EXISTS snapshots (
         id TEXT PRIMARY KEY,
         label TEXT NOT NULL,
-        device_id TEXT,
         device_name TEXT NOT NULL,
-        port_path TEXT,
         channel_count INTEGER NOT NULL,
         sample_count INTEGER NOT NULL,
         sample_format TEXT NOT NULL,
@@ -70,11 +68,6 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
     yield* sql`
       CREATE INDEX IF NOT EXISTS snapshots_created_at_idx
         ON snapshots(created_at DESC, id DESC)
-    `;
-
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS snapshots_device_id_idx
-        ON snapshots(device_id)
     `;
 
     yield* sql`

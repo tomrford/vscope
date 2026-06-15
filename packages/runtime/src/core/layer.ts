@@ -2,6 +2,7 @@ import {
   Effect,
   Fiber,
   Layer,
+  Option,
   Ref,
   Schedule,
   Scope,
@@ -9,8 +10,14 @@ import {
   Stream,
   SubscriptionRef,
 } from "effect";
-import { Persistence } from "@vscope/persistence";
-import type { PersistenceService, SerialConfig } from "@vscope/persistence";
+import {
+  Persistence,
+  SNAPSHOT_SAMPLE_FORMAT,
+  SnapshotDraft,
+  SnapshotSamplesWrite,
+  SnapshotTrigger,
+} from "@vscope/persistence";
+import type { PersistenceService, SerialConfig, SnapshotRecord } from "@vscope/persistence";
 import { VScopeSerial, VScopeState } from "@vscope/serial";
 import type {
   VScopeControlStatus,
@@ -18,6 +25,7 @@ import type {
   VScopeDeviceError,
   VScopeDeviceSummary,
   VScopeSerialEvent,
+  VScopeSnapshotHeader,
   VScopeTiming,
   VScopeTrigger,
 } from "@vscope/serial";
@@ -37,6 +45,7 @@ import type {
   DeviceControlCommand,
   DeviceIntent,
   DeviceIntentKind,
+  SnapshotCaptureCommand,
   SnapshotAvailability,
 } from "./model";
 import { decideDeviceControl, permissionsForDevice } from "./policy";
@@ -175,6 +184,49 @@ const makeRuntimeCore = Effect.gen(function* () {
       };
     });
 
+  const applyFrame = (path: string, frame: Float32Array) =>
+    applyState((snapshot) => {
+      if (!snapshot.device || snapshot.device.path !== path) {
+        return snapshot;
+      }
+
+      const now = timestamp();
+      return {
+        ...snapshot,
+        device: {
+          ...snapshot.device,
+          frame: Array.from(frame),
+          lastFrameAt: now,
+          lastSeenAt: now,
+          error: null,
+        },
+      };
+    });
+
+  const applySnapshotCaptureSuccess = (
+    path: string,
+    snapshots: ReadonlyArray<SnapshotRecord>,
+    logMessage: string,
+  ) =>
+    applyState((snapshot) => {
+      const now = timestamp();
+      const device =
+        snapshot.device && snapshot.device.path === path
+          ? {
+              ...snapshot.device,
+              intent: settleIntent(snapshot.device.intent, "settled", now, null),
+              lastSeenAt: now,
+              error: null,
+            }
+          : snapshot.device;
+      return {
+        ...snapshot,
+        device,
+        snapshots,
+        logs: appendLog(snapshot.logs, logMessage, now),
+      };
+    });
+
   const applyIntent = (kind: DeviceIntentKind) =>
     applyState((snapshot) => {
       if (!snapshot.device) {
@@ -198,7 +250,7 @@ const makeRuntimeCore = Effect.gen(function* () {
       };
     });
 
-  const applyIntentFailure = (kind: DeviceIntentKind, error: RuntimeCoreSerialError) =>
+  const applyIntentFailure = (kind: DeviceIntentKind, error: RuntimeCoreError) =>
     applyState((snapshot) => {
       if (!snapshot.device) {
         return snapshot;
@@ -308,8 +360,9 @@ const makeRuntimeCore = Effect.gen(function* () {
         Effect.tapError(() => serial.removeDevice(device.path).pipe(Effect.ignore)),
       );
       const next = yield* applyConnectedDevice(summary, runtimeState);
-      const pollMillis = statusPollMillis(next.settings.polling.stateHz);
-      const fiber = yield* monitorDevice(device, pollMillis).pipe(Effect.forkIn(parentScope));
+      const fiber = yield* monitorDevice(device, next.settings.polling).pipe(
+        Effect.forkIn(parentScope),
+      );
       yield* Ref.set(monitorFiber, fiber);
       return next;
     });
@@ -345,8 +398,13 @@ const makeRuntimeCore = Effect.gen(function* () {
       });
     });
 
-  const monitorDevice = (device: VScopeDevice, pollMillis: number): Effect.Effect<void> =>
-    Stream.fromSchedule(Schedule.spaced(`${pollMillis} millis`)).pipe(
+  const monitorDevice = (
+    device: VScopeDevice,
+    polling: CoreState["settings"]["polling"],
+  ): Effect.Effect<void> => {
+    const statusMonitor = Stream.fromSchedule(
+      Schedule.spaced(`${pollMillis(polling.stateHz)} millis`),
+    ).pipe(
       Stream.runForEach(() =>
         device.getStatus.pipe(
           Effect.flatMap((status) => applyStatus(device.path, status)),
@@ -355,6 +413,26 @@ const makeRuntimeCore = Effect.gen(function* () {
           ),
         ),
       ),
+    );
+
+    const frameMonitor = Stream.fromSchedule(
+      Schedule.spaced(`${pollMillis(polling.frameHz)} millis`),
+    ).pipe(
+      Stream.runForEach(() =>
+        device.getFrame.pipe(
+          Effect.timeout(`${polling.frameTimeoutMs} millis`),
+          Effect.flatMap((frame) => applyFrame(device.path, frame)),
+          Effect.mapError(
+            (cause) => new RuntimeCoreSerialError({ operation: "devices/frame", cause }),
+          ),
+        ),
+      ),
+    );
+
+    return Effect.all([statusMonitor, frameMonitor], {
+      concurrency: "unbounded",
+      discard: true,
+    }).pipe(
       Effect.catch((error) =>
         applyState((snapshot) => {
           if (!snapshot.device || snapshot.device.path !== device.path) {
@@ -382,6 +460,7 @@ const makeRuntimeCore = Effect.gen(function* () {
         ),
       ),
     );
+  };
 
   const withDevice = <A>(
     command: DeviceControlCommand,
@@ -516,6 +595,83 @@ const makeRuntimeCore = Effect.gen(function* () {
     }
   };
 
+  const captureSnapshot = (command: SnapshotCaptureCommand) =>
+    Effect.gen(function* () {
+      const snapshot = yield* SubscriptionRef.get(state);
+      const currentDevice = snapshot.device;
+      if (!currentDevice || currentDevice.connectionStatus !== "connected") {
+        return yield* new RuntimeCorePolicyError({
+          command: command.type,
+          reason: "No connected device is available.",
+        });
+      }
+
+      if (!snapshot.permissions.captureSnapshot) {
+        return yield* new RuntimeCorePolicyError({
+          command: command.type,
+          reason:
+            "Snapshot capture is available only when the connected device has a ready snapshot.",
+        });
+      }
+
+      yield* applyIntent("captureSnapshot");
+
+      return yield* Effect.gen(function* () {
+        const device = yield* serial
+          .getDeviceByPath(currentDevice.path)
+          .pipe(
+            Effect.mapError(
+              (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
+            ),
+          );
+        const capturedAt = timestamp();
+        const header = yield* device.getSnapshotHeader.pipe(
+          Effect.mapError(
+            (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
+          ),
+        );
+        const bytes = yield* device
+          .collectSnapshotBytes({ header })
+          .pipe(
+            Effect.mapError(
+              (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
+            ),
+          );
+        const label = normalizedSnapshotLabel(command.label, currentDevice.deviceName, capturedAt);
+        const record = yield* persistence
+          .createSnapshot(
+            snapshotDraftFromCapture({
+              device: currentDevice,
+              header,
+              label,
+              capturedAt,
+            }),
+            SnapshotSamplesWrite.make({
+              format: SNAPSHOT_SAMPLE_FORMAT,
+              data: bytes,
+            }),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new RuntimeCorePersistenceError({ operation: command.type, cause }),
+            ),
+          );
+        const snapshots = yield* persistence
+          .listSnapshots()
+          .pipe(
+            Effect.mapError(
+              (cause) => new RuntimeCorePersistenceError({ operation: "snapshots/list", cause }),
+            ),
+          );
+
+        return yield* applySnapshotCaptureSuccess(
+          currentDevice.path,
+          snapshots,
+          `Captured snapshot "${record.label}" from ${currentDevice.deviceName}`,
+        );
+      }).pipe(Effect.tapError((error) => applyIntentFailure("captureSnapshot", error)));
+    });
+
   const dispatchUnlocked = (command: CoreCommand): Effect.Effect<CoreState, RuntimeCoreError> => {
     switch (command.type) {
       case "warnings/clear":
@@ -558,6 +714,8 @@ const makeRuntimeCore = Effect.gen(function* () {
         return connectDevice(command);
       case "devices/disconnect":
         return disconnectDevice();
+      case "snapshots/capture":
+        return captureSnapshot(command);
       case "devices/run":
       case "devices/stop":
       case "devices/setTiming":
@@ -571,9 +729,7 @@ const makeRuntimeCore = Effect.gen(function* () {
 
   const dispatch = (command: CoreCommand) => dispatchLock.withPermit(dispatchUnlocked(command));
 
-  const query = (
-    queryRequest: CoreQuery,
-  ): Effect.Effect<CoreQueryResult, RuntimeCoreSerialError> => {
+  const query = (queryRequest: CoreQuery): Effect.Effect<CoreQueryResult, RuntimeCoreError> => {
     switch (queryRequest.type) {
       case "ports/list":
         return serial.listPorts.pipe(
@@ -593,6 +749,19 @@ const makeRuntimeCore = Effect.gen(function* () {
             type: "snapshots/list",
             snapshots: snapshot.snapshots,
           })),
+        );
+      case "snapshots/readSamples":
+        return persistence.readSnapshotSamples(queryRequest.id).pipe(
+          Effect.map(
+            (samples): CoreQueryResult => ({
+              type: "snapshots/readSamples",
+              samples: Option.getOrNull(samples),
+            }),
+          ),
+          Effect.mapError(
+            (cause) =>
+              new RuntimeCorePersistenceError({ operation: "snapshots/readSamples", cause }),
+          ),
         );
     }
   };
@@ -833,8 +1002,54 @@ function readDeviceRuntimeState(
   });
 }
 
-function statusPollMillis(stateHz: number): number {
-  return Math.max(10, Math.round(1000 / stateHz));
+function pollMillis(hz: number): number {
+  return Math.max(10, Math.round(1000 / hz));
+}
+
+function normalizedSnapshotLabel(
+  label: string | undefined,
+  deviceName: string,
+  capturedAt: string,
+): string {
+  const trimmed = label?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : `${deviceName} ${capturedAt}`;
+}
+
+function snapshotDraftFromCapture(options: {
+  readonly device: CoreDevice;
+  readonly header: VScopeSnapshotHeader;
+  readonly label: string;
+  readonly capturedAt: string;
+}): SnapshotDraft {
+  const { device, header, label, capturedAt } = options;
+  return SnapshotDraft.make({
+    label,
+    device: {
+      name: device.deviceName,
+    },
+    channelCount: header.channelCount,
+    sampleCount: header.sampleCount,
+    sampleRateHz: sampleRateHz(device.info, header.divider),
+    divider: header.divider,
+    preTriggerSamples: header.preTrig,
+    channelMap: Array.from(header.channelMap),
+    trigger: SnapshotTrigger.make(header.trigger),
+    rtValues: Array.from(header.rtValues),
+    metadata: {
+      capturedAt,
+      deviceInfo: device.info,
+      variables: device.metadata?.variables ?? [],
+      rtLabels: device.metadata?.rtLabels ?? [],
+    },
+  });
+}
+
+function sampleRateHz(info: CoreDevice["info"], divider: number): number | null {
+  if (!info || divider <= 0) {
+    return null;
+  }
+
+  return (info.isrKHz * 1000) / divider;
 }
 
 function appendWarning(
