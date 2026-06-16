@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { Persistence, type PersistenceService } from "@vscope/persistence";
 import {
   DEFAULT_PREFERENCES,
   DEFAULT_SETTINGS,
-  Persistence,
   PersistentId,
   PollingSettings,
   Preferences,
@@ -15,9 +15,8 @@ import {
   SnapshotSampleDescriptor,
   Timestamp,
   noRecovery,
-  type PersistenceService,
   type SnapshotListQuery,
-} from "@vscope/persistence";
+} from "@vscope/shared";
 import { Effect, Fiber, Layer, Option, PubSub, Schema, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import {

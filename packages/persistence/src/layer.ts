@@ -61,7 +61,11 @@ function makeSqliteLayer(
   path: string,
 ): Layer.Layer<SqliteClient.SqliteClient | SqlClient.SqlClient, PersistenceOpenError> {
   return Layer.effectContext(
-    SqliteClient.make({ filename: path }).pipe(
+    Effect.try({
+      try: () => fs.mkdirSync(nodePath.dirname(path), { recursive: true }),
+      catch: (cause) => openError(path, cause),
+    }).pipe(
+      Effect.andThen(SqliteClient.make({ filename: path })),
       Effect.catchDefect((defect) => Effect.fail(openError(path, defect))),
       Effect.map((client) =>
         Context.make(SqliteClient.SqliteClient, client).pipe(
@@ -75,12 +79,6 @@ function makeSqliteLayer(
 export function makePersistenceLayer(
   options: OpenPersistenceOptions,
 ): Layer.Layer<Persistence, PersistenceOpenError | PersistenceError> {
-  try {
-    fs.mkdirSync(nodePath.dirname(options.path), { recursive: true });
-  } catch (cause) {
-    return Layer.effect(Persistence, Effect.fail(openError(options.path, cause)));
-  }
-
   const sqlLayer = makeSqliteLayer(options.path);
   const setupLayer = Layer.effectDiscard(setupPersistence(options.migrate !== false));
   const serviceLayer = Layer.effect(Persistence, makePersistence(options.path));

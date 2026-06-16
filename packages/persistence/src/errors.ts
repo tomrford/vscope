@@ -36,13 +36,6 @@ export class PersistenceValidationError extends Schema.TaggedErrorClass<Persiste
   },
 ) {}
 
-export class PersistenceClosedError extends Schema.TaggedErrorClass<PersistenceClosedError>()(
-  "PersistenceClosedError",
-  {
-    operation: Schema.String,
-  },
-) {}
-
 export class SnapshotNotFoundError extends Schema.TaggedErrorClass<SnapshotNotFoundError>()(
   "SnapshotNotFoundError",
   {
@@ -62,7 +55,6 @@ export type PersistenceError =
   | PersistenceMigrationError
   | PersistenceQueryError
   | PersistenceValidationError
-  | PersistenceClosedError
   | SnapshotNotFoundError
   | SnapshotComparisonNotFoundError;
 

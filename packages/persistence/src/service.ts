@@ -33,7 +33,7 @@ import {
   snapshotSampleByteLength,
   type PreferencesPatch,
   type SettingsPatch,
-} from "./model.ts";
+} from "@vscope/shared";
 import {
   CreatedAtRow,
   SavedDeviceRow,
@@ -408,77 +408,86 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     const decodedDraft = yield* decodeWith(SavedDeviceDraft, "upsert saved device", draft);
     const id = decodedDraft.id ?? (yield* createId("device"));
     const updatedAt = yield* createTimestamp();
-    const createdRows = yield* runSql(
-      "read saved device created_at",
-      sql`SELECT created_at FROM saved_devices WHERE id = ${id}`,
-    );
-    const createdRow = createdRows[0];
-    const createdAt =
-      createdRow === undefined
-        ? updatedAt
-        : yield* decodeWith(CreatedAtRow, "decode saved device created_at", createdRow).pipe(
-            Effect.flatMap((row) =>
-              decodeWith(Timestamp, "decode saved device created timestamp", row.created_at),
-            ),
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const createdRows = yield* runSql(
+            "read saved device created_at",
+            sql`SELECT created_at FROM saved_devices WHERE id = ${id}`,
           );
-    const device = yield* decodeWith(SavedDevice, "upsert saved device record", {
-      id,
-      portPath: decodedDraft.portPath,
-      displayName: decodedDraft.displayName,
-      usb: decodedDraft.usb,
-      serialConfig: decodedDraft.serialConfig,
-      metadata: decodedDraft.metadata,
-      createdAt,
-      updatedAt,
-    });
-    const serialConfigJson = yield* stringifyJson(
-      "encode saved device serial config",
-      device.serialConfig,
-    );
-    const metadataJson = yield* stringifyJson("encode saved device metadata", device.metadata);
+          const createdRow = createdRows[0];
+          const createdAt =
+            createdRow === undefined
+              ? updatedAt
+              : yield* decodeWith(CreatedAtRow, "decode saved device created_at", createdRow).pipe(
+                  Effect.flatMap((row) =>
+                    decodeWith(Timestamp, "decode saved device created timestamp", row.created_at),
+                  ),
+                );
+          const device = yield* decodeWith(SavedDevice, "upsert saved device record", {
+            id,
+            portPath: decodedDraft.portPath,
+            displayName: decodedDraft.displayName,
+            usb: decodedDraft.usb,
+            serialConfig: decodedDraft.serialConfig,
+            metadata: decodedDraft.metadata,
+            createdAt,
+            updatedAt,
+          });
+          const serialConfigJson = yield* stringifyJson(
+            "encode saved device serial config",
+            device.serialConfig,
+          );
+          const metadataJson = yield* stringifyJson(
+            "encode saved device metadata",
+            device.metadata,
+          );
 
-    yield* runSql(
-      "upsert saved device",
-      sql`
-        INSERT INTO saved_devices (
-          id,
-          port_path,
-          display_name,
-          vendor_id,
-          product_id,
-          serial_number,
-          manufacturer,
-          serial_config_json,
-          metadata_json,
-          created_at,
-          updated_at
-        ) VALUES (
-          ${device.id},
-          ${device.portPath},
-          ${device.displayName},
-          ${device.usb.vendorId},
-          ${device.usb.productId},
-          ${device.usb.serialNumber},
-          ${device.usb.manufacturer},
-          ${serialConfigJson},
-          ${metadataJson},
-          ${device.createdAt},
-          ${device.updatedAt}
-        )
-        ON CONFLICT (id) DO UPDATE SET
-          port_path = excluded.port_path,
-          display_name = excluded.display_name,
-          vendor_id = excluded.vendor_id,
-          product_id = excluded.product_id,
-          serial_number = excluded.serial_number,
-          manufacturer = excluded.manufacturer,
-          serial_config_json = excluded.serial_config_json,
-          metadata_json = excluded.metadata_json,
-          updated_at = excluded.updated_at
-      `,
-    );
+          yield* runSql(
+            "upsert saved device",
+            sql`
+              INSERT INTO saved_devices (
+                id,
+                port_path,
+                display_name,
+                vendor_id,
+                product_id,
+                serial_number,
+                manufacturer,
+                serial_config_json,
+                metadata_json,
+                created_at,
+                updated_at
+              ) VALUES (
+                ${device.id},
+                ${device.portPath},
+                ${device.displayName},
+                ${device.usb.vendorId},
+                ${device.usb.productId},
+                ${device.usb.serialNumber},
+                ${device.usb.manufacturer},
+                ${serialConfigJson},
+                ${metadataJson},
+                ${device.createdAt},
+                ${device.updatedAt}
+              )
+              ON CONFLICT (id) DO UPDATE SET
+                port_path = excluded.port_path,
+                display_name = excluded.display_name,
+                vendor_id = excluded.vendor_id,
+                product_id = excluded.product_id,
+                serial_number = excluded.serial_number,
+                manufacturer = excluded.manufacturer,
+                serial_config_json = excluded.serial_config_json,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            `,
+          );
 
-    return device;
+          return device;
+        }),
+      )
+      .pipe(Effect.mapError((cause) => transactionError("upsert saved device transaction", cause)));
   });
 
   const forgetSavedDevice = Effect.fn("Persistence.forgetSavedDevice")(function* (
@@ -939,13 +948,13 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       comparison.metadata,
     );
 
-    for (const snapshotId of comparison.snapshotIds) {
-      yield* requireSnapshot(snapshotId);
-    }
-
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          for (const snapshotId of comparison.snapshotIds) {
+            yield* requireSnapshot(snapshotId);
+          }
+
           yield* runSql(
             "create snapshot comparison",
             sql`

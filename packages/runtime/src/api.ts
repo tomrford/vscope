@@ -1,15 +1,25 @@
 import { Effect, Option, Result, Schema, Stream } from "effect";
 import {
+  RuntimeCommandPermissions,
+  RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
   RuntimeDeviceDto,
+  RuntimeDeviceInfo,
+  RuntimeDeviceIntent,
   RuntimeFramePayload,
+  RuntimeLogEntryDto,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
+  RuntimeStaticMetadata,
   RuntimeStateDto,
   RuntimeSnapshotRecord,
+  RuntimeWarningDto,
+  type RuntimePreferencesPatchRequest,
+  type RuntimeSettingsPatchRequest,
   type RuntimeWriteConfigRequest,
+  PersistentId,
+  type SnapshotSampleBlob,
 } from "@vscope/shared";
-import { PersistentId, type SnapshotSampleBlob } from "@vscope/persistence";
 import type { SerialPortInfo, VScopeTiming, VScopeTrigger } from "@vscope/serial";
 
 import type { RuntimeCoreError } from "./core/errors";
@@ -18,6 +28,12 @@ import type { RuntimeCoreService } from "./core/service";
 
 export interface RuntimeRpcHandlers {
   readonly getState: Effect.Effect<RuntimeStateDto>;
+  readonly patchSettings: (
+    patch: RuntimeSettingsPatchRequest,
+  ) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
+  readonly patchPreferences: (
+    patch: RuntimePreferencesPatchRequest,
+  ) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly listPorts: Effect.Effect<ReadonlyArray<SerialPortInfo>, RuntimeCoreError>;
   readonly connectDevice: (path: string) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly disconnectDevice: Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
@@ -84,6 +100,8 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
 
   const rpc: RuntimeRpcHandlers = {
     getState,
+    patchSettings: (patch) => dispatch({ type: "settings/patch", patch }),
+    patchPreferences: (patch) => dispatch({ type: "preferences/patch", patch }),
     listPorts: core
       .query({ type: "ports/list" })
       .pipe(Effect.map((result) => (result.type === "ports/list" ? result.ports : []))),
@@ -144,22 +162,17 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
 export function runtimeStateDto(state: CoreState): RuntimeStateDto {
   return RuntimeStateDto.make({
     ...state,
-    settings: jsonValue(state.settings),
-    settingsRecovery: jsonValue(state.settingsRecovery),
-    preferences: jsonValue(state.preferences),
-    preferencesRecovery: jsonValue(state.preferencesRecovery),
-    savedDevices: state.savedDevices.map(jsonValue),
     snapshots: state.snapshots.map(snapshotDto),
-    permissions: jsonValue(state.permissions),
-    warnings: state.warnings.map(jsonValue),
-    logs: state.logs.map(jsonValue),
+    permissions: permissionsDto(state.permissions),
+    warnings: state.warnings.map((warning) => RuntimeWarningDto.make(warning)),
+    logs: state.logs.map((entry) => RuntimeLogEntryDto.make(entry)),
     device: state.device
       ? RuntimeDeviceDto.make({
           ...state.device,
-          info: jsonValue(state.device.info),
-          metadata: jsonValue(state.device.metadata),
-          status: jsonValue(state.device.status),
-          intent: jsonValue(state.device.intent),
+          info: state.device.info ? RuntimeDeviceInfo.make(state.device.info) : null,
+          metadata: state.device.metadata ? metadataDto(state.device.metadata) : null,
+          status: state.device.status ? RuntimeControlStatus.make(state.device.status) : null,
+          intent: state.device.intent ? RuntimeDeviceIntent.make(state.device.intent) : null,
           timing: timingDto(state.device.timing),
           trigger: triggerDto(state.device.trigger),
           rtValues: Array.from(state.device.rtValues.entries()),
@@ -200,15 +213,13 @@ function configPayloadFromState(state: CoreState): RuntimeDeviceConfigPayload {
     rtValues: device ? Array.from(device.rtValues.entries()) : [],
     variables: device?.metadata?.variables ?? [],
     rtLabels: device?.metadata?.rtLabels ?? [],
-    permissions: jsonValue(state.permissions),
+    permissions: permissionsDto(state.permissions),
   });
 }
 
 function snapshotDto(snapshot: CoreState["snapshots"][number]): RuntimeSnapshotRecord {
   return RuntimeSnapshotRecord.make({
     ...snapshot,
-    trigger: RuntimeSetTriggerRequest.make(snapshot.trigger),
-    metadata: jsonValue(snapshot.metadata),
   });
 }
 
@@ -220,9 +231,15 @@ function triggerDto(trigger: CoreDevice["trigger"]): RuntimeSetTriggerRequest | 
   return trigger ? RuntimeSetTriggerRequest.make(trigger) : null;
 }
 
-function jsonValue(value: unknown): unknown {
-  const parsed: unknown = JSON.parse(JSON.stringify(value));
-  return parsed;
+function metadataDto(metadata: NonNullable<CoreDevice["metadata"]>): RuntimeStaticMetadata {
+  return RuntimeStaticMetadata.make({
+    ...metadata,
+    info: RuntimeDeviceInfo.make(metadata.info),
+  });
+}
+
+function permissionsDto(permissions: CoreState["permissions"]): RuntimeCommandPermissions {
+  return RuntimeCommandPermissions.make(permissions);
 }
 
 function writeConfig(

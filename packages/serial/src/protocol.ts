@@ -1,13 +1,9 @@
-import { Data } from "effect";
+import { Data, Effect } from "effect";
 
 export const VSCOPE_SYNC_BYTE = 0xc8;
 export const VSCOPE_MAX_PAYLOAD = 252;
 export const VSCOPE_FRAME_TIMEOUT_MICROS = 10_000;
 export const VSCOPE_FRAME_TIMEOUT_MILLIS = VSCOPE_FRAME_TIMEOUT_MICROS / 1000;
-export const VSCOPE_NUM_CHANNELS = 5;
-export const VSCOPE_NAME_LEN = 16;
-export const VSCOPE_BUFFER_SIZE = 1000;
-export const VSCOPE_RT_BUFFER_LEN = 16;
 
 export const VScopeEndianness = {
   Little: 0,
@@ -83,12 +79,6 @@ export class VScopeFrameEncodeError extends Data.TaggedError("VScopeFrameEncodeE
   readonly reason: string;
 }> {}
 
-export class VScopeFrameDecodeError extends Data.TaggedError("VScopeFrameDecodeError")<{
-  readonly reason: string;
-}> {}
-
-export type VScopeFrameError = VScopeFrameEncodeError | VScopeFrameDecodeError;
-
 const crc8Table = Uint8Array.from([
   0x00, 0xd5, 0x7f, 0xaa, 0xfe, 0x2b, 0x81, 0x54, 0x29, 0xfc, 0x56, 0x83, 0xd7, 0x02, 0xa8, 0x7d,
   0x52, 0x87, 0x2d, 0xf8, 0xac, 0x79, 0xd3, 0x06, 0x7b, 0xae, 0x04, 0xd1, 0x85, 0x50, 0xfa, 0x2f,
@@ -116,7 +106,18 @@ export const vscopeCrc8 = (bytes: Uint8Array): number => {
   return crc;
 };
 
-export const encodeVScopeFrame = (frame: VScopeFrame): Uint8Array => {
+export const encodeVScopeFrame = (
+  frame: VScopeFrame,
+): Effect.Effect<Uint8Array, VScopeFrameEncodeError> =>
+  frame.payload.byteLength > VSCOPE_MAX_PAYLOAD
+    ? Effect.fail(
+        new VScopeFrameEncodeError({
+          reason: `Payload exceeds ${VSCOPE_MAX_PAYLOAD} bytes`,
+        }),
+      )
+    : Effect.sync(() => encodeVScopeFrameSync(frame));
+
+export const encodeVScopeFrameSync = (frame: VScopeFrame): Uint8Array => {
   if (frame.payload.byteLength > VSCOPE_MAX_PAYLOAD) {
     throw new VScopeFrameEncodeError({
       reason: `Payload exceeds ${VSCOPE_MAX_PAYLOAD} bytes`,

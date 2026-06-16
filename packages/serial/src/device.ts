@@ -280,7 +280,7 @@ const makeVScopeClient = (
       requestLock.withPermit(
         Effect.gen(function* () {
           yield* ensureOpen(requestType);
-          const encoded = encodeVScopeFrame({ type: requestType, payload });
+          const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
           yield* transport
             .write(encoded)
             .pipe(
@@ -422,7 +422,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
       Stream.flatMap((header) =>
         Stream.unfold(0, (startSample) => {
           if (startSample >= header.sampleCount) {
-            return Effect.void as Effect.Effect<undefined>;
+            return Effect.sync(() => undefined);
           }
 
           const chunkSamples = snapshotChunkSamples(header.channelCount, options.samplesPerChunk);

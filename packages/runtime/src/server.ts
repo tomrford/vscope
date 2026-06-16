@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 
 import { NodeHttpServer } from "@effect/platform-node";
-import { PersistentId, makePersistenceLayer } from "@vscope/persistence";
+import { makePersistenceLayer } from "@vscope/persistence";
 import { VScopeSerialLayer } from "@vscope/serial";
 import {
   RuntimeConnectRequest,
@@ -14,8 +14,10 @@ import {
   RuntimeStateDto,
   RuntimeSnapshotRecord,
   RuntimePortInfo,
+  PersistentId,
+  type Settings,
 } from "@vscope/shared";
-import { Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import {
   HttpMiddleware,
@@ -31,15 +33,23 @@ import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
 import type { RuntimeCoreError } from "./core/errors";
 
+class RuntimeApiService extends Context.Service<RuntimeApiService, RuntimeApi>()(
+  "@vscope/runtime/RuntimeApi",
+) {}
+
 const JsonContent = {
   "content-type": "application/json",
 } as const;
 
 export function makeRuntimeHttpLayer(config: RuntimeConfig) {
+  const apiLayer = Layer.effect(
+    RuntimeApiService,
+    RuntimeCore.pipe(Effect.map((core) => makeRuntimeApi(core))),
+  );
+
   const apiRoutes = Layer.effectDiscard(
     Effect.gen(function* () {
-      const core = yield* RuntimeCore;
-      const api = makeRuntimeApi(core);
+      const api = yield* RuntimeApiService;
       const router = yield* HttpRouter.HttpRouter;
 
       yield* router.add("GET", RuntimeEndpoint.health, jsonResponse({ status: "ok" }));
@@ -53,11 +63,14 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
 
   const rpcHandlers = RuntimeRpcs.toLayer(
     Effect.gen(function* () {
-      const core = yield* RuntimeCore;
-      const api = makeRuntimeApi(core);
+      const api = yield* RuntimeApiService;
       return RuntimeRpcs.of({
         "runtime.getState": () => api.rpc.getState,
         "runtime.status": () => api.subscriptions.status,
+        "settings.patch": (patch) =>
+          api.rpc.patchSettings(patch).pipe(Effect.mapError(runtimeApiError)),
+        "preferences.patch": (patch) =>
+          api.rpc.patchPreferences(patch).pipe(Effect.mapError(runtimeApiError)),
         "ports.list": () => api.rpc.listPorts.pipe(Effect.mapError(runtimeApiError)),
         "device.connect": ({ path }) =>
           api.rpc.connectDevice(path).pipe(Effect.mapError(runtimeApiError)),
@@ -105,19 +118,29 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
       })
     : Layer.empty;
 
-  return Layer.mergeAll(apiRoutes, rpcRoutes, mcpRoutes, staticRoutes);
+  return Layer.mergeAll(apiRoutes, rpcRoutes, mcpRoutes, staticRoutes).pipe(
+    Layer.provide(apiLayer),
+  );
 }
 
 export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never, unknown> {
   const app = Layer.unwrap(
-    HttpRouter.toHttpEffect(makeRuntimeHttpLayer(config)).pipe(
-      Effect.map((handler) => HttpServer.serve(handler, HttpMiddleware.cors())),
-    ),
+    Effect.gen(function* () {
+      const core = yield* RuntimeCore;
+      const snapshot = yield* core.getSnapshot;
+      const port = runtimeServerPort(config, snapshot.settings);
+      return Layer.unwrap(
+        HttpRouter.toHttpEffect(makeRuntimeHttpLayer(config)).pipe(
+          Effect.map((handler) => HttpServer.serve(handler, HttpMiddleware.cors())),
+        ),
+      ).pipe(
+        HttpServer.withLogAddress,
+        Layer.provide(NodeHttpServer.layer(createServer, { host: config.host, port })),
+      );
+    }),
   );
 
   return app.pipe(
-    HttpServer.withLogAddress,
-    Layer.provide(NodeHttpServer.layer(createServer, { host: config.host, port: config.port })),
     Layer.provide(RuntimeCoreLive),
     Layer.provide(VScopeSerialLayer),
     Layer.provide(makePersistenceLayer({ path: config.databasePath })),
@@ -126,6 +149,10 @@ export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never
 
 export const runRuntimeServer = (config: RuntimeConfig): Effect.Effect<never, unknown> =>
   Layer.launch(makeRuntimeServerLayer(config));
+
+export function runtimeServerPort(config: RuntimeConfig, settings: Settings): number {
+  return config.portOverride ? config.port : settings.network.port;
+}
 
 function handleSnapshotSamples(api: RuntimeApi) {
   return Effect.gen(function* () {
@@ -280,8 +307,7 @@ const RuntimeMcpToolkit = Toolkit.make(
 
 const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
   Effect.gen(function* () {
-    const core = yield* RuntimeCore;
-    const api = makeRuntimeApi(core);
+    const api = yield* RuntimeApiService;
     return RuntimeMcpToolkit.of({
       vscope_get_state: () => api.mcp.getState,
       vscope_list_ports: () => api.mcp.listPorts.pipe(Effect.mapError(runtimeApiError)),

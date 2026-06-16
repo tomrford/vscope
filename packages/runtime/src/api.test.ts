@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, noRecovery } from "@vscope/persistence";
+import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, noRecovery } from "@vscope/shared";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
 import { Effect, Stream } from "effect";

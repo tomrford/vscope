@@ -16,6 +16,7 @@ export const RuntimeEndpoint = {
 export const RuntimeConfigSchema = Schema.Struct({
   host: Schema.String.check(Schema.isMinLength(1)),
   port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+  portOverride: Schema.Boolean,
   databasePath: Schema.String.check(Schema.isMinLength(1)),
   uiDistPath: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
 });
@@ -35,6 +36,7 @@ export const makeRuntimeConfig = (
   Schema.decodeUnknownSync(RuntimeConfigSchema)({
     host: DEFAULT_RUNTIME_HOST,
     port: DEFAULT_RUNTIME_PORT,
+    portOverride: false,
     ...options,
   });
 

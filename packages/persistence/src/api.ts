@@ -19,7 +19,7 @@ import type {
   SnapshotRecord,
   SnapshotSampleBlob,
   SnapshotSamplesWrite,
-} from "./model.ts";
+} from "@vscope/shared";
 
 export type OpenPersistenceOptions = {
   readonly path: string;

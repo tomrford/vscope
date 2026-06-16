@@ -9,7 +9,7 @@ import type {
   SettingsPatch,
   SnapshotSampleBlob,
   SnapshotRecord,
-} from "@vscope/persistence";
+} from "@vscope/shared";
 import type {
   SerialPortInfo,
   VScopeControlStatus,

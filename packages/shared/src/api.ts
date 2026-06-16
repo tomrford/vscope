@@ -2,6 +2,20 @@ import { Effect, Layer, Schema } from "effect";
 import { Rpc, RpcClient, RpcGroup, RpcSerialization, RpcSchema } from "effect/unstable/rpc";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
+import {
+  Preferences,
+  PersistentId,
+  RecoveryState,
+  SavedDevice,
+  SerialConfig,
+  Settings,
+  SnapshotRecord,
+  LiveViewSettings,
+  NetworkSettings,
+  PollingSettings,
+  SnapshotSettings,
+  Theme,
+} from "./model.ts";
 import { TriggerMode } from "./trigger.ts";
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -75,6 +89,26 @@ export class RuntimeSnapshotCaptureRequest extends Schema.Class<RuntimeSnapshotC
   label: Schema.optionalKey(Schema.String),
 }) {}
 
+export class RuntimeSettingsPatchRequest extends Schema.Class<RuntimeSettingsPatchRequest>(
+  "RuntimeSettingsPatchRequest",
+)({
+  theme: Schema.optionalKey(Theme),
+  defaultSerialConfig: Schema.optionalKey(SerialConfig),
+  polling: Schema.optionalKey(PollingSettings),
+  snapshots: Schema.optionalKey(SnapshotSettings),
+  liveView: Schema.optionalKey(LiveViewSettings),
+  network: Schema.optionalKey(NetworkSettings),
+}) {}
+
+export class RuntimePreferencesPatchRequest extends Schema.Class<RuntimePreferencesPatchRequest>(
+  "RuntimePreferencesPatchRequest",
+)({
+  recentPortPaths: Schema.optionalKey(Schema.Array(Schema.String)),
+  favoriteSnapshotIds: Schema.optionalKey(Schema.Array(PersistentId)),
+  favoriteDeviceIds: Schema.optionalKey(Schema.Array(PersistentId)),
+  showAdvancedControls: Schema.optionalKey(Schema.Boolean),
+}) {}
+
 export class RuntimeWriteConfigRequest extends Schema.Class<RuntimeWriteConfigRequest>(
   "RuntimeWriteConfigRequest",
 )({
@@ -105,6 +139,31 @@ export class RuntimeFramePayload extends Schema.Class<RuntimeFramePayload>("Runt
   channelMap: Schema.Array(NonNegativeInt),
 }) {}
 
+export class RuntimeCommandPermissions extends Schema.Class<RuntimeCommandPermissions>(
+  "RuntimeCommandPermissions",
+)({
+  mode: Schema.Literals([
+    "empty",
+    "disconnected",
+    "lost",
+    "syncing",
+    "halted",
+    "running",
+    "acquiring",
+    "misconfigured",
+  ]),
+  connect: Schema.Boolean,
+  disconnect: Schema.Boolean,
+  setTiming: Schema.Boolean,
+  setTrigger: Schema.Boolean,
+  setRtValue: Schema.Boolean,
+  setChannelMap: Schema.Boolean,
+  trigger: Schema.Boolean,
+  run: Schema.Boolean,
+  stop: Schema.Boolean,
+  captureSnapshot: Schema.Boolean,
+}) {}
+
 export class RuntimeDeviceConfigPayload extends Schema.Class<RuntimeDeviceConfigPayload>(
   "RuntimeDeviceConfigPayload",
 )({
@@ -115,7 +174,7 @@ export class RuntimeDeviceConfigPayload extends Schema.Class<RuntimeDeviceConfig
   rtValues: Schema.Array(Schema.Tuple([NonNegativeInt, Schema.Finite])),
   variables: Schema.Array(Schema.String),
   rtLabels: Schema.Array(Schema.String),
-  permissions: Schema.Unknown,
+  permissions: RuntimeCommandPermissions,
 }) {}
 
 export class RuntimePortInfo extends Schema.Class<RuntimePortInfo>("RuntimePortInfo")({
@@ -131,41 +190,70 @@ export class RuntimePortInfo extends Schema.Class<RuntimePortInfo>("RuntimePortI
 export class RuntimeSnapshotRecord extends Schema.Class<RuntimeSnapshotRecord>(
   "RuntimeSnapshotRecord",
 )({
-  id: Schema.String.check(Schema.isMinLength(1)),
-  label: Schema.NullOr(Schema.String),
-  device: Schema.Struct({
-    name: Schema.String,
-  }),
-  sample: Schema.Struct({
-    format: Schema.String,
-    channelCount: PositiveInt,
-    sampleCount: NonNegativeInt,
-    byteLength: NonNegativeInt,
-    stored: Schema.Boolean,
-  }),
-  sampleRateHz: Schema.NullOr(Schema.Finite),
-  divider: PositiveInt,
-  preTriggerSamples: NonNegativeInt,
+  ...SnapshotRecord.fields,
+}) {}
+
+export class RuntimeDeviceInfo extends Schema.Class<RuntimeDeviceInfo>("RuntimeDeviceInfo")({
+  channelCount: NonNegativeInt,
+  bufferSize: NonNegativeInt,
+  isrKHz: NonNegativeInt,
+  variableCount: NonNegativeInt,
+  rtCount: NonNegativeInt,
+  rtBufferCapacity: NonNegativeInt,
+  nameLength: NonNegativeInt,
+  endianness: Schema.Literals([0, 1]),
+  deviceName: Schema.String,
+}) {}
+
+export class RuntimeStaticMetadata extends Schema.Class<RuntimeStaticMetadata>(
+  "RuntimeStaticMetadata",
+)({
+  info: RuntimeDeviceInfo,
+  variables: Schema.Array(Schema.String),
+  rtLabels: Schema.Array(Schema.String),
   channelMap: Schema.Array(NonNegativeInt),
-  trigger: RuntimeSetTriggerRequest,
-  rtValues: Schema.Array(Schema.Finite),
-  metadata: Schema.Json,
-  createdAt: Schema.String,
-  updatedAt: Schema.String,
+}) {}
+
+export class RuntimeControlStatus extends Schema.Class<RuntimeControlStatus>(
+  "RuntimeControlStatus",
+)({
+  state: Schema.Literals([0, 1, 2, 3]),
+  requestedState: Schema.Literals([0, 1, 2, 3]),
+  snapshotValid: Schema.Boolean,
+  requestPending: Schema.Boolean,
+  triggerEnabled: Schema.Boolean,
+  flags: NonNegativeInt,
+}) {}
+
+export class RuntimeDeviceIntent extends Schema.Class<RuntimeDeviceIntent>("RuntimeDeviceIntent")({
+  kind: Schema.Literals([
+    "run",
+    "stop",
+    "trigger",
+    "setTiming",
+    "setTrigger",
+    "setRtValue",
+    "setChannelMap",
+    "captureSnapshot",
+  ]),
+  status: Schema.Literals(["pending", "settled", "failed"]),
+  sentAt: Schema.String,
+  settledAt: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
 }) {}
 
 export class RuntimeDeviceDto extends Schema.Class<RuntimeDeviceDto>("RuntimeDeviceDto")({
   path: Schema.String,
   deviceName: Schema.String,
   connectionStatus: Schema.Literals(["connected", "disconnected", "lost"]),
-  info: Schema.NullOr(Schema.Unknown),
-  metadata: Schema.NullOr(Schema.Unknown),
-  status: Schema.NullOr(Schema.Unknown),
+  info: Schema.NullOr(RuntimeDeviceInfo),
+  metadata: Schema.NullOr(RuntimeStaticMetadata),
+  status: Schema.NullOr(RuntimeControlStatus),
   state: Schema.NullOr(Schema.Number),
   requestedState: Schema.NullOr(Schema.Number),
   requestPending: Schema.Boolean,
   snapshotAvailability: Schema.Literals(["unknown", "not-ready", "ready"]),
-  intent: Schema.NullOr(Schema.Unknown),
+  intent: Schema.NullOr(RuntimeDeviceIntent),
   timing: Schema.NullOr(RuntimeSetTimingRequest),
   trigger: Schema.NullOr(RuntimeSetTriggerRequest),
   channelMap: Schema.NullOr(Schema.Array(NonNegativeInt)),
@@ -176,25 +264,33 @@ export class RuntimeDeviceDto extends Schema.Class<RuntimeDeviceDto>("RuntimeDev
   error: Schema.NullOr(Schema.String),
 }) {}
 
+export class RuntimeWarningDto extends Schema.Class<RuntimeWarningDto>("RuntimeWarningDto")({
+  id: Schema.String,
+  message: Schema.String,
+  createdAt: Schema.String,
+}) {}
+
+export class RuntimeLogEntryDto extends Schema.Class<RuntimeLogEntryDto>("RuntimeLogEntryDto")({
+  id: Schema.String,
+  message: Schema.String,
+  createdAt: Schema.String,
+}) {}
+
 export class RuntimeStateDto extends Schema.Class<RuntimeStateDto>("RuntimeStateDto")({
   bootedAt: Schema.String,
   updatedAt: Schema.String,
   status: Schema.Literals(["ready", "degraded"]),
-  settings: Schema.Unknown,
-  settingsRecovery: Schema.Unknown,
-  preferences: Schema.Unknown,
-  preferencesRecovery: Schema.Unknown,
-  savedDevices: Schema.Array(Schema.Unknown),
+  settings: Settings,
+  settingsRecovery: RecoveryState,
+  preferences: Preferences,
+  preferencesRecovery: RecoveryState,
+  savedDevices: Schema.Array(SavedDevice),
   snapshots: Schema.Array(RuntimeSnapshotRecord),
   device: Schema.NullOr(RuntimeDeviceDto),
-  permissions: Schema.Unknown,
-  warnings: Schema.Array(Schema.Unknown),
-  logs: Schema.Array(Schema.Unknown),
+  permissions: RuntimeCommandPermissions,
+  warnings: Schema.Array(RuntimeWarningDto),
+  logs: Schema.Array(RuntimeLogEntryDto),
 }) {}
-
-export class RuntimeEmptyRequest extends Schema.Class<RuntimeEmptyRequest>("RuntimeEmptyRequest")(
-  {},
-) {}
 
 export class RuntimeRpcs extends RpcGroup.make(
   Rpc.make("runtime.getState", {
@@ -204,6 +300,16 @@ export class RuntimeRpcs extends RpcGroup.make(
   Rpc.make("runtime.status", {
     success: RuntimeStateDto,
     stream: true,
+  }),
+  Rpc.make("settings.patch", {
+    payload: RuntimeSettingsPatchRequest,
+    success: RuntimeStateDto,
+    error: RuntimeApiError,
+  }),
+  Rpc.make("preferences.patch", {
+    payload: RuntimePreferencesPatchRequest,
+    success: RuntimeStateDto,
+    error: RuntimeApiError,
   }),
   Rpc.make("ports.list", {
     success: Schema.Array(RuntimePortInfo),

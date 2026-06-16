@@ -41,10 +41,12 @@ import { readF32, readU16, VScopeEndianness as Endianness } from "./protocol";
 
 describe("@vscope/serial protocol", () => {
   test("encodes and parses split C-compatible frames", () => {
-    const encoded = encodeVScopeFrame({
-      type: VScopeMessageType.GetStatus,
-      payload: Uint8Array.of(1, 2, 3),
-    });
+    const encoded = Effect.runSync(
+      encodeVScopeFrame({
+        type: VScopeMessageType.GetStatus,
+        payload: Uint8Array.of(1, 2, 3),
+      }),
+    );
     const parser = new VScopeFrameParser();
 
     expect(parser.push(encoded.subarray(0, 2))).toEqual([]);
@@ -59,10 +61,12 @@ describe("@vscope/serial protocol", () => {
   });
 
   test("resets stale partial frames using the firmware RX timeout", () => {
-    const encoded = encodeVScopeFrame({
-      type: VScopeMessageType.GetStatus,
-      payload: Uint8Array.of(1, 2, 3),
-    });
+    const encoded = Effect.runSync(
+      encodeVScopeFrame({
+        type: VScopeMessageType.GetStatus,
+        payload: Uint8Array.of(1, 2, 3),
+      }),
+    );
     const parser = new VScopeFrameParser();
 
     expect(parser.push(encoded.subarray(0, 2), 0)).toEqual([]);
@@ -450,7 +454,7 @@ describe("@vscope/serial manager", () => {
     expect(result.reopened.path).toBe("/dev/tty.vscope-managed");
   });
 
-  test("keeps manager entries registered when serial close fails", async () => {
+  test("keeps manager entries registered but closes the stale handle when serial close fails", async () => {
     const driver = fakeDriver([
       fakeFirmware({
         path: "/dev/tty.vscope-close-fail",
@@ -467,7 +471,7 @@ describe("@vscope/serial manager", () => {
       });
       const closeExit = yield* Effect.exit(device.close);
       const afterFailedClose = yield* manager.listDevices;
-      const stateAfterFailedClose = yield* device.getState;
+      const stateAfterFailedClose = yield* Effect.exit(device.getState);
       const retryExit = yield* Effect.exit(manager.removeDevice("/dev/tty.vscope-close-fail"));
       const afterRetry = yield* manager.listDevices;
 
@@ -486,7 +490,7 @@ describe("@vscope/serial manager", () => {
 
     expect(result.afterFailedClose).toHaveLength(1);
     expect(result.afterFailedClose[0]?.path).toBe("/dev/tty.vscope-close-fail");
-    expect(result.stateAfterFailedClose).toBe(VScopeState.Halted);
+    expect(result.stateAfterFailedClose._tag).toBe("Failure");
     expect(result.retryExit._tag).toBe("Success");
     expect(result.afterRetry).toEqual([]);
   });
@@ -962,7 +966,7 @@ class FakeFirmware {
     delayMillis = 0,
   ): FakeFirmwareResponse {
     return {
-      bytes: encodeVScopeFrame({ type, payload }),
+      bytes: Effect.runSync(encodeVScopeFrame({ type, payload })),
       delayMillis,
     };
   }

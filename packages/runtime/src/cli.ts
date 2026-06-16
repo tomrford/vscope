@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { makePersistenceLayer, Persistence } from "@vscope/persistence";
 import { Effect } from "effect";
 
 import { DEFAULT_RUNTIME_PORT, makeRuntimeConfig, resolveRuntimePaths } from "./config";
@@ -27,27 +26,23 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
   }
 
   const paths = resolveRuntimePaths();
-  const storedPort = await Effect.runPromise(readStoredPort(paths.databasePath));
   const config = makeRuntimeConfig({
     databasePath: paths.databasePath,
-    port: parsed.port ?? storedPort,
+    ...(parsed.port === undefined ? {} : { port: parsed.port, portOverride: true }),
     uiDistPath,
   });
 
   console.log(`vscope ${packageJson.version ?? "0.0.0"}`);
-  console.log(`Runtime: http://${config.host}:${config.port}`);
-  console.log(`MCP:     http://${config.host}:${config.port}/mcp`);
+  if (config.portOverride) {
+    console.log(`Runtime: http://${config.host}:${config.port}`);
+    console.log(`MCP:     http://${config.host}:${config.port}/mcp`);
+  } else {
+    console.log(`Runtime: http://${config.host}:<persisted>`);
+    console.log(`MCP:     http://${config.host}:<persisted>/mcp`);
+  }
   console.log(`Data:    ${paths.dataDir}`);
 
   await Effect.runPromise(runRuntimeServer(config));
-}
-
-function readStoredPort(databasePath: string): Effect.Effect<number, unknown> {
-  return Effect.gen(function* () {
-    const persistence = yield* Persistence;
-    const settings = yield* persistence.readSettings;
-    return settings.settings.network.port;
-  }).pipe(Effect.provide(makePersistenceLayer({ path: databasePath })));
 }
 
 type CliArgs = {

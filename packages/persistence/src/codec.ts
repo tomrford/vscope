@@ -18,7 +18,7 @@ import {
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
   Timestamp,
-} from "./model.ts";
+} from "@vscope/shared";
 
 export const SingletonRow = Schema.Struct({
   data_json: Schema.String,
@@ -79,7 +79,7 @@ export const SnapshotComparisonRow = Schema.Struct({
   updated_at: Schema.String,
 });
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
@@ -182,7 +182,6 @@ function isPersistenceError(cause: unknown): cause is PersistenceError {
     case "PersistenceMigrationError":
     case "PersistenceQueryError":
     case "PersistenceValidationError":
-    case "PersistenceClosedError":
     case "SnapshotNotFoundError":
     case "SnapshotComparisonNotFoundError":
       return true;

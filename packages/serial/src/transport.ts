@@ -139,10 +139,6 @@ export interface SerialTransport {
   readonly close: Effect.Effect<void, SerialCloseError>;
 }
 
-interface Mutex {
-  readonly withLock: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
-}
-
 interface TransportState {
   closed: boolean;
 }
@@ -187,7 +183,7 @@ export const openSerialTransport = (
     Effect.gen(function* () {
       const port = yield* openPort(driver, openOptions);
       const queue = yield* Queue.unbounded<Uint8Array, SerialReadError | Cause.Done>();
-      const operationLock = yield* makeMutex();
+      const operationLock = yield* Semaphore.make(1);
       const state: TransportState = { closed: false };
 
       return makeTransport(port, queue, operationLock, state);
@@ -195,15 +191,6 @@ export const openSerialTransport = (
     (transport) => transport.close.pipe(Effect.ignore),
   );
 };
-
-const makeMutex = (): Effect.Effect<Mutex> =>
-  Effect.gen(function* () {
-    const lock = yield* Semaphore.make(1);
-
-    return {
-      withLock: (effect) => lock.withPermit(effect),
-    };
-  });
 
 const openPort = (
   driver: SerialDriver,
@@ -265,7 +252,7 @@ const openPort = (
 const makeTransport = (
   port: SerialPortLike,
   readQueue: Queue.Queue<Uint8Array, SerialReadError | Cause.Done>,
-  operationLock: Mutex,
+  operationLock: Semaphore.Semaphore,
   state: TransportState,
 ): SerialTransport => {
   const path = port.path;
@@ -305,7 +292,7 @@ const makeTransport = (
       : Effect.void;
 
   const close = Effect.uninterruptible(
-    operationLock.withLock(
+    operationLock.withPermit(
       Effect.gen(function* () {
         if (state.closed) {
           return;
@@ -327,11 +314,9 @@ const makeTransport = (
         );
 
         if (Exit.isFailure(closeExit)) {
-          if (state.closed || !port.isOpen) {
-            state.closed = true;
-            detachListeners();
-            endReadQueue();
-          }
+          state.closed = true;
+          detachListeners();
+          endReadQueue();
           return yield* Effect.failCause(closeExit.cause);
         }
 
@@ -354,7 +339,7 @@ const makeTransport = (
     readQueue: readQueue,
     chunks: Stream.fromQueue(readQueue),
     write: (bytes) =>
-      operationLock.withLock(
+      operationLock.withPermit(
         Effect.gen(function* () {
           yield* ensureOpen("write");
           yield* serialCallback(
@@ -366,7 +351,7 @@ const makeTransport = (
           );
         }),
       ),
-    drain: operationLock.withLock(
+    drain: operationLock.withPermit(
       Effect.gen(function* () {
         yield* ensureOpen("drain");
         yield* serialCallback(
@@ -376,7 +361,7 @@ const makeTransport = (
         );
       }),
     ),
-    flush: operationLock.withLock(
+    flush: operationLock.withPermit(
       Effect.gen(function* () {
         yield* ensureOpen("flush");
         yield* serialCallback(

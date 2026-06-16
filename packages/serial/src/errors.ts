@@ -1,6 +1,10 @@
 import { Data } from "effect";
 
-import type { VScopeMessageType, VScopeStatus as VScopeStatusValue } from "./protocol";
+import type {
+  VScopeFrameEncodeError,
+  VScopeMessageType,
+  VScopeStatus as VScopeStatusValue,
+} from "./protocol";
 import type {
   SerialConnectionClosedError,
   SerialDrainError,
@@ -64,5 +68,6 @@ export type VScopeDeviceError =
   | VScopeSessionClosedError
   | VScopeFirmwareError
   | VScopeDecodeError
+  | VScopeFrameEncodeError
   | VScopeUnexpectedResponseError
   | VScopeInvalidArgumentError;

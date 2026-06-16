@@ -11,13 +11,14 @@ import {
   SubscriptionRef,
 } from "effect";
 import {
-  Persistence,
   SNAPSHOT_SAMPLE_FORMAT,
+  SerialConfig,
   SnapshotDraft,
+  SnapshotRecord,
   SnapshotSamplesWrite,
   SnapshotTrigger,
-} from "@vscope/persistence";
-import type { PersistenceService, SerialConfig, SnapshotRecord } from "@vscope/persistence";
+} from "@vscope/shared";
+import { Persistence, type PersistenceService } from "@vscope/persistence";
 import { VScopeSerial, VScopeState } from "@vscope/serial";
 import type {
   VScopeControlStatus,

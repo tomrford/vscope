@@ -16,8 +16,5 @@
     "@vscope/shared": "workspace:*",
     "effect": "4.0.0-beta.78",
     "serialport": "13.0.0"
-  },
-  "devDependencies": {
-    "@serialport/binding-mock": "10.2.2"
   }
 }

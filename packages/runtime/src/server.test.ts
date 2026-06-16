@@ -2,8 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
-import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, noRecovery } from "@vscope/persistence";
-import { RuntimeRpcs } from "@vscope/shared";
+import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, RuntimeRpcs, noRecovery } from "@vscope/shared";
 import { Effect, Layer, Stream } from "effect";
 import {
   Headers,
