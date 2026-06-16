@@ -12,13 +12,13 @@
     "test": "bun test src"
   },
   "dependencies": {
-    "@effect/platform-browser": "4.0.0-beta.66",
+    "@effect/platform-browser": "4.0.0-beta.78",
     "@vscope/liveplot": "workspace:*",
-    "effect": "4.0.0-beta.66",
-    "foldkit": "0.104.1"
+    "effect": "4.0.0-beta.78",
+    "foldkit": "0.106.0"
   },
   "devDependencies": {
-    "@foldkit/vite-plugin": "0.7.0",
+    "@foldkit/vite-plugin": "0.8.0",
     "vite": "8.0.16"
   }
 }

@@ -5,7 +5,7 @@ export class PersistenceOpenError extends Schema.TaggedErrorClass<PersistenceOpe
   {
     path: Schema.String,
     reason: Schema.String,
-    cause: Schema.optionalKey(Schema.Defect),
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
 
@@ -14,7 +14,7 @@ export class PersistenceMigrationError extends Schema.TaggedErrorClass<Persisten
   {
     migration: Schema.String,
     reason: Schema.String,
-    cause: Schema.optionalKey(Schema.Defect),
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
 
@@ -23,7 +23,7 @@ export class PersistenceQueryError extends Schema.TaggedErrorClass<PersistenceQu
   {
     operation: Schema.String,
     reason: Schema.String,
-    cause: Schema.optionalKey(Schema.Defect),
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
 
@@ -32,7 +32,7 @@ export class PersistenceValidationError extends Schema.TaggedErrorClass<Persiste
   {
     operation: Schema.String,
     reason: Schema.String,
-    cause: Schema.optionalKey(Schema.Defect),
+    cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {}
 

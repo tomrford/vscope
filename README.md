@@ -4,6 +4,8 @@ Local daemon + browser UI for the vscope embedded debug interface.
 
 `vscope` runs one local Node process that owns the device connection, persistence, browser UI assets, app RPC surface, and streamable HTTP MCP endpoint. The browser UI is a Foldkit SPA and never talks to serial devices directly.
 
+`vscope` is a Node CLI and depends on native packages for USB serial and SQLite. Install and run it with the same Node major version. If you change Node versions after installing, reinstall `vscope` so native dependencies are rebuilt for the active Node runtime.
+
 Status: the package boundaries are in place. The runnable runtime server is still a scaffold.
 
 ## Architecture

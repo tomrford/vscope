@@ -13,8 +13,8 @@
     "test": "node --test src/*.test.ts"
   },
   "dependencies": {
-    "@effect/sql-sqlite-node": "4.0.0-beta.66",
+    "@effect/sql-sqlite-node": "4.0.0-beta.78",
     "@vscope/shared": "workspace:*",
-    "effect": "4.0.0-beta.66"
+    "effect": "4.0.0-beta.78"
   }
 }

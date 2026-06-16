@@ -13,6 +13,6 @@
     "test": "bun test src"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.66"
+    "effect": "4.0.0-beta.78"
   }
 }

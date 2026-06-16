@@ -46,3 +46,7 @@ Snapshot plots are browser routes backed by persisted daemon data. Live scope is
 - [x] `@vscope/persistence`: SQLite storage, migrations, runtime-owned settings, saved devices, downloaded snapshots, and comparison metadata are in place.
 - [ ] `@vscope/liveplot`: settle the reusable plotting core for live RT buffers and persisted high-resolution snapshot inspection.
 - [ ] `@vscope/ui`: rebuild the browser shell against the runtime contract as a presentation layer only.
+
+## Tooling
+
+- Always use `nix develop -c` to run commands (pnpm version and node versions may differ).

@@ -56,12 +56,17 @@ export class LiveViewSettings extends Schema.Class<LiveViewSettings>("LiveViewSe
   bufferDurationSeconds: Schema.Finite.check(Schema.isBetween({ minimum: 1, maximum: 3600 })),
 }) {}
 
+export class NetworkSettings extends Schema.Class<NetworkSettings>("NetworkSettings")({
+  port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+}) {}
+
 export class Settings extends Schema.Class<Settings>("Settings")({
   theme: Theme,
   defaultSerialConfig: SerialConfig,
   polling: PollingSettings,
   snapshots: SnapshotSettings,
   liveView: LiveViewSettings,
+  network: NetworkSettings,
 }) {}
 
 export type SettingsPatch = Partial<{
@@ -70,6 +75,7 @@ export type SettingsPatch = Partial<{
   readonly polling: PollingSettings;
   readonly snapshots: SnapshotSettings;
   readonly liveView: LiveViewSettings;
+  readonly network: NetworkSettings;
 }>;
 
 export const DEFAULT_SETTINGS = Settings.make({
@@ -87,6 +93,9 @@ export const DEFAULT_SETTINGS = Settings.make({
   }),
   liveView: LiveViewSettings.make({
     bufferDurationSeconds: 30,
+  }),
+  network: NetworkSettings.make({
+    port: 5174,
   }),
 });
 

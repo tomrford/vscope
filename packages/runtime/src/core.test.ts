@@ -346,6 +346,7 @@ function fakePersistenceLayer() {
           polling: patch.polling ?? settings.polling,
           snapshots: patch.snapshots ?? settings.snapshots,
           liveView: patch.liveView ?? settings.liveView,
+          network: patch.network ?? settings.network,
         });
         return SettingsState.make({
           settings,
