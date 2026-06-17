@@ -325,12 +325,6 @@ export function validateSnapshotDraftShape(
     );
   }
 
-  if (draft.rtValues.length !== draft.channelCount) {
-    return invalid(
-      `rtValues length ${draft.rtValues.length} does not match channelCount ${draft.channelCount}`,
-    );
-  }
-
   if (draft.trigger.channel >= draft.channelCount) {
     return invalid(
       `trigger channel ${draft.trigger.channel} is outside channelCount ${draft.channelCount}`,

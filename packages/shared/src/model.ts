@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { TriggerMode } from "./trigger.ts";
 
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0));
@@ -28,6 +28,8 @@ export class SerialConfig extends Schema.Class<SerialConfig>("SerialConfig")({
   dataBits: Schema.Literals([5, 6, 7, 8]),
   stopBits: Schema.Literals([1, 1.5, 2]),
   parity: SerialParity,
+  dtr: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
+  rts: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
 }) {}
 
 export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
@@ -35,6 +37,8 @@ export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
   dataBits: 8,
   stopBits: 1,
   parity: "none",
+  dtr: true,
+  rts: true,
 });
 
 export class PollingSettings extends Schema.Class<PollingSettings>("PollingSettings")({

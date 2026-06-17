@@ -26,6 +26,7 @@ import {
   VScopeInvalidArgumentError,
   VScopeSerial,
   VScopeState,
+  type OpenVScopeDeviceOptions,
   type SerialPortInfo,
   type VScopeControlStatus,
   type VScopeDevice,
@@ -82,6 +83,45 @@ describe("@vscope/runtime core", () => {
     expect(result.connected.device?.path).toBe(fakePort.path);
     expect(result.connected.permissions.mode).toBe("halted");
     expect(result.duplicate._tag).toBe("Failure");
+  });
+
+  test("opens devices with the persisted serial control-line settings", async () => {
+    let openedWith: OpenVScopeDeviceOptions | null = null;
+    const customSettings = Settings.make({
+      ...testSettings,
+      defaultSerialConfig: {
+        ...testSettings.defaultSerialConfig,
+        baudRate: 312_500,
+        dtr: false,
+        rts: true,
+      },
+    });
+
+    await runWithCore(
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "settings/patch",
+          patch: { defaultSerialConfig: customSettings.defaultSerialConfig },
+        });
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+      }),
+      fakeSerialLayer([fakePort], {
+        onOpen: (openOptions) => {
+          openedWith = openOptions;
+        },
+      }),
+    );
+
+    expect(openedWith).toMatchObject({
+      path: fakePort.path,
+      baudRate: 312_500,
+      dtr: false,
+      rts: true,
+    });
   });
 
   test("observes the run-trigger-capture lifecycle through status polling", async () => {
@@ -493,6 +533,7 @@ function snapshotSampleBytes(): Uint8Array {
 
 interface FakeSerialLayerOptions {
   readonly device?: FakeDeviceOptions | undefined;
+  readonly onOpen?: ((openOptions: OpenVScopeDeviceOptions) => void) | undefined;
 }
 
 interface FakeDeviceOptions {
@@ -527,6 +568,7 @@ function fakeSerialLayer(
             }
 
             const device = fakeDevice(openOptions.path, options.device);
+            options.onOpen?.(openOptions);
             devices.set(openOptions.path, device);
             yield* PubSub.publish(events, {
               _tag: "DeviceOpened",

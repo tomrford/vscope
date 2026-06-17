@@ -84,14 +84,13 @@ describe("@vscope/serial protocol", () => {
 
 describe("@vscope/serial device", () => {
   test("opens a vscope device and hydrates static firmware metadata", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-a",
-        deviceName: "scope-a",
-        variables: ["voltage", "current", "speed", "torque", "temp", "phase"],
-        rtLabels: ["kp", "ki"],
-      }),
-    ]);
+    const firmware = fakeFirmware({
+      path: "/dev/tty.vscope-a",
+      deviceName: "scope-a",
+      variables: ["voltage", "current", "speed", "torque", "temp", "phase"],
+      rtLabels: ["kp", "ki"],
+    });
+    const driver = fakeDriver([firmware]);
 
     const device = await Effect.runPromise(
       Effect.scoped(
@@ -117,6 +116,7 @@ describe("@vscope/serial device", () => {
     expect(metadata.variables).toEqual(["voltage", "current", "speed", "torque", "temp", "phase"]);
     expect(metadata.rtLabels).toEqual(["kp", "ki"]);
     expect(metadata.channelMap).toEqual([0, 1, 2, 3, 4]);
+    expect(firmware.controlSignals).toEqual({ dtr: true, rts: true });
   });
 
   test("maps trigger modes between wire values and shared semantic values", async () => {
@@ -705,6 +705,17 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
     });
   }
 
+  set(
+    options: { readonly dtr?: boolean; readonly rts?: boolean },
+    callback?: SerialCallback,
+  ): void {
+    this.#firmware.controlSignals = {
+      dtr: options.dtr ?? this.#firmware.controlSignals.dtr,
+      rts: options.rts ?? this.#firmware.controlSignals.rts,
+    };
+    queueMicrotask(() => callback?.(undefined));
+  }
+
   write(chunk: Uint8Array | Buffer, callback?: SerialCallback): boolean {
     const responses = this.#firmware.receive(Uint8Array.from(chunk));
     queueMicrotask(() => {
@@ -777,6 +788,7 @@ class FakeFirmware {
   stateTransitionReadsRemaining = 0;
   acquisitionReadsRemaining = 0;
   snapshotValid: boolean;
+  controlSignals: { dtr: boolean; rts: boolean } = { dtr: false, rts: false };
   channelMap = [0, 1, 2, 3, 4];
   trigger: { threshold: number; channel: number; mode: VScopeTriggerModeValue } = {
     threshold: 0,
@@ -847,7 +859,7 @@ class FakeFirmware {
         }
         this.requestedState = VScopeState.Acquiring;
         this.stateTransitionReadsRemaining = this.stateTransitionStatusReads;
-        return this.response(type, this.statusPayload());
+        return this.response(type, new Uint8Array());
       case VScopeMessageType.GetFrame:
         return this.response(
           type,

@@ -961,6 +961,8 @@ function openOptions(path: string, config: SerialConfig) {
     dataBits: config.dataBits,
     stopBits: config.stopBits,
     parity: config.parity,
+    dtr: config.dtr,
+    rts: config.rts,
   };
 }
 

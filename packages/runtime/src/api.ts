@@ -8,6 +8,7 @@ import {
   RuntimeDeviceIntent,
   RuntimeFramePayload,
   RuntimeLogEntryDto,
+  RuntimePortInfo,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
   RuntimeStaticMetadata,
@@ -34,7 +35,7 @@ export interface RuntimeRpcHandlers {
   readonly patchPreferences: (
     patch: RuntimePreferencesPatchRequest,
   ) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
-  readonly listPorts: Effect.Effect<ReadonlyArray<SerialPortInfo>, RuntimeCoreError>;
+  readonly listPorts: Effect.Effect<ReadonlyArray<RuntimePortInfo>, RuntimeCoreError>;
   readonly connectDevice: (path: string) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly disconnectDevice: Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly runDevice: Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
@@ -63,7 +64,7 @@ export interface RuntimeSubscriptions {
 
 export interface RuntimeMcpHandlers {
   readonly getState: Effect.Effect<RuntimeStateDto>;
-  readonly listPorts: Effect.Effect<ReadonlyArray<SerialPortInfo>, RuntimeCoreError>;
+  readonly listPorts: Effect.Effect<ReadonlyArray<RuntimePortInfo>, RuntimeCoreError>;
   readonly connectDevice: (path: string) => Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly disconnectDevice: Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
   readonly runDevice: Effect.Effect<RuntimeStateDto, RuntimeCoreError>;
@@ -104,7 +105,11 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
     patchPreferences: (patch) => dispatch({ type: "preferences/patch", patch }),
     listPorts: core
       .query({ type: "ports/list" })
-      .pipe(Effect.map((result) => (result.type === "ports/list" ? result.ports : []))),
+      .pipe(
+        Effect.map((result) =>
+          result.type === "ports/list" ? result.ports.map(runtimePortInfo) : [],
+        ),
+      ),
     connectDevice: (path) => dispatch({ type: "devices/connect", path }),
     disconnectDevice: dispatch({ type: "devices/disconnect" }),
     runDevice: dispatch({ type: "devices/run" }),
@@ -118,10 +123,14 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
     captureSnapshot: (label) =>
       core
         .dispatch({ type: "snapshots/capture", label })
-        .pipe(Effect.map((state) => state.snapshots[0])),
+        .pipe(Effect.map((state) => snapshotDto(state.snapshots[0]))),
     listSnapshots: core
       .query({ type: "snapshots/list" })
-      .pipe(Effect.map((result) => (result.type === "snapshots/list" ? result.snapshots : []))),
+      .pipe(
+        Effect.map((result) =>
+          result.type === "snapshots/list" ? result.snapshots.map(snapshotDto) : [],
+        ),
+      ),
   };
 
   const subscriptions: RuntimeSubscriptions = {
@@ -179,6 +188,27 @@ export function runtimeStateDto(state: CoreState): RuntimeStateDto {
         })
       : null,
   });
+}
+
+function runtimePortInfo(port: SerialPortInfo): RuntimePortInfo {
+  const result: {
+    path: string;
+    manufacturer?: string;
+    serialNumber?: string;
+    pnpId?: string;
+    locationId?: string;
+    productId?: string;
+    vendorId?: string;
+  } = { path: port.path };
+
+  if (port.manufacturer !== undefined) result.manufacturer = port.manufacturer;
+  if (port.serialNumber !== undefined) result.serialNumber = port.serialNumber;
+  if (port.pnpId !== undefined) result.pnpId = port.pnpId;
+  if (port.locationId !== undefined) result.locationId = port.locationId;
+  if (port.productId !== undefined) result.productId = port.productId;
+  if (port.vendorId !== undefined) result.vendorId = port.vendorId;
+
+  return RuntimePortInfo.make(result);
 }
 
 function framePayloadFromState(state: CoreState): Option.Option<RuntimeFramePayload> {

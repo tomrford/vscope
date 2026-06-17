@@ -29,6 +29,8 @@ export interface SerialOpenOptions {
   readonly hupcl?: boolean | undefined;
   readonly highWaterMark?: number | undefined;
   readonly endOnClose?: boolean | undefined;
+  readonly dtr?: boolean | undefined;
+  readonly rts?: boolean | undefined;
 }
 
 export interface OpenSerialTransportOptions extends SerialOpenOptions {
@@ -93,6 +95,7 @@ export interface SerialPortLike {
   readonly baudRate: number;
   readonly isOpen: boolean;
   open(callback?: SerialCallback): void;
+  set(options: SerialControlSignals, callback?: SerialCallback): void;
   write(chunk: SerialBytes, callback?: SerialCallback): boolean;
   drain(callback?: SerialCallback): void;
   flush(callback?: SerialCallback): void;
@@ -106,6 +109,11 @@ export interface SerialPortLike {
   off(event: "data", listener: (chunk: Buffer) => void): this;
   off(event: "error", listener: (error: Error) => void): this;
   off(event: "close", listener: (error?: Error | null) => void): this;
+}
+
+export interface SerialControlSignals {
+  readonly dtr?: boolean | undefined;
+  readonly rts?: boolean | undefined;
 }
 
 export interface SerialPortConstructor {
@@ -197,6 +205,7 @@ const openPort = (
   options: SerialOpenOptions,
 ): Effect.Effect<SerialPortLike, SerialOpenError> =>
   Effect.callback<SerialPortLike, SerialOpenError>((resume) => {
+    const { dtr = true, rts = true, ...serialOptions } = options;
     let port: SerialPortLike | undefined;
     let settled = false;
 
@@ -214,7 +223,7 @@ const openPort = (
     };
 
     try {
-      port = driver.open({ ...options, autoOpen: false });
+      port = driver.open({ ...serialOptions, autoOpen: false });
       port.once("error", onError);
       port.open((cause) => {
         if (cause) {
@@ -234,7 +243,26 @@ const openPort = (
           return;
         }
 
-        finish(Effect.succeed(port));
+        port.set({ dtr, rts }, (setCause) => {
+          if (setCause) {
+            finish(Effect.fail(new SerialOpenError({ path: options.path, cause: setCause })));
+            return;
+          }
+
+          if (!port) {
+            finish(
+              Effect.fail(
+                new SerialOpenError({
+                  path: options.path,
+                  cause: new Error("Serial port was not constructed"),
+                }),
+              ),
+            );
+            return;
+          }
+
+          finish(Effect.succeed(port));
+        });
       });
     } catch (cause) {
       finish(Effect.fail(new SerialOpenError({ path: options.path, cause })));

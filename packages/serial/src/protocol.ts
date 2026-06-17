@@ -2,7 +2,7 @@ import { Data, Effect } from "effect";
 
 export const VSCOPE_SYNC_BYTE = 0xc8;
 export const VSCOPE_MAX_PAYLOAD = 252;
-export const VSCOPE_FRAME_TIMEOUT_MICROS = 10_000;
+export const VSCOPE_FRAME_TIMEOUT_MICROS = 100_000;
 export const VSCOPE_FRAME_TIMEOUT_MILLIS = VSCOPE_FRAME_TIMEOUT_MICROS / 1000;
 
 export const VScopeEndianness = {

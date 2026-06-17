@@ -251,6 +251,8 @@ describe("@vscope/persistence", () => {
           const settings = yield* persistence.readSettings;
           expect(settings.settings.theme).toBe("dark");
           expect(settings.settings.defaultSerialConfig.baudRate).toBe(57_600);
+          expect(settings.settings.defaultSerialConfig.dtr).toBe(true);
+          expect(settings.settings.defaultSerialConfig.rts).toBe(true);
 
           yield* Effect.all(
             [

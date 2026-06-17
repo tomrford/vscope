@@ -10,7 +10,6 @@ import {
   VScopeResponseTimeoutError,
   VScopeSessionClosedError,
   VScopeTransportError,
-  VScopeUnexpectedResponseError,
 } from "./errors";
 import {
   fixedString,
@@ -324,30 +323,26 @@ const takeResponse = (
   responseType: VScopeMessageType,
 ): Effect.Effect<Uint8Array, VScopeDeviceError> =>
   Effect.gen(function* () {
-    const frame = yield* Queue.take(frames).pipe(
-      Effect.mapError((error) =>
-        Cause.isDone(error)
-          ? new VScopeTransportError({
-              path,
-              cause: new SerialConnectionClosedError({ path, operation: "read" }),
-            })
-          : error,
-      ),
-    );
+    while (true) {
+      const frame = yield* Queue.take(frames).pipe(
+        Effect.mapError((error) =>
+          Cause.isDone(error)
+            ? new VScopeTransportError({
+                path,
+                cause: new SerialConnectionClosedError({ path, operation: "read" }),
+              })
+            : error,
+        ),
+      );
 
-    if (frame.type === VScopeMessageType.Error) {
-      return yield* decodeFirmwareError(path, requestType, frame.payload);
+      if (frame.type === VScopeMessageType.Error) {
+        return yield* decodeFirmwareError(path, requestType, frame.payload);
+      }
+
+      if (frame.type === responseType) {
+        return frame.payload;
+      }
     }
-
-    if (frame.type !== responseType) {
-      return yield* new VScopeUnexpectedResponseError({
-        path,
-        requestType,
-        responseType: frame.type,
-      });
-    }
-
-    return frame.payload;
   });
 
 interface DeviceParts {
@@ -463,7 +458,10 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     stop: (options) =>
       setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
     trigger: client.request(VScopeMessageType.Trigger, VScopeMessageType.Trigger).pipe(
-      Effect.map((payload) => decodeStatus(path, VScopeMessageType.Trigger, payload)),
+      Effect.flatMap((payload) => {
+        expectLength(path, VScopeMessageType.Trigger, payload, 0);
+        return getStatusEffect;
+      }),
       catchDecode(path, VScopeMessageType.Trigger),
     ),
     getFrame: getFrame(path, client, info, littleEndian),
