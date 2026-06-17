@@ -15,6 +15,6 @@
     "./core": "./src/core/index.ts"
   },
   "scripts": {
-    "test": "bun test src"
+    "test": "vitest run src"
   }
 }

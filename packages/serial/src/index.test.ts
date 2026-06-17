@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { EventEmitter } from "node:events";
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { Effect, Fiber, Stream } from "effect";
 
 import {
@@ -666,15 +666,14 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
 class MemorySerialPort extends EventEmitter implements SerialPortLike {
   readonly path: string;
   readonly baudRate: number;
+  readonly #firmware: FakeFirmware;
   #isOpen = false;
 
-  constructor(
-    options: SerialOpenOptions,
-    private readonly firmware: FakeFirmware,
-  ) {
+  constructor(options: SerialOpenOptions, firmware: FakeFirmware) {
     super();
     this.path = options.path;
     this.baudRate = options.baudRate;
+    this.#firmware = firmware;
   }
 
   get isOpen(): boolean {
@@ -686,7 +685,7 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
     queueMicrotask(() => {
       this.emit("open");
       callback?.(undefined);
-      if (this.firmware.closeAfterOpenMillis !== undefined) {
+      if (this.#firmware.closeAfterOpenMillis !== undefined) {
         setTimeout(() => {
           if (!this.#isOpen) {
             return;
@@ -694,20 +693,20 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
 
           this.#isOpen = false;
           this.emit("close", null);
-        }, this.firmware.closeAfterOpenMillis);
+        }, this.#firmware.closeAfterOpenMillis);
       }
-      if (this.firmware.errorAfterOpenMillis !== undefined) {
+      if (this.#firmware.errorAfterOpenMillis !== undefined) {
         setTimeout(() => {
           if (this.#isOpen) {
             this.emit("error", new Error("read-side serial failure"));
           }
-        }, this.firmware.errorAfterOpenMillis);
+        }, this.#firmware.errorAfterOpenMillis);
       }
     });
   }
 
   write(chunk: Uint8Array | Buffer, callback?: SerialCallback): boolean {
-    const responses = this.firmware.receive(Uint8Array.from(chunk));
+    const responses = this.#firmware.receive(Uint8Array.from(chunk));
     queueMicrotask(() => {
       for (const response of responses) {
         const emitResponse = () => {
@@ -736,10 +735,10 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
   }
 
   close(callback?: SerialCallback): void {
-    const closeError = this.firmware.nextCloseError();
+    const closeError = this.#firmware.nextCloseError();
     queueMicrotask(() => {
       if (closeError) {
-        if (this.firmware.closeFailureEmitsClose) {
+        if (this.#firmware.closeFailureEmitsClose) {
           this.#isOpen = false;
           this.emit("close", closeError);
         }

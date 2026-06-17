@@ -1,8 +1,7 @@
 import fs from "node:fs";
-import assert from "node:assert/strict";
 import os from "node:os";
 import nodePath from "node:path";
-import { describe, test } from "node:test";
+import { describe, expect, test } from "vitest";
 
 import { SqliteClient } from "@effect/sql-sqlite-node";
 import { Effect, Option } from "effect";
@@ -25,17 +24,6 @@ import {
   initializePersistence,
   makePersistenceLayer,
 } from "./index.ts";
-
-function expect<T>(actual: T) {
-  return {
-    toBe(expected: unknown) {
-      assert.equal(actual, expected);
-    },
-    toEqual(expected: unknown) {
-      assert.deepStrictEqual(actual, expected);
-    },
-  };
-}
 
 async function withTempPath<T>(run: (path: string) => Promise<T>) {
   const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vscope-persistence-"));
@@ -100,9 +88,8 @@ describe("@vscope/persistence", () => {
     await withTempPath(async (path) => {
       fs.mkdirSync(path);
 
-      await assert.rejects(Effect.runPromise(initializePersistence({ path })), (error) => {
-        assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceOpenError");
-        return true;
+      await expect(Effect.runPromise(initializePersistence({ path }))).rejects.toMatchObject({
+        _tag: "PersistenceOpenError",
       });
     });
   });
@@ -117,9 +104,8 @@ describe("@vscope/persistence", () => {
         }),
       );
 
-      await assert.rejects(Effect.runPromise(initializePersistence({ path })), (error) => {
-        assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceMigrationError");
-        return true;
+      await expect(Effect.runPromise(initializePersistence({ path }))).rejects.toMatchObject({
+        _tag: "PersistenceMigrationError",
       });
     });
   });
@@ -219,7 +205,7 @@ describe("@vscope/persistence", () => {
 
   test("settings and preferences patches validate instead of defecting", async () => {
     await withTempPath(async (path) => {
-      await assert.rejects(
+      await expect(
         runWithPersistence(
           path,
           Effect.gen(function* () {
@@ -227,13 +213,9 @@ describe("@vscope/persistence", () => {
             yield* persistence.patchSettings({ theme: "purple" as never });
           }),
         ),
-        (error) => {
-          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
-          return true;
-        },
-      );
+      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
 
-      await assert.rejects(
+      await expect(
         runWithPersistence(
           path,
           Effect.gen(function* () {
@@ -243,11 +225,7 @@ describe("@vscope/persistence", () => {
             });
           }),
         ),
-        (error) => {
-          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
-          return true;
-        },
-      );
+      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
     });
   });
 
@@ -418,7 +396,7 @@ describe("@vscope/persistence", () => {
 
   test("rejects impossible snapshot metadata", async () => {
     await withTempPath(async (path) => {
-      await assert.rejects(
+      await expect(
         runWithPersistence(
           path,
           Effect.gen(function* () {
@@ -437,13 +415,9 @@ describe("@vscope/persistence", () => {
             yield* persistence.createSnapshot(invalid);
           }),
         ),
-        (error) => {
-          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
-          return true;
-        },
-      );
+      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
 
-      await assert.rejects(
+      await expect(
         runWithPersistence(
           path,
           Effect.gen(function* () {
@@ -460,11 +434,7 @@ describe("@vscope/persistence", () => {
             yield* persistence.createSnapshot(invalid as never);
           }),
         ),
-        (error) => {
-          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
-          return true;
-        },
-      );
+      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
 
       await runWithPersistence(
         path,
@@ -522,7 +492,7 @@ describe("@vscope/persistence", () => {
 
   test("snapshot comparisons reject duplicate member ids before SQLite insert", async () => {
     await withTempPath(async (path) => {
-      await assert.rejects(
+      await expect(
         runWithPersistence(
           path,
           Effect.gen(function* () {
@@ -539,11 +509,7 @@ describe("@vscope/persistence", () => {
             );
           }),
         ),
-        (error) => {
-          assert.equal((error as { readonly _tag?: unknown })._tag, "PersistenceValidationError");
-          return true;
-        },
-      );
+      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
     });
   });
 

@@ -10,7 +10,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test src"
+    "test": "vitest run src"
   },
   "dependencies": {
     "@vscope/shared": "workspace:*",

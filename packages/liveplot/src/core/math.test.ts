@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { lerp } from "./math/lerp";
 import { drawSpline } from "./math/spline";
 import { niceTimeInterval, formatRelativeSeconds } from "./math/intervals";

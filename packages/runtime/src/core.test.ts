@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
 import {
   DEFAULT_PREFERENCES,

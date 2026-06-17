@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";

@@ -1,42 +1,23 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 
-const loadMain = async () => {
-  Object.assign(globalThis, {
-    window: {
-      requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(callback, 0),
-    },
-  });
+import { SelectedPanel, ToggledRun, init, update } from "./model.ts";
 
-  return await import("./main");
-};
-
-describe("@vscope/ui", () => {
-  test("initializes without a server connection", async () => {
-    const { init } = await loadMain();
+describe("@vscope/ui model", () => {
+  test("initializes the mock workbench", () => {
     const [model, commands] = init();
 
-    expect(model).toMatchObject({
-      appName: "vscope",
-      status: "Waiting for runtime",
-    });
-    expect(commands).toEqual([]);
+    expect(model.appName).toBe("vscope");
+    expect(model.activePanel).toBe("Controls");
+    expect(model.selectedSignals).toHaveLength(5);
+    expect(commands).toHaveLength(0);
   });
 
-  test("updates runtime status through the Foldkit update loop", async () => {
-    const { init, update } = await loadMain();
+  test("updates primary mock controls through the Foldkit update loop", () => {
     const [model] = init();
-    const [next] = update(model, {
-      _tag: "RuntimeStateLoaded",
-      status: "Connected",
-    });
+    const [stopped] = update(model, ToggledRun());
+    const [snapshots] = update(stopped, SelectedPanel({ panel: "Snapshots" }));
 
-    expect(next.status).toBe("Connected");
-  });
-
-  test("renders the current shell title", async () => {
-    const { init, view } = await loadMain();
-    const [model] = init();
-
-    expect(view(model).title).toBe("vscope");
+    expect(stopped.isRunning).toBe(false);
+    expect(snapshots.activePanel).toBe("Snapshots");
   });
 });

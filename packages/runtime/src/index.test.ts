@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { DEFAULT_SETTINGS } from "@vscope/shared";
 
 import { DEFAULT_RUNTIME_HOST, DEFAULT_RUNTIME_PORT, RuntimeEndpoint, makeRuntimeConfig } from ".";

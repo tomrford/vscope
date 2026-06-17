@@ -1,8 +1,9 @@
 import { foldkit } from "@foldkit/vite-plugin";
+import stylex from "@stylexjs/unplugin/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [foldkit({ devToolsMcpPort: 9988 })],
+  plugins: process.env.VITEST ? [] : [stylex(), foldkit({ devToolsMcpPort: 9988 })],
   server: {
     host: "127.0.0.1",
     port: 5173,

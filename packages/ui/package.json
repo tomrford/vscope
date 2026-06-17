@@ -9,16 +9,18 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
-    "test": "bun test src"
+    "test": "VITEST=1 vitest run src"
   },
   "dependencies": {
     "@effect/platform-browser": "4.0.0-beta.78",
+    "@stylexjs/stylex": "0.18.3",
     "@vscope/liveplot": "workspace:*",
     "effect": "4.0.0-beta.78",
     "foldkit": "0.106.0"
   },
   "devDependencies": {
     "@foldkit/vite-plugin": "0.8.0",
+    "@stylexjs/unplugin": "0.18.3",
     "vite": "8.0.16"
   }
 }

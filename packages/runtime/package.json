@@ -10,7 +10,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "bun test src"
+    "test": "vitest run src"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-beta.78",

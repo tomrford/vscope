@@ -10,7 +10,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "node --test src/*.test.ts"
+    "test": "vitest run src"
   },
   "dependencies": {
     "@effect/sql-sqlite-node": "4.0.0-beta.78",

@@ -19,7 +19,6 @@
       "@vscope/serial": ["packages/serial/src/index.ts"],
       "@vscope/shared": ["packages/shared/src/index.ts"]
     },
-    "types": ["bun"],
     "plugins": [
       {
         "name": "@effect/language-service"

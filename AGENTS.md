@@ -50,3 +50,4 @@ Snapshot plots are browser routes backed by persisted daemon data. Live scope is
 ## Tooling
 
 - Always use `nix develop -c` to run commands (pnpm version and node versions may differ).
+- Toolchain uses `pnpm` since vscope is a node-only app relying on native support for serial and sqlite.
