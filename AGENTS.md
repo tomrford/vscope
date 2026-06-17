@@ -24,7 +24,9 @@ The browser is a presentation layer. It may hold route, draft form, paused-view,
 
 ## Architecture Direction
 
-Start as one package with ordinary source directories. Avoid private workspace packages until there is a real build, dependency, or test boundary. Likely future splits are UI build isolation, reusable live plotting, or shared schemas that must be imported without server dependencies.
+The public package is `vscope`. Internal implementation lives in private pnpm workspace packages under `packages/*`, with `bin/vscope.js` and the root package providing the published CLI surface.
+
+Keep package boundaries tied to real runtime concerns: `@vscope/runtime` composes the daemon, `@vscope/shared` defines wire/domain schemas, `@vscope/serial` owns protocol and serial transport, `@vscope/persistence` owns SQLite storage, `@vscope/liveplot` owns browser-safe plotting primitives, and `@vscope/ui` owns the Foldkit browser shell.
 
 The server command layer is the shared contract. UI actions and MCP tools should dispatch through the same runtime path, so agent control and human control observe the same rules and state transitions.
 
@@ -32,20 +34,9 @@ Snapshot plots are browser routes backed by persisted daemon data. Live scope is
 
 ## Current Constraints
 
-- Keep the package publishable as `vscope`; the placeholder CLI exists only until the daemon lands.
+- Keep the package publishable as `vscope`; the root CLI remains the only public command surface.
 - Keep localhost-only assumptions unless an auth story is added.
-- Preserve `minimumReleaseAge`, exact saves, and strict dependency-build policy.
 - The Nix dev shell uses Node 26 and an overridden pnpm wrapper to avoid the known bad Node 24.15.0 wrapper path.
-- Release publishing is GitHub Release driven, not raw tag-push driven.
-
-## Package Closeout TODO
-
-- [x] `@vscope/serial`: C-derived protocol/types, Effect serial transport, VScope device client, device manager, dense snapshot stream, and fake-firmware tests are in place.
-- [ ] `@vscope/runtime`: build the daemon composition root over serial, persistence, and shared schemas; own device fan-out/fan-in policy, REST/SSE, and MCP command paths.
-- [ ] `@vscope/shared`: define the runtime/UI/MCP wire contracts around the serial device model and persisted snapshot shapes.
-- [x] `@vscope/persistence`: SQLite storage, migrations, runtime-owned settings, saved devices, downloaded snapshots, and comparison metadata are in place.
-- [ ] `@vscope/liveplot`: settle the reusable plotting core for live RT buffers and persisted high-resolution snapshot inspection.
-- [ ] `@vscope/ui`: rebuild the browser shell against the runtime contract as a presentation layer only.
 
 ## Tooling
 

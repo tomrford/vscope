@@ -7,7 +7,7 @@ This package was copied from the v2scope liveplot engine fork:
 - Upstream license: MIT
 - v2scope fork base commit: `a913578832784bb6abdb148b6af9cf1739be2759`
 
-The current upstream `liveline` reference added under `grepo/liveline` is:
+The `liveline` reference under `.repos/liveline` is:
 
 - URL: https://github.com/benjitaylor/liveline.git
 - Ref: `main`

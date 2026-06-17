@@ -6,13 +6,13 @@ Local daemon + browser UI for the vscope embedded debug interface.
 
 `vscope` is a Node CLI and depends on native packages for USB serial and SQLite. Install and run it with the same Node major version. If you change Node versions after installing, reinstall `vscope` so native dependencies are rebuilt for the active Node runtime.
 
-Status: the package boundaries are in place. The runnable runtime server is still a scaffold.
+Status: the package boundaries are in place. The runtime server exposes health, RPC, MCP, snapshot sample, and static UI routes; device policy and UI workflows are still settling.
 
 ## Architecture
 
 ```text
 bin/vscope.js
-  -> @vscope/runtime (scaffold)
+  -> @vscope/runtime
        -> @vscope/serial
        -> @vscope/persistence
        -> @vscope/shared
@@ -68,11 +68,9 @@ nix develop -c pnpm run build:ui
 
 During UI development, Vite runs on `127.0.0.1:5173` and proxies `/health`, `/rpc`, `/mcp`, and `/snapshots` to the runtime port `127.0.0.1:5174`. Production runtime should serve the built UI assets directly.
 
-Foldkit DevTools MCP is configured in `.codex/config.toml`; the Vite plugin exposes the relay on port `9988`.
-
 ## Reference Material
 
-The `reference/` directory contains firmware and previous SQLite/runtime source snapshots for porting. The `grepo/` directory is managed by `grepo`; its entries are read-only external reference snapshots.
+The `reference/` directory contains firmware protocol headers and source used for porting. The `.repos/` directory is managed by `grepo`; its entries are read-only external reference snapshots.
 
 ## License
 
