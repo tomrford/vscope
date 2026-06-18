@@ -343,7 +343,7 @@ const makeRuntimeCore = Effect.gen(function* () {
       yield* interruptMonitor;
       const config = command.serialConfig ?? snapshot.settings.defaultSerialConfig;
       const device = yield* serial
-        .openDevice(openOptions(command.path, config))
+        .openDevice(openOptions(command.path, config, snapshot.settings.polling.crcRetryAttempts))
         .pipe(
           Effect.mapError(
             (cause) => new RuntimeCoreSerialError({ operation: "devices/connect", cause }),
@@ -954,7 +954,7 @@ function snapshotAvailability(status: VScopeControlStatus): SnapshotAvailability
   return "unknown";
 }
 
-function openOptions(path: string, config: SerialConfig) {
+function openOptions(path: string, config: SerialConfig, crcRetryAttempts: number) {
   return {
     path,
     baudRate: config.baudRate,
@@ -963,6 +963,7 @@ function openOptions(path: string, config: SerialConfig) {
     parity: config.parity,
     dtr: config.dtr,
     rts: config.rts,
+    crcRetryAttempts,
   };
 }
 

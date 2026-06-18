@@ -10,6 +10,7 @@ import {
   VScopeResponseTimeoutError,
   VScopeSessionClosedError,
   VScopeTransportError,
+  VScopeUnexpectedResponseError,
 } from "./errors";
 import {
   fixedString,
@@ -17,7 +18,8 @@ import {
   readU16,
   readU32,
   VScopeEndianness,
-  type VScopeFrame,
+  VScopeFrameParseError,
+  type VScopeFrameParseEvent,
   VScopeFrameParser,
   VScopeMessageType,
   VSCOPE_MAX_PAYLOAD,
@@ -104,6 +106,7 @@ export const openVScopeDevice = (
     const transport = yield* openSerialTransport(options);
     const client = yield* makeVScopeClient(transport, {
       requestTimeoutMillis: options.requestTimeoutMillis,
+      crcRetryAttempts: options.crcRetryAttempts,
     });
     yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
     const info = yield* getInfo(transport.path, client);
@@ -143,15 +146,19 @@ export const openVScopeDevice = (
 
 const makeVScopeClient = (
   transport: SerialTransport,
-  options: { readonly requestTimeoutMillis?: number | undefined },
+  options: {
+    readonly requestTimeoutMillis?: number | undefined;
+    readonly crcRetryAttempts?: number | undefined;
+  },
 ): Effect.Effect<VScopeClient, never, Scope.Scope> =>
   Effect.gen(function* () {
-    const frames = yield* Queue.unbounded<VScopeFrame, VScopeDeviceError | Cause.Done>();
+    const events = yield* Queue.unbounded<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>();
     const requestLock = yield* Semaphore.make(1);
     const closed = yield* Deferred.make<void, VScopeDeviceError>();
     const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
     const parser = new VScopeFrameParser();
     const timeoutMillis = options.requestTimeoutMillis ?? 1000;
+    const crcRetryAttempts = options.crcRetryAttempts ?? 2;
 
     const ensureOpen = (requestType: VScopeMessageType) =>
       Ref.get(closedState).pipe(
@@ -172,11 +179,11 @@ const makeVScopeClient = (
       completion._tag === "None"
         ? Effect.void
         : completion._tag === "Success"
-          ? Queue.end(frames).pipe(
+          ? Queue.end(events).pipe(
               Effect.andThen(Deferred.succeed(closed, undefined)),
               Effect.asVoid,
             )
-          : Queue.fail(frames, completion.error).pipe(
+          : Queue.fail(events, completion.error).pipe(
               Effect.andThen(Deferred.fail(closed, completion.error)),
               Effect.asVoid,
             );
@@ -262,8 +269,8 @@ const makeVScopeClient = (
           Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
         );
 
-        for (const frame of parser.push(chunk)) {
-          yield* Queue.offer(frames, frame);
+        for (const event of parser.pushEvents(chunk)) {
+          yield* Queue.offer(events, event);
         }
       }
     }).pipe(
@@ -280,32 +287,49 @@ const makeVScopeClient = (
         Effect.gen(function* () {
           yield* ensureOpen(requestType);
           const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
-          yield* transport
-            .write(encoded)
-            .pipe(
-              Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
-            );
-          yield* transport.drain.pipe(
-            Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
-          );
 
-          return yield* takeResponse(transport.path, frames, requestType, responseType).pipe(
-            Effect.timeoutOrElse({
-              duration: `${timeoutMillis} millis`,
-              orElse: () => {
-                const error = new VScopeResponseTimeoutError({
-                  path: transport.path,
-                  requestType,
-                  timeoutMillis,
-                });
-
-                return failSession(error).pipe(
-                  Effect.andThen(transport.close.pipe(Effect.ignore)),
-                  Effect.andThen(Effect.fail(error)),
+          const attempt = (
+            remainingRetries: number,
+          ): Effect.Effect<Uint8Array, VScopeDeviceError> =>
+            Effect.gen(function* () {
+              yield* transport
+                .write(encoded)
+                .pipe(
+                  Effect.mapError(
+                    (cause) => new VScopeTransportError({ path: transport.path, cause }),
+                  ),
                 );
-              },
-            }),
-          );
+              yield* transport.drain.pipe(
+                Effect.mapError(
+                  (cause) => new VScopeTransportError({ path: transport.path, cause }),
+                ),
+              );
+
+              return yield* takeResponse(transport.path, events, requestType, responseType).pipe(
+                Effect.timeoutOrElse({
+                  duration: `${timeoutMillis} millis`,
+                  orElse: () => {
+                    const error = new VScopeResponseTimeoutError({
+                      path: transport.path,
+                      requestType,
+                      timeoutMillis,
+                    });
+
+                    return failSession(error).pipe(
+                      Effect.andThen(transport.close.pipe(Effect.ignore)),
+                      Effect.andThen(Effect.fail(error)),
+                    );
+                  },
+                }),
+                Effect.catch((error) =>
+                  error instanceof VScopeFrameParseError && remainingRetries > 0
+                    ? attempt(remainingRetries - 1)
+                    : Effect.fail(error),
+                ),
+              );
+            });
+
+          return yield* attempt(crcRetryAttempts);
         }),
       );
 
@@ -318,31 +342,41 @@ const makeVScopeClient = (
 
 const takeResponse = (
   path: string,
-  frames: Queue.Dequeue<VScopeFrame, VScopeDeviceError | Cause.Done>,
+  events: Queue.Dequeue<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>,
   requestType: VScopeMessageType,
   responseType: VScopeMessageType,
 ): Effect.Effect<Uint8Array, VScopeDeviceError> =>
   Effect.gen(function* () {
-    while (true) {
-      const frame = yield* Queue.take(frames).pipe(
-        Effect.mapError((error) =>
-          Cause.isDone(error)
-            ? new VScopeTransportError({
-                path,
-                cause: new SerialConnectionClosedError({ path, operation: "read" }),
-              })
-            : error,
-        ),
-      );
+    const event = yield* Queue.take(events).pipe(
+      Effect.mapError((error) =>
+        Cause.isDone(error)
+          ? new VScopeTransportError({
+              path,
+              cause: new SerialConnectionClosedError({ path, operation: "read" }),
+            })
+          : error,
+      ),
+    );
 
-      if (frame.type === VScopeMessageType.Error) {
-        return yield* decodeFirmwareError(path, requestType, frame.payload);
-      }
-
-      if (frame.type === responseType) {
-        return frame.payload;
-      }
+    if (event._tag === "InvalidFrame") {
+      return yield* event.error;
     }
+
+    const { frame } = event;
+
+    if (frame.type === VScopeMessageType.Error) {
+      return yield* decodeFirmwareError(path, requestType, frame.payload);
+    }
+
+    if (frame.type !== responseType) {
+      return yield* new VScopeUnexpectedResponseError({
+        path,
+        requestType,
+        responseType: frame.type,
+      });
+    }
+
+    return frame.payload;
   });
 
 interface DeviceParts {
@@ -458,10 +492,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     stop: (options) =>
       setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
     trigger: client.request(VScopeMessageType.Trigger, VScopeMessageType.Trigger).pipe(
-      Effect.flatMap((payload) => {
-        expectLength(path, VScopeMessageType.Trigger, payload, 0);
-        return getStatusEffect;
-      }),
+      Effect.map((payload) => decodeStatus(path, VScopeMessageType.Trigger, payload)),
       catchDecode(path, VScopeMessageType.Trigger),
     ),
     getFrame: getFrame(path, client, info, littleEndian),

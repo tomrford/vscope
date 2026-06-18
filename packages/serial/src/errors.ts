@@ -2,6 +2,7 @@ import { Data } from "effect";
 
 import type {
   VScopeFrameEncodeError,
+  VScopeFrameParseError,
   VScopeMessageType,
   VScopeStatus as VScopeStatusValue,
 } from "./protocol";
@@ -69,5 +70,6 @@ export type VScopeDeviceError =
   | VScopeFirmwareError
   | VScopeDecodeError
   | VScopeFrameEncodeError
+  | VScopeFrameParseError
   | VScopeUnexpectedResponseError
   | VScopeInvalidArgumentError;

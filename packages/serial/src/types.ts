@@ -68,6 +68,7 @@ export interface StateWaitOptions {
 
 export interface OpenVScopeDeviceOptions extends OpenSerialTransportOptions {
   readonly requestTimeoutMillis?: number | undefined;
+  readonly crcRetryAttempts?: number | undefined;
 }
 
 export interface VScopeDevice {

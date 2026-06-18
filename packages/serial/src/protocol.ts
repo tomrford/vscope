@@ -75,7 +75,21 @@ export interface VScopeFrame {
   readonly payload: Uint8Array;
 }
 
+export type VScopeFrameParseEvent =
+  | {
+      readonly _tag: "Frame";
+      readonly frame: VScopeFrame;
+    }
+  | {
+      readonly _tag: "InvalidFrame";
+      readonly error: VScopeFrameParseError;
+    };
+
 export class VScopeFrameEncodeError extends Data.TaggedError("VScopeFrameEncodeError")<{
+  readonly reason: string;
+}> {}
+
+export class VScopeFrameParseError extends Data.TaggedError("VScopeFrameParseError")<{
   readonly reason: string;
 }> {}
 
@@ -148,7 +162,13 @@ export class VScopeFrameParser {
   }
 
   push(bytes: Uint8Array, nowMillis = Date.now()): ReadonlyArray<VScopeFrame> {
-    const frames: VScopeFrame[] = [];
+    return this.pushEvents(bytes, nowMillis).flatMap((event) =>
+      event._tag === "Frame" ? [event.frame] : [],
+    );
+  }
+
+  pushEvents(bytes: Uint8Array, nowMillis = Date.now()): ReadonlyArray<VScopeFrameParseEvent> {
+    const events: VScopeFrameParseEvent[] = [];
 
     if (this.#state !== "idle" && nowMillis - this.#lastByteMillis > this.#frameTimeoutMillis) {
       this.reset();
@@ -166,6 +186,12 @@ export class VScopeFrameParser {
       if (this.#state === "len") {
         this.#expectedLength = byte;
         if (this.#expectedLength < 2 || this.#expectedLength > VSCOPE_MAX_PAYLOAD + 2) {
+          events.push({
+            _tag: "InvalidFrame",
+            error: new VScopeFrameParseError({
+              reason: `Invalid frame length ${this.#expectedLength}`,
+            }),
+          });
           this.reset();
           continue;
         }
@@ -189,16 +215,26 @@ export class VScopeFrameParser {
       const actualCrc = vscopeCrc8(data.subarray(0, this.#expectedLength - 1));
 
       if (expectedCrc === actualCrc) {
-        frames.push({
-          type: data[0] as VScopeMessageType,
-          payload: Uint8Array.from(data.subarray(1, this.#expectedLength - 1)),
+        events.push({
+          _tag: "Frame",
+          frame: {
+            type: data[0] as VScopeMessageType,
+            payload: Uint8Array.from(data.subarray(1, this.#expectedLength - 1)),
+          },
+        });
+      } else {
+        events.push({
+          _tag: "InvalidFrame",
+          error: new VScopeFrameParseError({
+            reason: `CRC mismatch: expected ${expectedCrc}, got ${actualCrc}`,
+          }),
         });
       }
 
       this.reset();
     }
 
-    return frames;
+    return events;
   }
 
   reset(): void {

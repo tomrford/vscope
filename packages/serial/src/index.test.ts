@@ -11,6 +11,7 @@ import {
   SerialCloseError,
   VScopeDeviceAlreadyOpenError,
   VScopeFirmwareError,
+  VScopeFrameParseError,
   VScopeFrameParser,
   VScopeInvalidArgumentError,
   VScopeResponseTimeoutError,
@@ -23,6 +24,7 @@ import {
   VScopeStatus,
   VScopeTransportError,
   VScopeTriggerMode,
+  VScopeUnexpectedResponseError,
   makeVScopeSerialLayer,
   writeF32,
   writeFixedString,
@@ -79,6 +81,25 @@ describe("@vscope/serial protocol", () => {
         payload: Uint8Array.of(1, 2, 3),
       },
     ]);
+  });
+
+  test("reports complete frames with invalid CRC as parse events", () => {
+    const encoded = Effect.runSync(
+      encodeVScopeFrame({
+        type: VScopeMessageType.GetStatus,
+        payload: Uint8Array.of(1, 2, 3),
+      }),
+    );
+    encoded[encoded.byteLength - 1] ^= 0xff;
+    const parser = new VScopeFrameParser();
+
+    const events = parser.pushEvents(encoded);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?._tag).toBe("InvalidFrame");
+    if (events[0]?._tag === "InvalidFrame") {
+      expect(events[0].error).toBeInstanceOf(VScopeFrameParseError);
+    }
   });
 });
 
@@ -357,6 +378,65 @@ describe("@vscope/serial device", () => {
     }
   });
 
+  test("fails immediately when a valid response has the wrong message type", async () => {
+    const driver = fakeDriver([
+      fakeFirmware({
+        path: "/dev/tty.vscope-wrong-response",
+        deviceName: "scope-wrong-response",
+        wrongResponseFor: VScopeMessageType.GetTiming,
+      }),
+    ]);
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-wrong-response",
+            baudRate: 115200,
+            driver,
+          });
+
+          return yield* Effect.exit(device.getTiming);
+        }),
+      ),
+    );
+
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      const errors = result.cause.reasons
+        .filter((reason) => reason._tag === "Fail")
+        .map((reason) => reason.error);
+      expect(errors[0]).toBeInstanceOf(VScopeUnexpectedResponseError);
+    }
+  });
+
+  test("retries the same request after a CRC-corrupted response", async () => {
+    const firmware = fakeFirmware({
+      path: "/dev/tty.vscope-crc-retry",
+      deviceName: "scope-crc-retry",
+      corruptFirstResponsesFor: [VScopeMessageType.GetTiming],
+    });
+    const driver = fakeDriver([firmware]);
+
+    const timing = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const device = yield* openVScopeDevice({
+            path: "/dev/tty.vscope-crc-retry",
+            baudRate: 115200,
+            driver,
+            crcRetryAttempts: 1,
+          });
+
+          return yield* device.getTiming;
+        }),
+      ),
+    );
+
+    expect(timing).toEqual({ divider: 1, preTrig: 0 });
+    expect(firmware.requestCount(VScopeMessageType.GetTiming)).toBe(2);
+  });
+
   test("still closes the native transport after a read-side session failure", async () => {
     const firmware = fakeFirmware({
       path: "/dev/tty.vscope-read-error",
@@ -626,6 +706,8 @@ interface FakeFirmwareOptions {
   readonly closeAfterOpenMillis?: number | undefined;
   readonly errorAfterOpenMillis?: number | undefined;
   readonly frameResponseDelayMillis?: number | undefined;
+  readonly wrongResponseFor?: VScopeMessageType | undefined;
+  readonly corruptFirstResponsesFor?: ReadonlyArray<VScopeMessageType> | undefined;
   readonly stateTransitionStatusReads?: number | undefined;
   readonly acquisitionStatusReads?: number | undefined;
   readonly snapshotValid?: boolean | undefined;
@@ -778,6 +860,8 @@ class FakeFirmware {
   readonly closeAfterOpenMillis: number | undefined;
   readonly errorAfterOpenMillis: number | undefined;
   readonly frameResponseDelayMillis: number;
+  readonly wrongResponseFor: VScopeMessageType | undefined;
+  readonly corruptFirstResponsesFor: ReadonlySet<VScopeMessageType>;
   readonly stateTransitionStatusReads: number;
   readonly acquisitionStatusReads: number;
   closeAttempts = 0;
@@ -796,6 +880,7 @@ class FakeFirmware {
     mode: VScopeTriggerMode.Disabled,
   };
   rtValues: number[];
+  readonly #requestCounts = new Map<VScopeMessageType, number>();
 
   constructor(options: FakeFirmwareOptions) {
     this.path = options.path;
@@ -810,6 +895,8 @@ class FakeFirmware {
     this.closeAfterOpenMillis = options.closeAfterOpenMillis;
     this.errorAfterOpenMillis = options.errorAfterOpenMillis;
     this.frameResponseDelayMillis = options.frameResponseDelayMillis ?? 0;
+    this.wrongResponseFor = options.wrongResponseFor;
+    this.corruptFirstResponsesFor = new Set(options.corruptFirstResponsesFor ?? []);
     this.stateTransitionStatusReads = options.stateTransitionStatusReads ?? 1;
     this.acquisitionStatusReads = options.acquisitionStatusReads ?? 1;
     this.snapshotValid = options.snapshotValid ?? true;
@@ -830,7 +917,18 @@ class FakeFirmware {
     return this.parser.push(bytes).map((frame) => this.handle(frame.type, frame.payload));
   }
 
+  requestCount(type: VScopeMessageType): number {
+    return this.#requestCounts.get(type) ?? 0;
+  }
+
   private handle(type: VScopeMessageType, payload: Uint8Array): FakeFirmwareResponse {
+    const requestCount = this.requestCount(type) + 1;
+    this.#requestCounts.set(type, requestCount);
+
+    if (type === this.wrongResponseFor) {
+      return this.response(VScopeMessageType.GetStatus, this.statusPayload());
+    }
+
     switch (type) {
       case VScopeMessageType.GetInfo:
         return this.response(type, this.infoPayload());
@@ -859,7 +957,7 @@ class FakeFirmware {
         }
         this.requestedState = VScopeState.Acquiring;
         this.stateTransitionReadsRemaining = this.stateTransitionStatusReads;
-        return this.response(type, new Uint8Array());
+        return this.response(type, this.statusPayload());
       case VScopeMessageType.GetFrame:
         return this.response(
           type,
@@ -976,8 +1074,14 @@ class FakeFirmware {
     payload: Uint8Array,
     delayMillis = 0,
   ): FakeFirmwareResponse {
+    const shouldCorrupt = this.corruptFirstResponsesFor.has(type) && this.requestCount(type) === 1;
+    const bytes = Effect.runSync(encodeVScopeFrame({ type, payload }));
+    if (shouldCorrupt) {
+      bytes[bytes.byteLength - 1] ^= 0xff;
+    }
+
     return {
-      bytes: Effect.runSync(encodeVScopeFrame({ type, payload })),
+      bytes,
       delayMillis,
     };
   }
