@@ -1,5 +1,5 @@
 import { Match } from "effect";
-import type { Attribute, Document, Html } from "foldkit/html";
+import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
 
 import {
@@ -59,18 +59,16 @@ const viewTabs = (model: Model, h: ReturnType<typeof html<Message>>): Html => {
 
   return h.div(
     [...sx(h, appStyles.tabs)],
-    [
-      ...tabs.map((tab) =>
-        h.button(
-          [
-            h.Type("button"),
-            h.OnClick(SelectedPanel({ panel: tab })),
-            ...sx(h, appStyles.tabButton, model.activePanel === tab && appStyles.tabButtonActive),
-          ],
-          [tab],
-        ),
+    tabs.map((tab) =>
+      h.button(
+        [
+          h.Type("button"),
+          h.OnClick(SelectedPanel({ panel: tab })),
+          ...sx(h, appStyles.tabButton, model.activePanel === tab && appStyles.tabButtonActive),
+        ],
+        [tab],
       ),
-    ],
+    ),
   );
 };
 
@@ -163,32 +161,26 @@ const viewSnapshotsPanel = (model: Model, h: ReturnType<typeof html<Message>>): 
           ),
           h.div(
             [],
-            [
-              ...model.snapshots.map((snapshot) =>
-                h.div(
-                  [h.Key(snapshot.id), ...sx(h, appStyles.snapshotRow)],
-                  [
-                    h.div(
-                      [],
-                      [
-                        h.div([...sx(h, appStyles.rowTitle)], [snapshot.label]),
-                        h.div(
-                          [...sx(h, appStyles.rowMeta)],
-                          [
-                            `${snapshot.capturedAt} · ${snapshot.channels} channels · ${snapshot.size}`,
-                          ],
-                        ),
-                      ],
-                    ),
-                    viewButton(
-                      h,
-                      "Open",
-                      RuntimeStateLoaded({ status: `Loaded ${snapshot.label}` }),
-                    ),
-                  ],
-                ),
+            model.snapshots.map((snapshot) =>
+              h.div(
+                [h.Key(snapshot.id), ...sx(h, appStyles.snapshotRow)],
+                [
+                  h.div(
+                    [],
+                    [
+                      h.div([...sx(h, appStyles.rowTitle)], [snapshot.label]),
+                      h.div(
+                        [...sx(h, appStyles.rowMeta)],
+                        [
+                          `${snapshot.capturedAt} · ${snapshot.channels} channels · ${snapshot.size}`,
+                        ],
+                      ),
+                    ],
+                  ),
+                  viewButton(h, "Open", RuntimeStateLoaded({ status: `Loaded ${snapshot.label}` })),
+                ],
               ),
-            ],
+            ),
           ),
         ],
       ),
@@ -302,18 +294,16 @@ const viewSignalSelect = (model: Model, h: ReturnType<typeof html<Message>>, lan
       h.Attribute("value", model.selectedSignals[lane] ?? model.channels[0].id),
       h.OnChange((signalId) => SelectedSignal({ lane, signalId })),
     ],
-    [
-      ...model.channels.map((channel) =>
-        h.option(
-          [
-            h.Key(channel.id),
-            h.Attribute("value", channel.id),
-            ...(channel.id === model.selectedSignals[lane] ? [h.Attribute("selected", "")] : []),
-          ],
-          [channel.label],
-        ),
+    model.channels.map((channel) =>
+      h.option(
+        [
+          h.Key(channel.id),
+          h.Attribute("value", channel.id),
+          ...(channel.id === model.selectedSignals[lane] ? [h.Attribute("selected", "")] : []),
+        ],
+        [channel.label],
       ),
-    ],
+    ),
   );
 
 const viewPlotLane = (model: Model, h: ReturnType<typeof html<Message>>, lane: number): Html => {
@@ -442,7 +432,7 @@ const viewGraphPane = (model: Model, h: ReturnType<typeof html<Message>>): Html 
       ),
       h.div(
         [...sx(h, appStyles.graphStack)],
-        [...[0, 1, 2, 3, 4].map((lane) => viewPlotLane(model, h, lane))],
+        [0, 1, 2, 3, 4].map((lane) => viewPlotLane(model, h, lane)),
       ),
     ],
   );

@@ -1,11 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { DEFAULT_SETTINGS } from "@vscope/shared";
 
 import { DEFAULT_RUNTIME_HOST, DEFAULT_RUNTIME_PORT, RuntimeEndpoint, makeRuntimeConfig } from ".";
 import { runtimeServerPort } from "./server";
 
 describe("@vscope/runtime", () => {
-  test("materializes default local runtime config", () => {
+  it("materializes default local runtime config", () => {
     expect(makeRuntimeConfig({ databasePath: "/tmp/vscope.sqlite" })).toEqual({
       host: DEFAULT_RUNTIME_HOST,
       port: DEFAULT_RUNTIME_PORT,
@@ -14,7 +14,7 @@ describe("@vscope/runtime", () => {
     });
   });
 
-  test("uses persisted settings port unless the CLI overrides it", () => {
+  it("uses persisted settings port unless the CLI overrides it", () => {
     const settings = {
       ...DEFAULT_SETTINGS,
       network: {
@@ -37,7 +37,7 @@ describe("@vscope/runtime", () => {
     ).toBe(7000);
   });
 
-  test("keeps HTTP, RPC, MCP, and snapshot endpoints centralized", () => {
+  it("keeps HTTP, RPC, MCP, and snapshot endpoints centralized", () => {
     expect(RuntimeEndpoint).toEqual({
       health: "/health",
       rpc: "/rpc",
@@ -46,7 +46,7 @@ describe("@vscope/runtime", () => {
     });
   });
 
-  test("keeps optional UI serving path in runtime config", () => {
+  it("keeps optional UI serving path in runtime config", () => {
     expect(
       makeRuntimeConfig({
         databasePath: "/tmp/vscope.sqlite",

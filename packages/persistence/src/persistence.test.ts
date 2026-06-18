@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 
 import { SqliteClient } from "@effect/sql-sqlite-node";
 import { Effect, Option } from "effect";
@@ -25,33 +25,22 @@ import {
   makePersistenceLayer,
 } from "./index.ts";
 
-async function withTempPath<T>(run: (path: string) => Promise<T>) {
-  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vscope-persistence-"));
-  const path = nodePath.join(dir, "state.sqlite");
-
-  try {
-    return await run(path);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+function withTempPath<A, E, R>(run: (path: string) => Effect.Effect<A, E, R>) {
+  return Effect.acquireRelease(
+    Effect.sync(() => {
+      const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vscope-persistence-"));
+      return { dir, path: nodePath.join(dir, "state.sqlite") };
+    }),
+    ({ dir }) => Effect.sync(() => fs.rmSync(dir, { recursive: true, force: true })),
+  ).pipe(Effect.flatMap(({ path }) => run(path)));
 }
 
-async function runWithPersistence<A, E>(
-  path: string,
-  effect: Effect.Effect<A, E, Persistence>,
-): Promise<A> {
-  return await Effect.runPromise(
-    Effect.scoped(effect.pipe(Effect.provide(makePersistenceLayer({ path })))),
-  );
+function runWithPersistence<A, E>(path: string, effect: Effect.Effect<A, E, Persistence>) {
+  return Effect.scoped(effect.pipe(Effect.provide(makePersistenceLayer({ path }))));
 }
 
-async function runWithSql<A, E>(
-  path: string,
-  effect: Effect.Effect<A, E, SqlClient.SqlClient>,
-): Promise<A> {
-  return await Effect.runPromise(
-    Effect.scoped(effect.pipe(Effect.provide(SqliteClient.layer({ filename: path })))),
-  );
+function runWithSql<A, E>(path: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) {
+  return Effect.scoped(effect.pipe(Effect.provide(SqliteClient.layer({ filename: path }))));
 }
 
 function snapshotDraft(label: string, sampleCount: number): SnapshotDraft {
@@ -84,154 +73,166 @@ function floatBytes(values: ReadonlyArray<number>): Uint8Array {
 }
 
 describe("@vscope/persistence", () => {
-  test("reports SQLite open defects as typed open errors", async () => {
-    await withTempPath(async (path) => {
-      fs.mkdirSync(path);
+  it.effect("reports SQLite open defects as typed open errors", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* Effect.sync(() => fs.mkdirSync(path));
 
-      await expect(Effect.runPromise(initializePersistence({ path }))).rejects.toMatchObject({
-        _tag: "PersistenceOpenError",
-      });
-    });
-  });
+        const error = yield* Effect.flip(initializePersistence({ path }));
+        expect(error).toMatchObject({ _tag: "PersistenceOpenError" });
+      }),
+    ),
+  );
 
-  test("reports migration defects as typed migration errors", async () => {
-    await withTempPath(async (path) => {
-      await runWithSql(
-        path,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`CREATE TABLE saved_devices_port_path_idx (id INTEGER PRIMARY KEY)`;
-        }),
-      );
-
-      await expect(Effect.runPromise(initializePersistence({ path }))).rejects.toMatchObject({
-        _tag: "PersistenceMigrationError",
-      });
-    });
-  });
-
-  test("migrations create the persistence tables", async () => {
-    await withTempPath(async (path) => {
-      await Effect.runPromise(initializePersistence({ path }));
-
-      const names = await runWithSql(
-        path,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          const rows = yield* sql<{ name: string }>`
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-            ORDER BY name
-          `;
-
-          return rows.map((row) => row.name);
-        }),
-      );
-
-      expect(names).toEqual([
-        "persistence_migrations",
-        "preferences",
-        "saved_devices",
-        "settings",
-        "snapshot_comparison_snapshots",
-        "snapshot_comparisons",
-        "snapshot_samples",
-        "snapshots",
-      ]);
-    });
-  });
-
-  test("settings and preferences round-trip, recover, and reset", async () => {
-    await withTempPath(async (path) => {
-      await runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-
-          const defaults = yield* persistence.readSettings;
-          expect(defaults.settings).toEqual(DEFAULT_SETTINGS);
-          expect(defaults.recovery.pending).toBe(false);
-          expect(defaults.recovery.message).toBe(null);
-
-          const settings = yield* persistence.patchSettings({ theme: "dark" });
-          expect(settings.settings.theme).toBe("dark");
-
-          const preferences = yield* persistence.patchPreferences({
-            recentPortPaths: ["/dev/tty.usbserial"],
-            showAdvancedControls: true,
-          });
-          expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial"]);
-          expect(preferences.preferences.showAdvancedControls).toBe(true);
-        }),
-      );
-
-      await runWithSql(
-        path,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`UPDATE settings SET data_json = ${"{"} WHERE id = 1`;
-          yield* sql`UPDATE preferences SET data_json = ${"{"} WHERE id = 1`;
-        }),
-      );
-
-      await runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          const settings = yield* persistence.readSettings;
-          const preferences = yield* persistence.readPreferences;
-
-          expect(settings.settings).toEqual(DEFAULT_SETTINGS);
-          expect(settings.recovery.pending).toBe(true);
-          expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
-          expect(preferences.preferences).toEqual(DEFAULT_PREFERENCES);
-          expect(preferences.recovery.pending).toBe(true);
-          expect(preferences.recovery.message).toBe("Corrupt preferences were reset to defaults.");
-
-          const resetSettings = yield* persistence.resetSettings;
-          expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
-          expect(resetSettings.recovery.pending).toBe(false);
-          expect(resetSettings.recovery.message).toBe(null);
-
-          const resetPreferences = yield* persistence.resetPreferences;
-          expect(resetPreferences.preferences).toEqual(DEFAULT_PREFERENCES);
-          expect(resetPreferences.recovery.pending).toBe(false);
-          expect(resetPreferences.recovery.message).toBe(null);
-        }),
-      );
-    });
-  });
-
-  test("settings and preferences patches validate instead of defecting", async () => {
-    await withTempPath(async (path) => {
-      await expect(
-        runWithPersistence(
+  it.effect("reports migration defects as typed migration errors", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* runWithSql(
           path,
           Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            yield* persistence.patchSettings({ theme: "purple" as never });
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`CREATE TABLE saved_devices_port_path_idx (id INTEGER PRIMARY KEY)`;
           }),
-        ),
-      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
+        );
 
-      await expect(
-        runWithPersistence(
+        const error = yield* Effect.flip(initializePersistence({ path }));
+        expect(error).toMatchObject({ _tag: "PersistenceMigrationError" });
+      }),
+    ),
+  );
+
+  it.effect("migrations create the persistence tables", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* initializePersistence({ path });
+
+        const names = yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const rows = yield* sql<{ name: string }>`
+              SELECT name
+              FROM sqlite_master
+              WHERE type = 'table'
+              ORDER BY name
+            `;
+
+            return rows.map((row) => row.name);
+          }),
+        );
+
+        expect(names).toEqual([
+          "persistence_migrations",
+          "preferences",
+          "saved_devices",
+          "settings",
+          "snapshot_comparison_snapshots",
+          "snapshot_comparisons",
+          "snapshot_samples",
+          "snapshots",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("settings and preferences round-trip, recover, and reset", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* runWithPersistence(
           path,
           Effect.gen(function* () {
             const persistence = yield* Persistence;
-            yield* persistence.patchPreferences({
-              favoriteSnapshotIds: ["" as never],
+
+            const defaults = yield* persistence.readSettings;
+            expect(defaults.settings).toEqual(DEFAULT_SETTINGS);
+            expect(defaults.recovery.pending).toBe(false);
+            expect(defaults.recovery.message).toBe(null);
+
+            const settings = yield* persistence.patchSettings({ theme: "dark" });
+            expect(settings.settings.theme).toBe("dark");
+
+            const preferences = yield* persistence.patchPreferences({
+              recentPortPaths: ["/dev/tty.usbserial"],
+              showAdvancedControls: true,
             });
+            expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial"]);
+            expect(preferences.preferences.showAdvancedControls).toBe(true);
           }),
-        ),
-      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
-    });
-  });
+        );
 
-  test("concurrent settings and preferences patches preserve independent fields", async () => {
-    await withTempPath(async (path) => {
-      await runWithPersistence(
+        yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`UPDATE settings SET data_json = ${"{"} WHERE id = 1`;
+            yield* sql`UPDATE preferences SET data_json = ${"{"} WHERE id = 1`;
+          }),
+        );
+
+        yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            const settings = yield* persistence.readSettings;
+            const preferences = yield* persistence.readPreferences;
+
+            expect(settings.settings).toEqual(DEFAULT_SETTINGS);
+            expect(settings.recovery.pending).toBe(true);
+            expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
+            expect(preferences.preferences).toEqual(DEFAULT_PREFERENCES);
+            expect(preferences.recovery.pending).toBe(true);
+            expect(preferences.recovery.message).toBe(
+              "Corrupt preferences were reset to defaults.",
+            );
+
+            const resetSettings = yield* persistence.resetSettings;
+            expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
+            expect(resetSettings.recovery.pending).toBe(false);
+            expect(resetSettings.recovery.message).toBe(null);
+
+            const resetPreferences = yield* persistence.resetPreferences;
+            expect(resetPreferences.preferences).toEqual(DEFAULT_PREFERENCES);
+            expect(resetPreferences.recovery.pending).toBe(false);
+            expect(resetPreferences.recovery.message).toBe(null);
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("settings and preferences patches validate instead of defecting", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        const settingsError = yield* Effect.flip(
+          runWithPersistence(
+            path,
+            Effect.gen(function* () {
+              const persistence = yield* Persistence;
+              yield* persistence.patchSettings({ theme: "purple" as never });
+            }),
+          ),
+        );
+        expect(settingsError).toMatchObject({ _tag: "PersistenceValidationError" });
+
+        const preferencesError = yield* Effect.flip(
+          runWithPersistence(
+            path,
+            Effect.gen(function* () {
+              const persistence = yield* Persistence;
+              yield* persistence.patchPreferences({
+                favoriteSnapshotIds: ["" as never],
+              });
+            }),
+          ),
+        );
+        expect(preferencesError).toMatchObject({ _tag: "PersistenceValidationError" });
+      }),
+    ),
+  );
+
+  it.effect("concurrent settings and preferences patches preserve independent fields", () =>
+    withTempPath((path) =>
+      runWithPersistence(
         path,
         Effect.gen(function* () {
           const persistence = yield* Persistence;
@@ -266,13 +267,13 @@ describe("@vscope/persistence", () => {
           expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial-a"]);
           expect(preferences.preferences.showAdvancedControls).toBe(true);
         }),
-      );
-    });
-  });
+      ),
+    ),
+  );
 
-  test("saved devices round-trip through typed records", async () => {
-    await withTempPath(async (path) => {
-      await runWithPersistence(
+  it.effect("saved devices round-trip through typed records", () =>
+    withTempPath((path) =>
+      runWithPersistence(
         path,
         Effect.gen(function* () {
           const persistence = yield* Persistence;
@@ -344,13 +345,13 @@ describe("@vscope/persistence", () => {
           yield* persistence.forgetSavedDevice(first.id);
           expect(yield* persistence.listSavedDevices).toEqual([]);
         }),
-      );
-    });
-  });
+      ),
+    ),
+  );
 
-  test("snapshots store metadata and Float32 sample blobs", async () => {
-    await withTempPath(async (path) => {
-      await runWithPersistence(
+  it.effect("snapshots store metadata and Float32 sample blobs", () =>
+    withTempPath((path) =>
+      runWithPersistence(
         path,
         Effect.gen(function* () {
           const persistence = yield* Persistence;
@@ -392,65 +393,69 @@ describe("@vscope/persistence", () => {
           yield* persistence.deleteSnapshot(snapshot.id);
           expect(yield* persistence.listSnapshots()).toEqual([]);
         }),
-      );
-    });
-  });
+      ),
+    ),
+  );
 
-  test("rejects impossible snapshot metadata", async () => {
-    await withTempPath(async (path) => {
-      await expect(
-        runWithPersistence(
+  it.effect("rejects impossible snapshot metadata", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        const impossibleError = yield* Effect.flip(
+          runWithPersistence(
+            path,
+            Effect.gen(function* () {
+              const persistence = yield* Persistence;
+              const invalid = SnapshotDraft.make({
+                ...snapshotDraft("Impossible trace", 1),
+                preTriggerSamples: 99,
+                trigger: SnapshotTrigger.make({
+                  threshold: 0.5,
+                  channel: 99,
+                  mode: "rising",
+                }),
+                rtValues: [0],
+              });
+
+              yield* persistence.createSnapshot(invalid);
+            }),
+          ),
+        );
+        expect(impossibleError).toMatchObject({ _tag: "PersistenceValidationError" });
+
+        const triggerModeError = yield* Effect.flip(
+          runWithPersistence(
+            path,
+            Effect.gen(function* () {
+              const persistence = yield* Persistence;
+              const invalid = {
+                ...snapshotDraft("Invalid trigger mode", 1),
+                trigger: {
+                  threshold: 0.5,
+                  channel: 0,
+                  mode: "edge" as never,
+                },
+              };
+
+              yield* persistence.createSnapshot(invalid as never);
+            }),
+          ),
+        );
+        expect(triggerModeError).toMatchObject({ _tag: "PersistenceValidationError" });
+
+        yield* runWithPersistence(
           path,
           Effect.gen(function* () {
             const persistence = yield* Persistence;
-            const invalid = SnapshotDraft.make({
-              ...snapshotDraft("Impossible trace", 1),
-              preTriggerSamples: 99,
-              trigger: SnapshotTrigger.make({
-                threshold: 0.5,
-                channel: 99,
-                mode: "rising",
-              }),
-              rtValues: [0],
-            });
-
-            yield* persistence.createSnapshot(invalid);
+            expect(yield* persistence.listSnapshots()).toEqual([]);
           }),
-        ),
-      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
+        );
+      }),
+    ),
+  );
 
-      await expect(
-        runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            const invalid = {
-              ...snapshotDraft("Invalid trigger mode", 1),
-              trigger: {
-                threshold: 0.5,
-                channel: 0,
-                mode: "edge" as never,
-              },
-            };
-
-            yield* persistence.createSnapshot(invalid as never);
-          }),
-        ),
-      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
-
-      await runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          expect(yield* persistence.listSnapshots()).toEqual([]);
-        }),
-      );
-    });
-  });
-
-  test("snapshot comparisons round-trip as typed records", async () => {
-    await withTempPath(async (path) => {
-      await runWithPersistence(
+  it.effect("snapshot comparisons round-trip as typed records", () =>
+    withTempPath((path) =>
+      runWithPersistence(
         path,
         Effect.gen(function* () {
           const persistence = yield* Persistence;
@@ -488,48 +493,52 @@ describe("@vscope/persistence", () => {
           yield* persistence.deleteSnapshotComparison(replacement.id);
           expect(yield* persistence.listSnapshotComparisons).toEqual([]);
         }),
-      );
-    });
-  });
+      ),
+    ),
+  );
 
-  test("snapshot comparisons reject duplicate member ids before SQLite insert", async () => {
-    await withTempPath(async (path) => {
-      await expect(
-        runWithPersistence(
+  it.effect("snapshot comparisons reject duplicate member ids before SQLite insert", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        const error = yield* Effect.flip(
+          runWithPersistence(
+            path,
+            Effect.gen(function* () {
+              const persistence = yield* Persistence;
+              const snapshot = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
+
+              yield* persistence.createSnapshotComparison(
+                SnapshotComparisonDraft.make({
+                  label: "Duplicate trace",
+                  snapshotIds: [snapshot.id, snapshot.id],
+                  options: {},
+                  metadata: {},
+                }),
+              );
+            }),
+          ),
+        );
+        expect(error).toMatchObject({ _tag: "PersistenceValidationError" });
+      }),
+    ),
+  );
+
+  it.effect("corrupt snapshot metadata is dropped without wiping valid captures", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        const snapshot = yield* runWithPersistence(
           path,
           Effect.gen(function* () {
             const persistence = yield* Persistence;
-            const snapshot = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
-
-            yield* persistence.createSnapshotComparison(
-              SnapshotComparisonDraft.make({
-                label: "Duplicate trace",
-                snapshotIds: [snapshot.id, snapshot.id],
-                options: {},
-                metadata: {},
-              }),
-            );
+            return yield* persistence.createSnapshot(snapshotDraft("Valid trace", 1));
           }),
-        ),
-      ).rejects.toMatchObject({ _tag: "PersistenceValidationError" });
-    });
-  });
+        );
 
-  test("corrupt snapshot metadata is dropped without wiping valid captures", async () => {
-    await withTempPath(async (path) => {
-      const snapshot = await runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          return yield* persistence.createSnapshot(snapshotDraft("Valid trace", 1));
-        }),
-      );
-
-      await runWithSql(
-        path,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          yield* sql`
+        yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* sql`
             INSERT INTO snapshots (
               id,
               label,
@@ -564,27 +573,28 @@ describe("@vscope/persistence", () => {
               ${"2026-06-13T08:00:00.000Z"}
             )
           `;
-        }),
-      );
+          }),
+        );
 
-      await runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          expect(yield* persistence.listSnapshots()).toEqual([snapshot]);
-        }),
-      );
+        yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            expect(yield* persistence.listSnapshots()).toEqual([snapshot]);
+          }),
+        );
 
-      const ids = await runWithSql(
-        path,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          const rows = yield* sql<{ id: string }>`SELECT id FROM snapshots ORDER BY id`;
-          return rows.map((row) => row.id);
-        }),
-      );
+        const ids = yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const rows = yield* sql<{ id: string }>`SELECT id FROM snapshots ORDER BY id`;
+            return rows.map((row) => row.id);
+          }),
+        );
 
-      expect(ids).toEqual([snapshot.id]);
-    });
-  });
+        expect(ids).toEqual([snapshot.id]);
+      }),
+    ),
+  );
 });

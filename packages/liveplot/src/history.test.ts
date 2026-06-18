@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import {
   clearHistoryChannels,
   createLiveHistoryState,
@@ -11,7 +11,7 @@ import {
 const colorForPath = (path: string): string => (path === "a" ? "#ff0000" : "#00ff00");
 
 describe("live history", () => {
-  test("ingests frames and exposes per-channel series", () => {
+  it("ingests frames and exposes per-channel series", () => {
     const state = createLiveHistoryState(2);
     reconcileHistoryDevices(
       state,
@@ -31,7 +31,7 @@ describe("live history", () => {
     expect(channel1[0].points[0]?.value).toBe(2);
   });
 
-  test("culls old points when window shrinks", () => {
+  it("culls old points when window shrinks", () => {
     const state = createLiveHistoryState(1);
     reconcileHistoryDevices(
       state,
@@ -50,7 +50,7 @@ describe("live history", () => {
     expect(series[0].points[0]?.value).toBe(2);
   });
 
-  test("clears channels on channel map changes", () => {
+  it("clears channels on channel map changes", () => {
     const state = createLiveHistoryState(2);
     reconcileHistoryDevices(
       state,
@@ -67,7 +67,7 @@ describe("live history", () => {
     expect(toChannelSeries(state, 1)[0].points).toHaveLength(0);
   });
 
-  test("removes disconnected devices during reconcile", () => {
+  it("removes disconnected devices during reconcile", () => {
     const state = createLiveHistoryState(1);
     reconcileHistoryDevices(
       state,

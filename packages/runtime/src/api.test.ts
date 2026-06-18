@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, noRecovery } from "@vscope/shared";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
@@ -9,58 +9,62 @@ import type { CoreCommand, CoreState } from "./core/model";
 import type { RuntimeCoreService } from "./core/service";
 
 describe("@vscope/runtime api", () => {
-  test("exposes runtime state as JSON-friendly DTOs", async () => {
-    const api = makeRuntimeApi(fakeCore(initialState()));
+  it.effect("exposes runtime state as JSON-friendly DTOs", () =>
+    Effect.gen(function* () {
+      const api = makeRuntimeApi(fakeCore(initialState()));
 
-    const state = await Effect.runPromise(api.rpc.getState);
+      const state = yield* api.rpc.getState;
 
-    expect(state.device?.rtValues).toEqual([
-      [0, 1.5],
-      [1, 2.5],
-    ]);
-  });
+      expect(state.device?.rtValues).toEqual([
+        [0, 1.5],
+        [1, 2.5],
+      ]);
+    }),
+  );
 
-  test("reads latest frame without timestamps or channel arguments", async () => {
-    const api = makeRuntimeApi(fakeCore(initialState()));
+  it.effect("reads latest frame without timestamps or channel arguments", () =>
+    Effect.gen(function* () {
+      const api = makeRuntimeApi(fakeCore(initialState()));
 
-    const frame = await Effect.runPromise(api.mcp.readFrame);
+      const frame = yield* api.mcp.readFrame;
 
-    expect(frame).toEqual({
-      values: [10, 20],
-      channelMap: [3, 4],
-    });
-  });
+      expect(frame).toEqual({
+        values: [10, 20],
+        channelMap: [3, 4],
+      });
+    }),
+  );
 
-  test("shallow-merges MCP config writes in deterministic command order", async () => {
-    const commands: Array<CoreCommand> = [];
-    const api = makeRuntimeApi(fakeCore(initialState(), commands));
+  it.effect("shallow-merges MCP config writes in deterministic command order", () =>
+    Effect.gen(function* () {
+      const commands: Array<CoreCommand> = [];
+      const api = makeRuntimeApi(fakeCore(initialState(), commands));
 
-    const config = await Effect.runPromise(
-      api.mcp.writeConfig({
+      const config = yield* api.mcp.writeConfig({
         timing: { divider: 8 },
         trigger: { mode: "falling" },
         channelMap: [3, 7],
         rtValues: { "1": 42 },
-      }),
-    );
+      });
 
-    expect(commands).toEqual([
-      { type: "devices/setTiming", timing: { divider: 8, preTrig: 2 } },
-      {
-        type: "devices/setTrigger",
-        trigger: { threshold: 1.25, channel: 0, mode: "falling" },
-      },
-      { type: "devices/setChannelMap", channel: 1, variable: 7 },
-      { type: "devices/setRtValue", index: 1, value: 42 },
-    ]);
-    expect(config.timing).toEqual({ divider: 8, preTrig: 2 });
-    expect(config.trigger).toEqual({ threshold: 1.25, channel: 0, mode: "falling" });
-    expect(config.channelMap).toEqual([3, 7]);
-    expect(config.rtValues).toEqual([
-      [0, 1.5],
-      [1, 42],
-    ]);
-  });
+      expect(commands).toEqual([
+        { type: "devices/setTiming", timing: { divider: 8, preTrig: 2 } },
+        {
+          type: "devices/setTrigger",
+          trigger: { threshold: 1.25, channel: 0, mode: "falling" },
+        },
+        { type: "devices/setChannelMap", channel: 1, variable: 7 },
+        { type: "devices/setRtValue", index: 1, value: 42 },
+      ]);
+      expect(config.timing).toEqual({ divider: 8, preTrig: 2 });
+      expect(config.trigger).toEqual({ threshold: 1.25, channel: 0, mode: "falling" });
+      expect(config.channelMap).toEqual([3, 7]);
+      expect(config.rtValues).toEqual([
+        [0, 1.5],
+        [1, 42],
+      ]);
+    }),
+  );
 });
 
 function fakeCore(startingState: CoreState, commands: Array<CoreCommand> = []): RuntimeCoreService {

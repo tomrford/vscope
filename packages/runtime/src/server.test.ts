@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, layer } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
@@ -21,72 +21,70 @@ import { RuntimeCore } from "./core/service";
 import type { RuntimeCoreService } from "./core/service";
 
 describe("@vscope/runtime server", () => {
-  test("serves health, JSON RPC, and MCP tool listing", async () => {
-    const program = Effect.gen(function* () {
-      const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
-      const state = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const rpc = yield* RpcClient.make(RuntimeRpcs).pipe(
-            Effect.provide(
-              RpcClient.layerProtocolHttp({
-                url: "",
-                transformClient: (client) =>
-                  HttpClient.mapRequest(client, HttpClientRequest.appendUrl("/rpc")),
-              }).pipe(Layer.provideMerge(RpcSerialization.layerJson)),
-            ),
-          );
-          return yield* rpc["runtime.getState"]();
-        }),
-      );
+  layer(testServerLayer(), { excludeTestServices: true })((it) => {
+    it.effect("serves health, JSON RPC, and MCP tool listing", () =>
+      Effect.gen(function* () {
+        const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
+        const state = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const rpc = yield* RpcClient.make(RuntimeRpcs).pipe(
+              Effect.provide(
+                RpcClient.layerProtocolHttp({
+                  url: "",
+                  transformClient: (client) =>
+                    HttpClient.mapRequest(client, HttpClientRequest.appendUrl("/rpc")),
+                }).pipe(Layer.provideMerge(RpcSerialization.layerJson)),
+              ),
+            );
+            return yield* rpc["runtime.getState"]();
+          }),
+        );
 
-      const initialized = yield* HttpClient.post("/mcp", {
-        body: HttpBody.jsonUnsafe({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2025-06-18",
-            capabilities: {},
-            clientInfo: {
-              name: "vscope-test",
-              version: "0.0.0",
+        const initialized = yield* HttpClient.post("/mcp", {
+          body: HttpBody.jsonUnsafe({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: {
+                name: "vscope-test",
+                version: "0.0.0",
+              },
             },
+          }),
+        });
+        const sessionId = yield* Effect.fromOption(
+          Headers.get(initialized.headers, "Mcp-Session-Id"),
+        );
+        const tools = yield* HttpClientRequest.post("/mcp").pipe(
+          HttpClientRequest.setHeaders({
+            "Mcp-Session-Id": sessionId,
+          }),
+          HttpClientRequest.bodyJsonUnsafe({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/list",
+            params: {},
+          }),
+          HttpClient.execute,
+          Effect.flatMap(readJson),
+        );
+
+        expect(health).toEqual({ status: "ok" });
+        expect(state).toMatchObject({
+          device: {
+            deviceName: "fake-scope",
+            rtValues: [
+              [0, 1.5],
+              [1, 2.5],
+            ],
           },
-        }),
-      });
-      const sessionId = yield* Effect.fromOption(
-        Headers.get(initialized.headers, "Mcp-Session-Id"),
-      );
-      const tools = yield* HttpClientRequest.post("/mcp").pipe(
-        HttpClientRequest.setHeaders({
-          "Mcp-Session-Id": sessionId,
-        }),
-        HttpClientRequest.bodyJsonUnsafe({
-          jsonrpc: "2.0",
-          id: 2,
-          method: "tools/list",
-          params: {},
-        }),
-        HttpClient.execute,
-        Effect.flatMap(readJson),
-      );
-
-      return { health, state, tools };
-    }).pipe(Effect.provide(testServerLayer()));
-
-    const result = await Effect.runPromise(program);
-
-    expect(result.health).toEqual({ status: "ok" });
-    expect(result.state).toMatchObject({
-      device: {
-        deviceName: "fake-scope",
-        rtValues: [
-          [0, 1.5],
-          [1, 2.5],
-        ],
-      },
-    });
-    expect(JSON.stringify(result.tools)).toContain("vscope_write_config");
+        });
+        expect(JSON.stringify(tools)).toContain("vscope_write_config");
+      }),
+    );
   });
 });
 

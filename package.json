@@ -55,6 +55,7 @@
   },
   "devDependencies": {
     "@effect/language-service": "0.86.2",
+    "@effect/vitest": "4.0.0-beta.78",
     "@foldkit/devtools-mcp": "0.10.0",
     "@foldkit/vite-plugin": "0.8.0",
     "oxfmt": "0.53.0",

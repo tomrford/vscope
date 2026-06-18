@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { EventEmitter } from "node:events";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect, Fiber, Stream } from "effect";
 
 import {
@@ -42,145 +42,145 @@ import {
 import { readF32, readU16, VScopeEndianness as Endianness } from "./protocol";
 
 describe("@vscope/serial protocol", () => {
-  test("encodes and parses split C-compatible frames", () => {
-    const encoded = Effect.runSync(
-      encodeVScopeFrame({
+  it.effect("encodes and parses split C-compatible frames", () =>
+    Effect.gen(function* () {
+      const encoded = yield* encodeVScopeFrame({
         type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
-      }),
-    );
-    const parser = new VScopeFrameParser();
+      });
+      const parser = new VScopeFrameParser();
 
-    expect(parser.push(encoded.subarray(0, 2))).toEqual([]);
-    const frames = parser.push(encoded.subarray(2));
+      expect(parser.push(encoded.subarray(0, 2))).toEqual([]);
+      const frames = parser.push(encoded.subarray(2));
 
-    expect(frames).toEqual([
-      {
+      expect(frames).toEqual([
+        {
+          type: VScopeMessageType.GetStatus,
+          payload: Uint8Array.of(1, 2, 3),
+        },
+      ]);
+    }),
+  );
+
+  it.effect("resets stale partial frames using the firmware RX timeout", () =>
+    Effect.gen(function* () {
+      const encoded = yield* encodeVScopeFrame({
         type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
-      },
-    ]);
-  });
+      });
+      const parser = new VScopeFrameParser();
 
-  test("resets stale partial frames using the firmware RX timeout", () => {
-    const encoded = Effect.runSync(
-      encodeVScopeFrame({
+      expect(parser.push(encoded.subarray(0, 2), 0)).toEqual([]);
+
+      const frames = parser.push(encoded, VSCOPE_FRAME_TIMEOUT_MILLIS + 1);
+
+      expect(frames).toEqual([
+        {
+          type: VScopeMessageType.GetStatus,
+          payload: Uint8Array.of(1, 2, 3),
+        },
+      ]);
+    }),
+  );
+
+  it.effect("reports complete frames with invalid CRC as parse events", () =>
+    Effect.gen(function* () {
+      const encoded = yield* encodeVScopeFrame({
         type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
-      }),
-    );
-    const parser = new VScopeFrameParser();
+      });
+      encoded[encoded.byteLength - 1] ^= 0xff;
+      const parser = new VScopeFrameParser();
 
-    expect(parser.push(encoded.subarray(0, 2), 0)).toEqual([]);
+      const events = parser.pushEvents(encoded);
 
-    const frames = parser.push(encoded, VSCOPE_FRAME_TIMEOUT_MILLIS + 1);
-
-    expect(frames).toEqual([
-      {
-        type: VScopeMessageType.GetStatus,
-        payload: Uint8Array.of(1, 2, 3),
-      },
-    ]);
-  });
-
-  test("reports complete frames with invalid CRC as parse events", () => {
-    const encoded = Effect.runSync(
-      encodeVScopeFrame({
-        type: VScopeMessageType.GetStatus,
-        payload: Uint8Array.of(1, 2, 3),
-      }),
-    );
-    encoded[encoded.byteLength - 1] ^= 0xff;
-    const parser = new VScopeFrameParser();
-
-    const events = parser.pushEvents(encoded);
-
-    expect(events).toHaveLength(1);
-    expect(events[0]?._tag).toBe("InvalidFrame");
-    if (events[0]?._tag === "InvalidFrame") {
-      expect(events[0].error).toBeInstanceOf(VScopeFrameParseError);
-    }
-  });
+      expect(events).toHaveLength(1);
+      expect(events[0]?._tag).toBe("InvalidFrame");
+      if (events[0]?._tag === "InvalidFrame") {
+        expect(events[0].error).toBeInstanceOf(VScopeFrameParseError);
+      }
+    }),
+  );
 });
 
 describe("@vscope/serial device", () => {
-  test("opens a vscope device and hydrates static firmware metadata", async () => {
-    const firmware = fakeFirmware({
-      path: "/dev/tty.vscope-a",
-      deviceName: "scope-a",
-      variables: ["voltage", "current", "speed", "torque", "temp", "phase"],
-      rtLabels: ["kp", "ki"],
-    });
-    const driver = fakeDriver([firmware]);
+  it.live("opens a vscope device and hydrates static firmware metadata", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-a",
+        deviceName: "scope-a",
+        variables: ["voltage", "current", "speed", "torque", "temp", "phase"],
+        rtLabels: ["kp", "ki"],
+      });
+      const driver = fakeDriver([firmware]);
 
-    const device = await Effect.runPromise(
-      Effect.scoped(
-        openVScopeDevice({
-          path: "/dev/tty.vscope-a",
-          baudRate: 115200,
-          driver,
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-a",
+        baudRate: 115200,
+        driver,
+      });
+
+      expect(device.path).toBe("/dev/tty.vscope-a");
+      expect(device.deviceName).toBe("scope-a");
+      expect(device.info).toMatchObject({
+        channelCount: 5,
+        bufferSize: 1000,
+        variableCount: 6,
+        rtCount: 2,
+        deviceName: "scope-a",
+      });
+
+      const metadata = yield* device.metadata;
+      expect(metadata.variables).toEqual([
+        "voltage",
+        "current",
+        "speed",
+        "torque",
+        "temp",
+        "phase",
+      ]);
+      expect(metadata.rtLabels).toEqual(["kp", "ki"]);
+      expect(metadata.channelMap).toEqual([0, 1, 2, 3, 4]);
+      expect(firmware.controlSignals).toEqual({ dtr: true, rts: true });
+    }),
+  );
+
+  it.live("maps trigger modes between wire values and shared semantic values", () =>
+    Effect.gen(function* () {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-trigger",
+          deviceName: "scope-trigger",
         }),
-      ),
-    );
+      ]);
 
-    expect(device.path).toBe("/dev/tty.vscope-a");
-    expect(device.deviceName).toBe("scope-a");
-    expect(device.info).toMatchObject({
-      channelCount: 5,
-      bufferSize: 1000,
-      variableCount: 6,
-      rtCount: 2,
-      deviceName: "scope-a",
-    });
-
-    const metadata = await Effect.runPromise(device.metadata);
-    expect(metadata.variables).toEqual(["voltage", "current", "speed", "torque", "temp", "phase"]);
-    expect(metadata.rtLabels).toEqual(["kp", "ki"]);
-    expect(metadata.channelMap).toEqual([0, 1, 2, 3, 4]);
-    expect(firmware.controlSignals).toEqual({ dtr: true, rts: true });
-  });
-
-  test("maps trigger modes between wire values and shared semantic values", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
+      const device = yield* openVScopeDevice({
         path: "/dev/tty.vscope-trigger",
-        deviceName: "scope-trigger",
-      }),
-    ]);
+        baudRate: 115200,
+        driver,
+      });
+      const trigger = yield* device.getTrigger;
+      const updatedTrigger = yield* device.setTrigger({
+        threshold: 1,
+        channel: 1,
+        mode: "rising",
+      });
 
-    const { trigger, updatedTrigger } = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-trigger",
-            baudRate: 115200,
-            driver,
-          });
-          const trigger = yield* device.getTrigger;
-          const updatedTrigger = yield* device.setTrigger({
-            threshold: 1,
-            channel: 1,
-            mode: "rising",
-          });
-          return { trigger, updatedTrigger };
-        }),
-      ),
-    );
+      expect(trigger.mode).toBe("disabled");
+      expect(updatedTrigger.mode).toBe("rising");
+    }),
+  );
 
-    expect(trigger.mode).toBe("disabled");
-    expect(updatedTrigger.mode).toBe("rising");
-  });
+  it.live("completes the device close signal when the opening scope is released", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-scoped-close",
+        deviceName: "scope-scoped-close",
+      });
+      const driver = fakeDriver([firmware]);
+      let closed: Effect.Effect<void, unknown> | undefined;
 
-  test("completes the device close signal when the opening scope is released", async () => {
-    const firmware = fakeFirmware({
-      path: "/dev/tty.vscope-scoped-close",
-      deviceName: "scope-scoped-close",
-    });
-    const driver = fakeDriver([firmware]);
-    let closed: Effect.Effect<void, unknown> | undefined;
-
-    await Effect.runPromise(
-      Effect.scoped(
+      yield* Effect.scoped(
         Effect.gen(function* () {
           const device = yield* openVScopeDevice({
             path: "/dev/tty.vscope-scoped-close",
@@ -189,299 +189,257 @@ describe("@vscope/serial device", () => {
           });
           closed = device.closed;
         }),
-      ),
-    );
+      );
 
-    if (!closed) {
-      throw new Error("Device close signal was not captured");
-    }
+      if (!closed) {
+        throw new Error("Device close signal was not captured");
+      }
 
-    const result = await Effect.runPromise(
-      closed.pipe(
+      const result = yield* closed.pipe(
         Effect.as("closed"),
         Effect.timeoutOrElse({
           duration: "100 millis",
           orElse: () => Effect.succeed("timeout"),
         }),
-      ),
-    );
+      );
 
-    expect(result).toBe("closed");
-    expect(firmware.closeAttempts).toBe(1);
-  });
+      expect(result).toBe("closed");
+      expect(firmware.closeAttempts).toBe(1);
+    }),
+  );
 
-  test("streams snapshot data in firmware-sized dense byte chunks", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
+  it.live("streams snapshot data in firmware-sized dense byte chunks", () =>
+    Effect.gen(function* () {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-snapshot",
+          deviceName: "scope-snapshot",
+        }),
+      ]);
+
+      const device = yield* openVScopeDevice({
         path: "/dev/tty.vscope-snapshot",
-        deviceName: "scope-snapshot",
-      }),
-    ]);
-
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-snapshot",
-            baudRate: 115200,
-            driver,
-          });
-          const chunks = yield* device.snapshotBytes().pipe(Stream.runCollect);
-          const bytes = yield* device.collectSnapshotBytes();
-          return { chunks, bytes };
-        }),
-      ),
-    );
-
-    expect(result.chunks.length).toBeGreaterThan(1);
-    expect(result.bytes.byteLength).toBe(1000 * 5 * Float32Array.BYTES_PER_ELEMENT);
-
-    const view = new DataView(
-      result.bytes.buffer,
-      result.bytes.byteOffset,
-      result.bytes.byteLength,
-    );
-    expect(view.getFloat32(0, true)).toBe(0);
-    expect(view.getFloat32(4, true)).toBe(1);
-    expect(view.getFloat32((1000 * 5 - 1) * 4, true)).toBe(4999);
-  });
-
-  test("surfaces firmware errors as typed failures", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-rt",
-        deviceName: "scope-rt",
-        rtLabels: ["gain"],
-        failRtRead: true,
-      }),
-    ]);
-
-    const exit = await Effect.runPromiseExit(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-rt",
-            baudRate: 115200,
-            driver,
-          });
-
-          yield* device.getRtValue(0);
-        }),
-      ),
-    );
-
-    expect(exit._tag).toBe("Failure");
-    if (exit._tag === "Failure") {
-      const errors = exit.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-
-      expect(errors[0]).toBeInstanceOf(VScopeFirmwareError);
-      expect(errors[0]).toMatchObject({
-        _tag: "VScopeFirmwareError",
-        status: VScopeStatus.Range,
+        baudRate: 115200,
+        driver,
       });
-    }
-  });
+      const chunks = yield* device.snapshotBytes().pipe(Stream.runCollect);
+      const bytes = yield* device.collectSnapshotBytes();
 
-  test("rejects values that JavaScript would coerce on the wire", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-validation",
-        deviceName: "scope-validation",
-      }),
-    ]);
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(bytes.byteLength).toBe(1000 * 5 * Float32Array.BYTES_PER_ELEMENT);
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-validation",
-            baudRate: 115200,
-            driver,
-          });
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      expect(view.getFloat32(0, true)).toBe(0);
+      expect(view.getFloat32(4, true)).toBe(1);
+      expect(view.getFloat32((1000 * 5 - 1) * 4, true)).toBe(4999);
+    }),
+  );
 
-          const oversizedDivider = yield* Effect.exit(
-            device.setTiming({ divider: 0x1_0000_0000, preTrig: 0 }),
-          );
-          const fractionalState = yield* Effect.exit(device.setState(1.5 as VScopeStateValue));
-          const invalidTriggerMode = yield* Effect.exit(
-            device.setTrigger({
-              threshold: 0,
-              channel: 0,
-              mode: "edge" as never,
-            }),
-          );
-
-          return { oversizedDivider, fractionalState, invalidTriggerMode };
+  it.live("surfaces firmware errors as typed failures", () =>
+    Effect.gen(function* () {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-rt",
+          deviceName: "scope-rt",
+          rtLabels: ["gain"],
+          failRtRead: true,
         }),
-      ),
-    );
+      ]);
 
-    for (const exit of [
-      result.oversizedDivider,
-      result.fractionalState,
-      result.invalidTriggerMode,
-    ]) {
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-rt",
+        baudRate: 115200,
+        driver,
+      });
+
+      const exit = yield* Effect.exit(device.getRtValue(0));
+
       expect(exit._tag).toBe("Failure");
       if (exit._tag === "Failure") {
         const errors = exit.cause.reasons
           .filter((reason) => reason._tag === "Fail")
           .map((reason) => reason.error);
-        expect(errors[0]).toBeInstanceOf(VScopeInvalidArgumentError);
+
+        expect(errors[0]).toBeInstanceOf(VScopeFirmwareError);
+        expect(errors[0]).toMatchObject({
+          _tag: "VScopeFirmwareError",
+          status: VScopeStatus.Range,
+        });
       }
-    }
-  });
+    }),
+  );
 
-  test("fails the device session after a response timeout so late frames cannot poison later requests", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-timeout",
-        deviceName: "scope-timeout",
-        frameResponseDelayMillis: 20,
-      }),
-    ]);
+  it.live("rejects values that JavaScript would coerce on the wire", () =>
+    Effect.gen(function* () {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-validation",
+          deviceName: "scope-validation",
+        }),
+      ]);
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-validation",
+        baudRate: 115200,
+        driver,
+      });
+
+      const oversizedDivider = yield* Effect.exit(
+        device.setTiming({ divider: 0x1_0000_0000, preTrig: 0 }),
+      );
+      const fractionalState = yield* Effect.exit(device.setState(1.5 as VScopeStateValue));
+      const invalidTriggerMode = yield* Effect.exit(
+        device.setTrigger({
+          threshold: 0,
+          channel: 0,
+          mode: "edge" as never,
+        }),
+      );
+
+      for (const exit of [oversizedDivider, fractionalState, invalidTriggerMode]) {
+        expect(exit._tag).toBe("Failure");
+        if (exit._tag === "Failure") {
+          const errors = exit.cause.reasons
+            .filter((reason) => reason._tag === "Fail")
+            .map((reason) => reason.error);
+          expect(errors[0]).toBeInstanceOf(VScopeInvalidArgumentError);
+        }
+      }
+    }),
+  );
+
+  it.live(
+    "fails the device session after a response timeout so late frames cannot poison later requests",
+    () =>
+      Effect.gen(function* () {
+        const driver = fakeDriver([
+          fakeFirmware({
             path: "/dev/tty.vscope-timeout",
-            baudRate: 115200,
-            driver,
-            requestTimeoutMillis: 5,
-          });
+            deviceName: "scope-timeout",
+            frameResponseDelayMillis: 20,
+          }),
+        ]);
 
-          const timedOutFrame = yield* Effect.exit(device.getFrame);
-          yield* Effect.sleep("30 millis");
-          const nextRequest = yield* Effect.exit(device.getState);
+        const device = yield* openVScopeDevice({
+          path: "/dev/tty.vscope-timeout",
+          baudRate: 115200,
+          driver,
+          requestTimeoutMillis: 5,
+        });
 
-          return { timedOutFrame, nextRequest };
-        }),
-      ),
-    );
+        const timedOutFrame = yield* Effect.exit(device.getFrame);
+        yield* Effect.sleep("30 millis");
+        const nextRequest = yield* Effect.exit(device.getState);
 
-    expect(result.timedOutFrame._tag).toBe("Failure");
-    if (result.timedOutFrame._tag === "Failure") {
-      const errors = result.timedOutFrame.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeResponseTimeoutError);
-    }
+        expect(timedOutFrame._tag).toBe("Failure");
+        if (timedOutFrame._tag === "Failure") {
+          const errors = timedOutFrame.cause.reasons
+            .filter((reason) => reason._tag === "Fail")
+            .map((reason) => reason.error);
+          expect(errors[0]).toBeInstanceOf(VScopeResponseTimeoutError);
+        }
 
-    expect(result.nextRequest._tag).toBe("Failure");
-    if (result.nextRequest._tag === "Failure") {
-      const errors = result.nextRequest.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeSessionClosedError);
-    }
-  });
-
-  test("fails immediately when a valid response has the wrong message type", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-wrong-response",
-        deviceName: "scope-wrong-response",
-        wrongResponseFor: VScopeMessageType.GetTiming,
+        expect(nextRequest._tag).toBe("Failure");
+        if (nextRequest._tag === "Failure") {
+          const errors = nextRequest.cause.reasons
+            .filter((reason) => reason._tag === "Fail")
+            .map((reason) => reason.error);
+          expect(errors[0]).toBeInstanceOf(VScopeSessionClosedError);
+        }
       }),
-    ]);
+  );
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-wrong-response",
-            baudRate: 115200,
-            driver,
-          });
-
-          return yield* Effect.exit(device.getTiming);
+  it.live("fails immediately when a valid response has the wrong message type", () =>
+    Effect.gen(function* () {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-wrong-response",
+          deviceName: "scope-wrong-response",
+          wrongResponseFor: VScopeMessageType.GetTiming,
         }),
-      ),
-    );
+      ]);
 
-    expect(result._tag).toBe("Failure");
-    if (result._tag === "Failure") {
-      const errors = result.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeUnexpectedResponseError);
-    }
-  });
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-wrong-response",
+        baudRate: 115200,
+        driver,
+      });
 
-  test("retries the same request after a CRC-corrupted response", async () => {
-    const firmware = fakeFirmware({
-      path: "/dev/tty.vscope-crc-retry",
-      deviceName: "scope-crc-retry",
-      corruptFirstResponsesFor: [VScopeMessageType.GetTiming],
-    });
-    const driver = fakeDriver([firmware]);
+      const result = yield* Effect.exit(device.getTiming);
 
-    const timing = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-crc-retry",
-            baudRate: 115200,
-            driver,
-            crcRetryAttempts: 1,
-          });
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        const errors = result.cause.reasons
+          .filter((reason) => reason._tag === "Fail")
+          .map((reason) => reason.error);
+        expect(errors[0]).toBeInstanceOf(VScopeUnexpectedResponseError);
+      }
+    }),
+  );
 
-          return yield* device.getTiming;
-        }),
-      ),
-    );
+  it.live("retries the same request after a CRC-corrupted response", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-crc-retry",
+        deviceName: "scope-crc-retry",
+        corruptFirstResponsesFor: [VScopeMessageType.GetTiming],
+      });
+      const driver = fakeDriver([firmware]);
 
-    expect(timing).toEqual({ divider: 1, preTrig: 0 });
-    expect(firmware.requestCount(VScopeMessageType.GetTiming)).toBe(2);
-  });
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-crc-retry",
+        baudRate: 115200,
+        driver,
+        crcRetryAttempts: 1,
+      });
 
-  test("still closes the native transport after a read-side session failure", async () => {
-    const firmware = fakeFirmware({
-      path: "/dev/tty.vscope-read-error",
-      deviceName: "scope-read-error",
-      errorAfterOpenMillis: 20,
-    });
-    const driver = fakeDriver([firmware]);
+      const timing = yield* device.getTiming;
 
-    const result = await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const device = yield* openVScopeDevice({
-            path: "/dev/tty.vscope-read-error",
-            baudRate: 115200,
-            driver,
-          });
+      expect(timing).toEqual({ divider: 1, preTrig: 0 });
+      expect(firmware.requestCount(VScopeMessageType.GetTiming)).toBe(2);
+    }),
+  );
 
-          const closedExit = yield* Effect.exit(device.closed);
-          const closeExit = yield* Effect.exit(device.close);
+  it.live("still closes the native transport after a read-side session failure", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-read-error",
+        deviceName: "scope-read-error",
+        errorAfterOpenMillis: 20,
+      });
+      const driver = fakeDriver([firmware]);
 
-          return { closedExit, closeExit, closeAttempts: firmware.closeAttempts };
-        }),
-      ),
-    );
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-read-error",
+        baudRate: 115200,
+        driver,
+      });
 
-    expect(result.closedExit._tag).toBe("Failure");
-    if (result.closedExit._tag === "Failure") {
-      const errors = result.closedExit.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeTransportError);
-    }
-    expect(result.closeExit._tag).toBe("Success");
-    expect(result.closeAttempts).toBe(1);
-  });
+      const closedExit = yield* Effect.exit(device.closed);
+      const closeExit = yield* Effect.exit(device.close);
+      const closeAttempts = firmware.closeAttempts;
+
+      expect(closedExit._tag).toBe("Failure");
+      if (closedExit._tag === "Failure") {
+        const errors = closedExit.cause.reasons
+          .filter((reason) => reason._tag === "Fail")
+          .map((reason) => reason.error);
+        expect(errors[0]).toBeInstanceOf(VScopeTransportError);
+      }
+      expect(closeExit._tag).toBe("Success");
+      expect(closeAttempts).toBe(1);
+    }),
+  );
 });
 
 describe("@vscope/serial manager", () => {
-  test("manages devices by path and resolves duplicate names by first match", async () => {
+  it.live("manages devices by path and resolves duplicate names by first match", () => {
     const driver = fakeDriver([
       fakeFirmware({ path: "/dev/tty.vscope-a", deviceName: "same-name" }),
       fakeFirmware({ path: "/dev/tty.vscope-b", deviceName: "same-name" }),
     ]);
 
-    const program = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
       const first = yield* manager.openDevice({ path: "/dev/tty.vscope-a", baudRate: 115200 });
       const second = yield* manager.openDevice({ path: "/dev/tty.vscope-b", baudRate: 115200 });
@@ -490,29 +448,25 @@ describe("@vscope/serial manager", () => {
         manager.openDevice({ path: "/dev/tty.vscope-a", baudRate: 115200 }),
       );
 
-      return { first, second, byName, duplicateExit };
+      expect(first.path).toBe("/dev/tty.vscope-a");
+      expect(second.path).toBe("/dev/tty.vscope-b");
+      expect(byName.path).toBe("/dev/tty.vscope-a");
+      expect(duplicateExit._tag).toBe("Failure");
+      if (duplicateExit._tag === "Failure") {
+        const errors = duplicateExit.cause.reasons
+          .filter((reason) => reason._tag === "Fail")
+          .map((reason) => reason.error);
+        expect(errors[0]).toBeInstanceOf(VScopeDeviceAlreadyOpenError);
+      }
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
-
-    const result = await Effect.runPromise(program);
-
-    expect(result.first.path).toBe("/dev/tty.vscope-a");
-    expect(result.second.path).toBe("/dev/tty.vscope-b");
-    expect(result.byName.path).toBe("/dev/tty.vscope-a");
-    expect(result.duplicateExit._tag).toBe("Failure");
-    if (result.duplicateExit._tag === "Failure") {
-      const errors = result.duplicateExit.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeDeviceAlreadyOpenError);
-    }
   });
 
-  test("removes manager-owned devices when the returned device is closed", async () => {
+  it.live("removes manager-owned devices when the returned device is closed", () => {
     const driver = fakeDriver([
       fakeFirmware({ path: "/dev/tty.vscope-managed", deviceName: "managed" }),
     ]);
 
-    const program = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
       const first = yield* manager.openDevice({
         path: "/dev/tty.vscope-managed",
@@ -525,62 +479,57 @@ describe("@vscope/serial manager", () => {
         baudRate: 115200,
       });
 
-      return { afterClose, reopened };
+      expect(afterClose).toEqual([]);
+      expect(reopened.path).toBe("/dev/tty.vscope-managed");
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
-
-    const result = await Effect.runPromise(program);
-
-    expect(result.afterClose).toEqual([]);
-    expect(result.reopened.path).toBe("/dev/tty.vscope-managed");
   });
 
-  test("keeps manager entries registered but closes the stale handle when serial close fails", async () => {
-    const driver = fakeDriver([
-      fakeFirmware({
-        path: "/dev/tty.vscope-close-fail",
-        deviceName: "close-fail",
-        closeFailures: 1,
-      }),
-    ]);
+  it.live(
+    "keeps manager entries registered but closes the stale handle when serial close fails",
+    () => {
+      const driver = fakeDriver([
+        fakeFirmware({
+          path: "/dev/tty.vscope-close-fail",
+          deviceName: "close-fail",
+          closeFailures: 1,
+        }),
+      ]);
 
-    const program = Effect.gen(function* () {
-      const manager = yield* VScopeSerial;
-      const device = yield* manager.openDevice({
-        path: "/dev/tty.vscope-close-fail",
-        baudRate: 115200,
-      });
-      const closeExit = yield* Effect.exit(device.close);
-      const afterFailedClose = yield* manager.listDevices;
-      const stateAfterFailedClose = yield* Effect.exit(device.getState);
-      const retryExit = yield* Effect.exit(manager.removeDevice("/dev/tty.vscope-close-fail"));
-      const afterRetry = yield* manager.listDevices;
+      return Effect.gen(function* () {
+        const manager = yield* VScopeSerial;
+        const device = yield* manager.openDevice({
+          path: "/dev/tty.vscope-close-fail",
+          baudRate: 115200,
+        });
+        const closeExit = yield* Effect.exit(device.close);
+        const afterFailedClose = yield* manager.listDevices;
+        const stateAfterFailedClose = yield* Effect.exit(device.getState);
+        const retryExit = yield* Effect.exit(manager.removeDevice("/dev/tty.vscope-close-fail"));
+        const afterRetry = yield* manager.listDevices;
 
-      return { closeExit, afterFailedClose, stateAfterFailedClose, retryExit, afterRetry };
-    }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
+        expect(closeExit._tag).toBe("Failure");
+        if (closeExit._tag === "Failure") {
+          const errors = closeExit.cause.reasons
+            .filter((reason) => reason._tag === "Fail")
+            .map((reason) => reason.error);
+          expect(errors[0]).toBeInstanceOf(SerialCloseError);
+        }
 
-    const result = await Effect.runPromise(program);
+        expect(afterFailedClose).toHaveLength(1);
+        expect(afterFailedClose[0]?.path).toBe("/dev/tty.vscope-close-fail");
+        expect(stateAfterFailedClose._tag).toBe("Failure");
+        expect(retryExit._tag).toBe("Success");
+        expect(afterRetry).toEqual([]);
+      }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
+    },
+  );
 
-    expect(result.closeExit._tag).toBe("Failure");
-    if (result.closeExit._tag === "Failure") {
-      const errors = result.closeExit.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(SerialCloseError);
-    }
-
-    expect(result.afterFailedClose).toHaveLength(1);
-    expect(result.afterFailedClose[0]?.path).toBe("/dev/tty.vscope-close-fail");
-    expect(result.stateAfterFailedClose._tag).toBe("Failure");
-    expect(result.retryExit._tag).toBe("Success");
-    expect(result.afterRetry).toEqual([]);
-  });
-
-  test("does not let stale device handles close a newer device on the same path", async () => {
+  it.live("does not let stale device handles close a newer device on the same path", () => {
     const driver = fakeDriver([
       fakeFirmware({ path: "/dev/tty.vscope-stale", deviceName: "stale" }),
     ]);
 
-    const program = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
       const first = yield* manager.openDevice({
         path: "/dev/tty.vscope-stale",
@@ -594,17 +543,13 @@ describe("@vscope/serial manager", () => {
       yield* first.close;
       const devices = yield* manager.listDevices;
 
-      return { second, devices };
+      expect(second.path).toBe("/dev/tty.vscope-stale");
+      expect(devices).toHaveLength(1);
+      expect(devices[0]?.path).toBe("/dev/tty.vscope-stale");
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
-
-    const result = await Effect.runPromise(program);
-
-    expect(result.second.path).toBe("/dev/tty.vscope-stale");
-    expect(result.devices).toHaveLength(1);
-    expect(result.devices[0]?.path).toBe("/dev/tty.vscope-stale");
   });
 
-  test("publishes DeviceLost and removes the entry on involuntary serial close", async () => {
+  it.live("publishes DeviceLost and removes the entry on involuntary serial close", () => {
     const driver = fakeDriver([
       fakeFirmware({
         path: "/dev/tty.vscope-lost",
@@ -613,7 +558,7 @@ describe("@vscope/serial manager", () => {
       }),
     ]);
 
-    const program = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
       const eventsFiber = yield* manager.events.pipe(
         Stream.take(2),
@@ -625,30 +570,26 @@ describe("@vscope/serial manager", () => {
       const events = yield* Fiber.join(eventsFiber);
       const devices = yield* manager.listDevices;
 
-      return { closedExit, devices, events };
+      expect(closedExit._tag).toBe("Failure");
+      if (closedExit._tag === "Failure") {
+        const errors = closedExit.cause.reasons
+          .filter((reason) => reason._tag === "Fail")
+          .map((reason) => reason.error);
+        expect(errors[0]).toBeInstanceOf(VScopeTransportError);
+      }
+
+      expect(devices).toEqual([]);
+      expect(events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
+      const lost = events[1];
+      expect(lost?._tag).toBe("DeviceLost");
+      if (lost?._tag === "DeviceLost") {
+        expect(lost.device.path).toBe("/dev/tty.vscope-lost");
+        expect(lost.cause).toBeInstanceOf(VScopeTransportError);
+      }
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
-
-    const result = await Effect.runPromise(Effect.scoped(program));
-
-    expect(result.closedExit._tag).toBe("Failure");
-    if (result.closedExit._tag === "Failure") {
-      const errors = result.closedExit.cause.reasons
-        .filter((reason) => reason._tag === "Fail")
-        .map((reason) => reason.error);
-      expect(errors[0]).toBeInstanceOf(VScopeTransportError);
-    }
-
-    expect(result.devices).toEqual([]);
-    expect(result.events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
-    const lost = result.events[1];
-    expect(lost?._tag).toBe("DeviceLost");
-    if (lost?._tag === "DeviceLost") {
-      expect(lost.device.path).toBe("/dev/tty.vscope-lost");
-      expect(lost.cause).toBeInstanceOf(VScopeTransportError);
-    }
   });
 
-  test("removes the entry when a close failure races with serial loss", async () => {
+  it.live("removes the entry when a close failure races with serial loss", () => {
     const driver = fakeDriver([
       fakeFirmware({
         path: "/dev/tty.vscope-close-race",
@@ -658,7 +599,7 @@ describe("@vscope/serial manager", () => {
       }),
     ]);
 
-    const program = Effect.gen(function* () {
+    return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
       const eventsFiber = yield* manager.events.pipe(
         Stream.take(2),
@@ -677,15 +618,11 @@ describe("@vscope/serial manager", () => {
         baudRate: 115200,
       });
 
-      return { closeExit, events, afterLost, reopened };
+      expect(closeExit._tag).toBe("Failure");
+      expect(events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
+      expect(afterLost).toEqual([]);
+      expect(reopened.path).toBe("/dev/tty.vscope-close-race");
     }).pipe(Effect.provide(makeVScopeSerialLayer({ driver })));
-
-    const result = await Effect.runPromise(Effect.scoped(program));
-
-    expect(result.closeExit._tag).toBe("Failure");
-    expect(result.events.map((event) => event._tag)).toEqual(["DeviceOpened", "DeviceLost"]);
-    expect(result.afterLost).toEqual([]);
-    expect(result.reopened.path).toBe("/dev/tty.vscope-close-race");
   });
 });
 

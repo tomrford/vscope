@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, layer } from "@effect/vitest";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
 import {
   DEFAULT_PREFERENCES,
@@ -18,7 +18,7 @@ import {
   type SnapshotListQuery,
 } from "@vscope/shared";
 import { Effect, Fiber, Layer, Option, PubSub, Schema, Stream } from "effect";
-import type * as Scope from "effect/Scope";
+import { TestClock } from "effect/testing";
 import {
   VScopeDeviceAlreadyOpenError,
   VScopeDeviceNotFoundError,
@@ -40,259 +40,6 @@ import {
 } from "@vscope/serial";
 
 import { RuntimeCore, RuntimeCoreLive } from ".";
-
-describe("@vscope/runtime core", () => {
-  test("hydrates persistent state and lists ports through the serial service", async () => {
-    const result = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        const snapshot = yield* core.getSnapshot;
-        const ports = yield* core.query({ type: "ports/list" });
-        return { snapshot, ports };
-      }),
-    );
-
-    expect(result.snapshot.settings).toEqual(testSettings);
-    expect(result.snapshot.preferences).toEqual(DEFAULT_PREFERENCES);
-    expect(result.snapshot.permissions.mode).toBe("empty");
-    expect(result.ports).toEqual({
-      type: "ports/list",
-      ports: [fakePort],
-    });
-  });
-
-  test("keeps runtime/core to one active device", async () => {
-    const result = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        const duplicate = yield* Effect.exit(
-          core.dispatch({
-            type: "devices/connect",
-            path: "/dev/tty.second",
-          }),
-        );
-        return { connected, duplicate };
-      }),
-      fakeSerialLayer([fakePort, secondPort]),
-    );
-
-    expect(result.connected.device?.path).toBe(fakePort.path);
-    expect(result.connected.permissions.mode).toBe("halted");
-    expect(result.duplicate._tag).toBe("Failure");
-  });
-
-  test("opens devices with the persisted serial control-line settings", async () => {
-    let openedWith: OpenVScopeDeviceOptions | null = null;
-    const customSettings = Settings.make({
-      ...testSettings,
-      defaultSerialConfig: {
-        ...testSettings.defaultSerialConfig,
-        baudRate: 312_500,
-        dtr: false,
-        rts: true,
-      },
-    });
-
-    await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        yield* core.dispatch({
-          type: "settings/patch",
-          patch: { defaultSerialConfig: customSettings.defaultSerialConfig },
-        });
-        yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-      }),
-      fakeSerialLayer([fakePort], {
-        onOpen: (openOptions) => {
-          openedWith = openOptions;
-        },
-      }),
-    );
-
-    expect(openedWith).toMatchObject({
-      path: fakePort.path,
-      baudRate: 312_500,
-      dtr: false,
-      rts: true,
-    });
-  });
-
-  test("observes the run-trigger-capture lifecycle through status polling", async () => {
-    const result = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        const running = yield* core.dispatch({ type: "devices/run" });
-        const triggered = yield* core.dispatch({ type: "devices/trigger" });
-        yield* Effect.sleep("80 millis");
-        const captured = yield* core.getSnapshot;
-        return { running, triggered, captured };
-      }),
-    );
-
-    expect(result.running.device?.state).toBe(VScopeState.Running);
-    expect(result.running.device?.snapshotAvailability).toBe("not-ready");
-    expect(result.triggered.device?.requestedState).toBe(VScopeState.Acquiring);
-    expect(result.triggered.device?.intent?.status).toBe("pending");
-    expect(result.captured.device?.state).toBe(VScopeState.Halted);
-    expect(result.captured.device?.snapshotAvailability).toBe("ready");
-    expect(result.captured.device?.intent?.status).toBe("settled");
-  });
-
-  test("refreshes live frames without polling RT values", async () => {
-    const snapshot = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        yield* Effect.sleep("80 millis");
-        const refreshed = yield* core.getSnapshot;
-        return { connected, refreshed };
-      }),
-    );
-
-    expect(snapshot.connected.device?.frame?.[0]).toBe(1);
-    expect(snapshot.refreshed.device?.frame?.[0]).toBeGreaterThan(1);
-    expect(snapshot.refreshed.device?.rtValues.get(0)).toBe(1);
-  });
-
-  test("keeps the device connected when frame polling fails", async () => {
-    const snapshot = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        yield* Effect.sleep("80 millis");
-        const refreshed = yield* core.getSnapshot;
-        return { connected, refreshed };
-      }),
-      fakeSerialLayer([fakePort], { device: { failFramesAfter: 1 } }),
-    );
-
-    expect(snapshot.connected.device?.frame?.[0]).toBe(1);
-    expect(snapshot.refreshed.device?.connectionStatus).toBe("connected");
-    expect(snapshot.refreshed.device?.frame?.[0]).toBe(1);
-    expect(snapshot.refreshed.warnings).toEqual([]);
-  });
-
-  test("captures ready snapshots into persistence and reads samples lazily", async () => {
-    const result = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        yield* core.dispatch({ type: "devices/run" });
-        yield* core.dispatch({ type: "devices/trigger" });
-        yield* Effect.sleep("80 millis");
-        const captured = yield* core.dispatch({
-          type: "snapshots/capture",
-          label: "Boot trace",
-        });
-        const listed = yield* core.query({ type: "snapshots/list" });
-        if (listed.type !== "snapshots/list") {
-          throw new Error("Expected snapshots/list result");
-        }
-        const samples = yield* core.query({
-          type: "snapshots/readSamples",
-          id: listed.snapshots[0].id,
-        });
-        return { captured, listed, samples };
-      }),
-    );
-
-    expect(result.captured.snapshots.length).toBe(1);
-    expect(result.captured.device?.intent?.kind).toBe("captureSnapshot");
-    expect(result.captured.device?.intent?.status).toBe("settled");
-    expect(result.listed.snapshots[0].label).toBe("Boot trace");
-    expect(result.listed.snapshots[0].device).toMatchObject({
-      name: fakeInfo.deviceName,
-    });
-    expect(result.listed.snapshots[0].sample.stored).toBe(true);
-    if (result.samples.type !== "snapshots/readSamples") {
-      throw new Error("Expected snapshots/readSamples result");
-    }
-    expect(result.samples.samples?.data.byteLength).toBe(
-      fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
-    );
-  });
-
-  test("keeps snapshot capture intent pending until download completes", async () => {
-    const result = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        yield* core.dispatch({ type: "devices/run" });
-        yield* core.dispatch({ type: "devices/trigger" });
-        yield* Effect.sleep("80 millis");
-        const capture = yield* core
-          .dispatch({
-            type: "snapshots/capture",
-            label: "Slow trace",
-          })
-          .pipe(Effect.forkScoped);
-        yield* Effect.sleep("50 millis");
-        const during = yield* core.getSnapshot;
-        const captured = yield* Fiber.join(capture);
-        return { during, captured };
-      }),
-      fakeSerialLayer([fakePort], { device: { collectSnapshotDelayMillis: 150 } }),
-    );
-
-    expect(result.during.device?.intent?.kind).toBe("captureSnapshot");
-    expect(result.during.device?.intent?.status).toBe("pending");
-    expect(result.during.permissions.captureSnapshot).toBe(false);
-    expect(result.captured.device?.intent?.kind).toBe("captureSnapshot");
-    expect(result.captured.device?.intent?.status).toBe("settled");
-  });
-
-  test("persists settings patches through the core dispatch boundary", async () => {
-    const snapshot = await runWithCore(
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        return yield* core.dispatch({
-          type: "settings/patch",
-          patch: { theme: "dark" },
-        });
-      }),
-    );
-
-    expect(snapshot.settings.theme).toBe("dark");
-  });
-});
-
-async function runWithCore<A, E>(
-  effect: Effect.Effect<A, E, RuntimeCore | Scope.Scope>,
-  serialLayer = fakeSerialLayer([fakePort]),
-): Promise<A> {
-  return await Effect.runPromise(
-    Effect.scoped(
-      effect.pipe(
-        Effect.provide(
-          RuntimeCoreLive.pipe(Layer.provide(Layer.mergeAll(fakePersistenceLayer(), serialLayer))),
-        ),
-      ),
-    ),
-  );
-}
 
 const fakePort: SerialPortInfo = {
   path: "/dev/tty.vscope",
@@ -353,6 +100,256 @@ const testSettings = Settings.make({
     crcRetryAttempts: DEFAULT_SETTINGS.polling.crcRetryAttempts,
   }),
 });
+
+describe("@vscope/runtime core", () => {
+  layer(coreTestLayer())((it) => {
+    it.effect("hydrates persistent state and lists ports through the serial service", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const snapshot = yield* core.getSnapshot;
+        const ports = yield* core.query({ type: "ports/list" });
+
+        expect(snapshot.settings).toEqual(testSettings);
+        expect(snapshot.preferences).toEqual(DEFAULT_PREFERENCES);
+        expect(snapshot.permissions.mode).toBe("empty");
+        expect(ports).toEqual({
+          type: "ports/list",
+          ports: [fakePort],
+        });
+      }),
+    );
+  });
+
+  layer(coreTestLayer(fakeSerialLayer([fakePort, secondPort])))((it) => {
+    it.effect("keeps runtime/core to one active device", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        const duplicate = yield* Effect.exit(
+          core.dispatch({
+            type: "devices/connect",
+            path: "/dev/tty.second",
+          }),
+        );
+
+        expect(connected.device?.path).toBe(fakePort.path);
+        expect(connected.permissions.mode).toBe("halted");
+        expect(duplicate._tag).toBe("Failure");
+      }),
+    );
+  });
+
+  {
+    let openedWith: OpenVScopeDeviceOptions | null = null;
+
+    layer(
+      coreTestLayer(
+        fakeSerialLayer([fakePort], {
+          onOpen: (openOptions) => {
+            openedWith = openOptions;
+          },
+        }),
+      ),
+    )((it) => {
+      it.effect("opens devices with the persisted serial control-line settings", () =>
+        Effect.gen(function* () {
+          openedWith = null;
+          const customSettings = Settings.make({
+            ...testSettings,
+            defaultSerialConfig: {
+              ...testSettings.defaultSerialConfig,
+              baudRate: 312_500,
+              dtr: false,
+              rts: true,
+            },
+          });
+
+          const core = yield* RuntimeCore;
+          yield* core.dispatch({
+            type: "settings/patch",
+            patch: { defaultSerialConfig: customSettings.defaultSerialConfig },
+          });
+          yield* core.dispatch({
+            type: "devices/connect",
+            path: fakePort.path,
+          });
+
+          expect(openedWith).toMatchObject({
+            path: fakePort.path,
+            baudRate: 312_500,
+            dtr: false,
+            rts: true,
+          });
+        }),
+      );
+    });
+  }
+
+  layer(coreTestLayer())((it) => {
+    it.effect("observes the run-trigger-capture lifecycle through status polling", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        const running = yield* core.dispatch({ type: "devices/run" });
+        const triggered = yield* core.dispatch({ type: "devices/trigger" });
+        yield* advanceTestClock(80);
+        const captured = yield* core.getSnapshot;
+
+        expect(running.device?.state).toBe(VScopeState.Running);
+        expect(running.device?.snapshotAvailability).toBe("not-ready");
+        expect(triggered.device?.requestedState).toBe(VScopeState.Acquiring);
+        expect(triggered.device?.intent?.status).toBe("pending");
+        expect(captured.device?.state).toBe(VScopeState.Halted);
+        expect(captured.device?.snapshotAvailability).toBe("ready");
+        expect(captured.device?.intent?.status).toBe("settled");
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
+    it.effect("refreshes live frames without polling RT values", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* advanceTestClock(80);
+        const refreshed = yield* core.getSnapshot;
+
+        expect(connected.device?.frame?.[0]).toBe(1);
+        expect(refreshed.device?.frame?.[0]).toBeGreaterThan(1);
+        expect(refreshed.device?.rtValues.get(0)).toBe(1);
+      }),
+    );
+  });
+
+  layer(coreTestLayer(fakeSerialLayer([fakePort], { device: { failFramesAfter: 1 } })))((it) => {
+    it.effect("keeps the device connected when frame polling fails", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const connected = yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* advanceTestClock(80);
+        const refreshed = yield* core.getSnapshot;
+
+        expect(connected.device?.frame?.[0]).toBe(1);
+        expect(refreshed.device?.connectionStatus).toBe("connected");
+        expect(refreshed.device?.frame?.[0]).toBe(1);
+        expect(refreshed.warnings).toEqual([]);
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
+    it.effect("captures ready snapshots into persistence and reads samples lazily", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        yield* advanceTestClock(80);
+        const captured = yield* core.dispatch({
+          type: "snapshots/capture",
+          label: "Boot trace",
+        });
+        const listed = yield* core.query({ type: "snapshots/list" });
+        if (listed.type !== "snapshots/list") {
+          throw new Error("Expected snapshots/list result");
+        }
+        const samples = yield* core.query({
+          type: "snapshots/readSamples",
+          id: listed.snapshots[0].id,
+        });
+
+        expect(captured.snapshots.length).toBe(1);
+        expect(captured.device?.intent?.kind).toBe("captureSnapshot");
+        expect(captured.device?.intent?.status).toBe("settled");
+        expect(listed.snapshots[0].label).toBe("Boot trace");
+        expect(listed.snapshots[0].device).toMatchObject({
+          name: fakeInfo.deviceName,
+        });
+        expect(listed.snapshots[0].sample.stored).toBe(true);
+        if (samples.type !== "snapshots/readSamples") {
+          throw new Error("Expected snapshots/readSamples result");
+        }
+        expect(samples.samples?.data.byteLength).toBe(
+          fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
+        );
+      }),
+    );
+  });
+
+  layer(
+    coreTestLayer(fakeSerialLayer([fakePort], { device: { collectSnapshotDelayMillis: 150 } })),
+  )((it) => {
+    it.effect("keeps snapshot capture intent pending until download completes", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        yield* advanceTestClock(80);
+        const capture = yield* core
+          .dispatch({
+            type: "snapshots/capture",
+            label: "Slow trace",
+          })
+          .pipe(Effect.forkScoped);
+        yield* advanceTestClock(50);
+        const during = yield* core.getSnapshot;
+        yield* advanceTestClock(150);
+        const captured = yield* Fiber.join(capture);
+
+        expect(during.device?.intent?.kind).toBe("captureSnapshot");
+        expect(during.device?.intent?.status).toBe("pending");
+        expect(during.permissions.captureSnapshot).toBe(false);
+        expect(captured.device?.intent?.kind).toBe("captureSnapshot");
+        expect(captured.device?.intent?.status).toBe("settled");
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
+    it.effect("persists settings patches through the core dispatch boundary", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const snapshot = yield* core.dispatch({
+          type: "settings/patch",
+          patch: { theme: "dark" },
+        });
+
+        expect(snapshot.settings.theme).toBe("dark");
+      }),
+    );
+  });
+});
+
+function coreTestLayer(serialLayer = fakeSerialLayer([fakePort])) {
+  return RuntimeCoreLive.pipe(Layer.provide(Layer.mergeAll(fakePersistenceLayer(), serialLayer)));
+}
+
+function advanceTestClock(durationMillis: number) {
+  return Effect.gen(function* () {
+    yield* Effect.yieldNow;
+    yield* TestClock.adjust(durationMillis);
+    yield* Effect.yieldNow;
+  });
+}
 
 function fakePersistenceLayer() {
   let settings = testSettings;

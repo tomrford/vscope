@@ -1,10 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 import { lerp } from "./math/lerp";
 import { drawSpline } from "./math/spline";
 import { niceTimeInterval, formatRelativeSeconds } from "./math/intervals";
 
 describe("liveplot math", () => {
-  test("lerp is stable across frame rates", () => {
+  it("lerp is stable across frame rates", () => {
     const at60 = lerp(0, 100, 0.1, 16.67);
     const at30 = lerp(0, 100, 0.1, 33.33);
 
@@ -19,7 +19,7 @@ describe("liveplot math", () => {
     expect(value).toBeCloseTo(100, 2);
   });
 
-  test("interval helpers return readable relative ticks", () => {
+  it("interval helpers return readable relative ticks", () => {
     expect(niceTimeInterval(10)).toBe(1);
     expect(niceTimeInterval(30)).toBe(5);
     expect(niceTimeInterval(120)).toBe(15);
@@ -29,7 +29,7 @@ describe("liveplot math", () => {
     expect(formatRelativeSeconds(120)).toBe("-2m");
   });
 
-  test("spline control points stay in segment x-bounds", () => {
+  it("spline control points stay in segment x-bounds", () => {
     const calls: number[][] = [];
     const ctx = {
       lineTo: () => {},
