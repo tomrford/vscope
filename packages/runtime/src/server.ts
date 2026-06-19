@@ -4,14 +4,17 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { makePersistenceLayer } from "@vscope/persistence";
 import { VScopeSerialLayer } from "@vscope/serial";
 import {
+  RuntimeActiveDevice,
+  RuntimeAppDto,
   RuntimeConnectRequest,
   RuntimeApiError,
+  RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
   RuntimeFramePayload,
   RuntimeRpcs,
   RuntimeSnapshotCaptureRequest,
-  RuntimeWriteConfigRequest,
-  RuntimeStateDto,
+  RuntimeTimingPatch,
+  RuntimeTriggerPatch,
   RuntimeSnapshotRecord,
   RuntimePortInfo,
   PersistentId,
@@ -31,7 +34,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeRuntimeApi, type RuntimeApi } from "./api";
 import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
-import type { RuntimeCoreError } from "./core/errors";
+import { RuntimeCorePolicyError, type RuntimeCoreError } from "./core/errors";
 
 class RuntimeApiService extends Context.Service<RuntimeApiService, RuntimeApi>()(
   "@vscope/runtime/RuntimeApi",
@@ -40,6 +43,17 @@ class RuntimeApiService extends Context.Service<RuntimeApiService, RuntimeApi>()
 const JsonContent = {
   "content-type": "application/json",
 } as const;
+
+const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+
+class RuntimeWriteConfigRequest extends Schema.Class<RuntimeWriteConfigRequest>(
+  "RuntimeWriteConfigRequest",
+)({
+  timing: Schema.optionalKey(RuntimeTimingPatch),
+  trigger: Schema.optionalKey(RuntimeTriggerPatch),
+  channelMap: Schema.optionalKey(Schema.Array(NonNegativeInt)),
+  rtValues: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
+}) {}
 
 export function makeRuntimeHttpLayer(config: RuntimeConfig) {
   const apiLayer = Layer.effect(
@@ -65,19 +79,26 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     Effect.gen(function* () {
       const api = yield* RuntimeApiService;
       return RuntimeRpcs.of({
-        "runtime.getState": () => api.rpc.getState,
-        "runtime.status": () => api.subscriptions.status,
+        "runtime.getApp": () => api.rpc.getApp,
+        "runtime.app": () => api.subscriptions.app,
         "settings.patch": (patch) =>
           api.rpc.patchSettings(patch).pipe(Effect.mapError(runtimeApiError)),
         "preferences.patch": (patch) =>
           api.rpc.patchPreferences(patch).pipe(Effect.mapError(runtimeApiError)),
         "ports.list": () => api.rpc.listPorts.pipe(Effect.mapError(runtimeApiError)),
+        "device.active.get": () => api.rpc.getActiveDevice,
+        "device.active": () => api.subscriptions.activeDevice,
         "device.connect": ({ path }) =>
           api.rpc.connectDevice(path).pipe(Effect.mapError(runtimeApiError)),
         "device.disconnect": () => api.rpc.disconnectDevice.pipe(Effect.mapError(runtimeApiError)),
+        "device.status.get": () => api.rpc.getDeviceStatus,
+        "device.status": () => api.subscriptions.status,
+        "device.permissions": () => api.subscriptions.permissions,
         "device.run": () => api.rpc.runDevice.pipe(Effect.mapError(runtimeApiError)),
         "device.stop": () => api.rpc.stopDevice.pipe(Effect.mapError(runtimeApiError)),
         "device.trigger": () => api.rpc.triggerDevice.pipe(Effect.mapError(runtimeApiError)),
+        "device.config.get": () => api.rpc.getConfig,
+        "device.config": () => api.subscriptions.config,
         "device.setTiming": (timing) =>
           api.rpc.setTiming(timing).pipe(Effect.mapError(runtimeApiError)),
         "device.setTrigger": (trigger) =>
@@ -86,10 +107,12 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
           api.rpc.setRtValue(index, value).pipe(Effect.mapError(runtimeApiError)),
         "device.setChannelMap": ({ channel, variable }) =>
           api.rpc.setChannelMap(channel, variable).pipe(Effect.mapError(runtimeApiError)),
-        "device.frame": () => api.subscriptions.frame,
+        "device.frame.get": () => api.rpc.readFrame,
+        "device.frames": () => api.subscriptions.frames,
         "snapshots.capture": ({ label }) =>
           api.rpc.captureSnapshot(label).pipe(Effect.mapError(runtimeApiError)),
         "snapshots.list": () => api.rpc.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
+        "snapshots.index": () => api.subscriptions.snapshots,
       });
     }),
   );
@@ -127,8 +150,8 @@ export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never
   const app = Layer.unwrap(
     Effect.gen(function* () {
       const core = yield* RuntimeCore;
-      const snapshot = yield* core.getSnapshot;
-      const port = runtimeServerPort(config, snapshot.settings);
+      const appState = yield* core.app;
+      const port = runtimeServerPort(config, appState.settings);
       return Layer.unwrap(
         HttpRouter.toHttpEffect(makeRuntimeHttpLayer(config)).pipe(
           Effect.map((handler) => HttpServer.serve(handler, HttpMiddleware.cors())),
@@ -250,10 +273,74 @@ function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {
   return new RuntimeApiError({ message: describeError(error) });
 }
 
+function writeConfig(
+  api: RuntimeApi,
+  patch: RuntimeWriteConfigRequest,
+): Effect.Effect<void, RuntimeCoreError> {
+  return Effect.gen(function* () {
+    if (patch.timing) {
+      const config = yield* requireConfig(api, "devices/setTiming");
+      const divider = patch.timing.divider ?? config.timing?.divider;
+      const preTrig = patch.timing.preTrig ?? config.timing?.preTrig;
+      if (divider !== undefined && preTrig !== undefined) {
+        yield* api.rpc.setTiming({ divider, preTrig });
+      }
+    }
+
+    if (patch.trigger) {
+      const config = yield* requireConfig(api, "devices/setTrigger");
+      const threshold = patch.trigger.threshold ?? config.trigger?.threshold;
+      const channel = patch.trigger.channel ?? config.trigger?.channel;
+      const mode = patch.trigger.mode ?? config.trigger?.mode;
+      if (threshold !== undefined && channel !== undefined && mode !== undefined) {
+        yield* api.rpc.setTrigger({ threshold, channel, mode });
+      }
+    }
+
+    if (patch.channelMap) {
+      const config = yield* requireConfig(api, "devices/setChannelMap");
+      for (const [channel, variable] of patch.channelMap.entries()) {
+        if (config.channelMap[channel] !== variable) {
+          yield* api.rpc.setChannelMap(channel, variable);
+        }
+      }
+    }
+
+    if (patch.rtValues) {
+      const config = yield* requireConfig(api, "devices/setRtValue");
+      const currentRtValues = new Map(config.rtValues);
+      for (const [index, value] of Object.entries(patch.rtValues)) {
+        const numericIndex = Number(index);
+        if (currentRtValues.get(numericIndex) !== value) {
+          yield* api.rpc.setRtValue(numericIndex, value);
+        }
+      }
+    }
+  });
+}
+
+function requireConfig(
+  api: RuntimeApi,
+  command: string,
+): Effect.Effect<RuntimeDeviceConfigPayload, RuntimeCoreError> {
+  return api.rpc.getConfig.pipe(
+    Effect.flatMap((config) =>
+      config
+        ? Effect.succeed(config)
+        : Effect.fail(
+            new RuntimeCorePolicyError({
+              command,
+              reason: "No editable device configuration is available.",
+            }),
+          ),
+    ),
+  );
+}
+
 const RuntimeMcpToolkit = Toolkit.make(
-  Tool.make("vscope_get_state", {
-    description: "Read the current vscope runtime state.",
-    success: RuntimeStateDto,
+  Tool.make("vscope_get_app", {
+    description: "Read runtime app settings, preferences, warnings, and logs.",
+    success: RuntimeAppDto,
   })
     .annotate(Tool.Readonly, true)
     .annotate(Tool.Destructive, false)
@@ -268,35 +355,51 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.Destructive, false)
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_get_active_device", {
+    description: "Read active device identity and static catalog metadata.",
+    success: Schema.NullOr(RuntimeActiveDevice),
+  })
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_connect_device", {
     description: "Connect to a vscope device.",
     parameters: RuntimeConnectRequest,
-    success: RuntimeStateDto,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_disconnect_device", {
     description: "Disconnect the active vscope device.",
-    success: RuntimeStateDto,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
+  Tool.make("vscope_get_device_status", {
+    description: "Read the latest device status flags.",
+    success: Schema.NullOr(RuntimeControlStatus),
+  })
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_run_device", {
     description: "Start the active vscope device.",
-    success: RuntimeStateDto,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_stop_device", {
     description: "Stop the active vscope device.",
-    success: RuntimeStateDto,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_trigger_device", {
     description: "Trigger the active vscope device.",
-    success: RuntimeStateDto,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_read_config", {
-    description: "Read editable device configuration and catalog metadata.",
-    success: RuntimeDeviceConfigPayload,
+    description: "Read editable device configuration.",
+    success: Schema.NullOr(RuntimeDeviceConfigPayload),
   })
     .annotate(Tool.Readonly, true)
     .annotate(Tool.Destructive, false)
@@ -305,7 +408,7 @@ const RuntimeMcpToolkit = Toolkit.make(
   Tool.make("vscope_write_config", {
     description: "Patch editable device configuration while halted.",
     parameters: RuntimeWriteConfigRequest,
-    success: RuntimeDeviceConfigPayload,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_read_frame", {
@@ -319,7 +422,7 @@ const RuntimeMcpToolkit = Toolkit.make(
   Tool.make("vscope_capture_snapshot", {
     description: "Capture a ready vscope snapshot.",
     parameters: RuntimeSnapshotCaptureRequest,
-    success: RuntimeSnapshotRecord,
+    success: Schema.Void,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_list_snapshots", {
@@ -337,18 +440,20 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
   Effect.gen(function* () {
     const api = yield* RuntimeApiService;
     return RuntimeMcpToolkit.of({
-      vscope_get_state: () => api.mcp.getState,
+      vscope_get_app: () => api.mcp.getApp,
       vscope_list_ports: () => api.mcp.listPorts.pipe(Effect.mapError(runtimeApiError)),
+      vscope_get_active_device: () => api.mcp.getActiveDevice,
       vscope_connect_device: ({ path }) =>
         api.mcp.connectDevice(path).pipe(Effect.mapError(runtimeApiError)),
       vscope_disconnect_device: () =>
         api.mcp.disconnectDevice.pipe(Effect.mapError(runtimeApiError)),
+      vscope_get_device_status: () => api.mcp.getDeviceStatus,
       vscope_run_device: () => api.mcp.runDevice.pipe(Effect.mapError(runtimeApiError)),
       vscope_stop_device: () => api.mcp.stopDevice.pipe(Effect.mapError(runtimeApiError)),
       vscope_trigger_device: () => api.mcp.triggerDevice.pipe(Effect.mapError(runtimeApiError)),
       vscope_read_config: () => api.mcp.readConfig,
       vscope_write_config: (patch) =>
-        api.mcp.writeConfig(patch).pipe(Effect.mapError(runtimeApiError)),
+        writeConfig(api, patch).pipe(Effect.mapError(runtimeApiError)),
       vscope_read_frame: () => api.mcp.readFrame,
       vscope_capture_snapshot: ({ label }) =>
         api.mcp.captureSnapshot(label).pipe(Effect.mapError(runtimeApiError)),

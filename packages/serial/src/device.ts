@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Exit, Queue, Ref, Semaphore, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Queue, Ref, Schedule, Semaphore, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import type { TriggerMode } from "@vscope/shared";
 
@@ -48,6 +48,7 @@ import type {
   VScopeControlStatus,
   VScopeDevice,
   VScopeDeviceInfo,
+  VScopeRequestOptions,
   VScopeSnapshotHeader,
   VScopeStaticMetadata,
   VScopeTiming,
@@ -59,6 +60,7 @@ interface VScopeClient {
     requestType: VScopeMessageType,
     responseType: VScopeMessageType,
     payload?: Uint8Array,
+    options?: VScopeRequestOptions,
   ) => Effect.Effect<Uint8Array, VScopeDeviceError>;
   readonly closed: Effect.Effect<void, VScopeDeviceError>;
   readonly close: <E>(closeTransport: Effect.Effect<void, E>) => Effect.Effect<void, E>;
@@ -106,7 +108,7 @@ export const openVScopeDevice = (
     const transport = yield* openSerialTransport(options);
     const client = yield* makeVScopeClient(transport, {
       requestTimeoutMillis: options.requestTimeoutMillis,
-      crcRetryAttempts: options.crcRetryAttempts,
+      retryAttempts: options.retryAttempts,
     });
     yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
     const info = yield* getInfo(transport.path, client);
@@ -147,8 +149,8 @@ export const openVScopeDevice = (
 const makeVScopeClient = (
   transport: SerialTransport,
   options: {
-    readonly requestTimeoutMillis?: number | undefined;
-    readonly crcRetryAttempts?: number | undefined;
+    readonly requestTimeoutMillis: number;
+    readonly retryAttempts?: number | undefined;
   },
 ): Effect.Effect<VScopeClient, never, Scope.Scope> =>
   Effect.gen(function* () {
@@ -157,8 +159,10 @@ const makeVScopeClient = (
     const closed = yield* Deferred.make<void, VScopeDeviceError>();
     const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
     const parser = new VScopeFrameParser();
-    const timeoutMillis = options.requestTimeoutMillis ?? 1000;
-    const crcRetryAttempts = options.crcRetryAttempts ?? 2;
+    // One blanket timeout governs every request: without sequence IDs a late
+    // reply poisons the next exchange, so all messages share the same deadline.
+    const timeoutMillis = options.requestTimeoutMillis;
+    const defaultRetryAttempts = options.retryAttempts ?? 2;
 
     const ensureOpen = (requestType: VScopeMessageType) =>
       Ref.get(closedState).pipe(
@@ -282,54 +286,57 @@ const makeVScopeClient = (
       requestType: VScopeMessageType,
       responseType: VScopeMessageType,
       payload = new Uint8Array(),
+      requestOptions = {},
     ) =>
       requestLock.withPermit(
         Effect.gen(function* () {
           yield* ensureOpen(requestType);
           const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
+          const retryAttempts = requestOptions.retryAttempts ?? defaultRetryAttempts;
 
-          const attempt = (
-            remainingRetries: number,
-          ): Effect.Effect<Uint8Array, VScopeDeviceError> =>
-            Effect.gen(function* () {
-              yield* transport
-                .write(encoded)
-                .pipe(
-                  Effect.mapError(
-                    (cause) => new VScopeTransportError({ path: transport.path, cause }),
-                  ),
-                );
-              yield* transport.drain.pipe(
+          // One write/drain/read exchange. A response timeout is fatal: without
+          // sequence IDs a late reply would poison the next request, so we tear
+          // the session down rather than recover.
+          const exchange = Effect.gen(function* () {
+            yield* transport
+              .write(encoded)
+              .pipe(
                 Effect.mapError(
                   (cause) => new VScopeTransportError({ path: transport.path, cause }),
                 ),
               );
+            yield* transport.drain.pipe(
+              Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
+            );
 
-              return yield* takeResponse(transport.path, events, requestType, responseType).pipe(
-                Effect.timeoutOrElse({
-                  duration: `${timeoutMillis} millis`,
-                  orElse: () => {
-                    const error = new VScopeResponseTimeoutError({
-                      path: transport.path,
-                      requestType,
-                      timeoutMillis,
-                    });
+            return yield* takeResponse(transport.path, events, requestType, responseType);
+          }).pipe(
+            Effect.timeoutOrElse({
+              duration: `${timeoutMillis} millis`,
+              orElse: () => {
+                const error = new VScopeResponseTimeoutError({
+                  path: transport.path,
+                  requestType,
+                  timeoutMillis,
+                });
 
-                    return failSession(error).pipe(
-                      Effect.andThen(transport.close.pipe(Effect.ignore)),
-                      Effect.andThen(Effect.fail(error)),
-                    );
-                  },
-                }),
-                Effect.catch((error) =>
-                  error instanceof VScopeFrameParseError && remainingRetries > 0
-                    ? attempt(remainingRetries - 1)
-                    : Effect.fail(error),
-                ),
-              );
-            });
+                return failSession(error).pipe(
+                  Effect.andThen(transport.close.pipe(Effect.ignore)),
+                  Effect.andThen(Effect.fail(error)),
+                );
+              },
+            }),
+          );
 
-          return yield* attempt(crcRetryAttempts);
+          // A CRC-corrupted response is a complete frame fully consumed by the
+          // parser, so the queue stays aligned and re-sending the same request is
+          // safe. Only those failures retry; everything else fails through.
+          return yield* exchange.pipe(
+            Effect.retry({
+              schedule: Schedule.recurs(retryAttempts),
+              while: (error) => error instanceof VScopeFrameParseError,
+            }),
+          );
         }),
       );
 
@@ -482,7 +489,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     metadata: Ref.get(metadataRef),
     getTiming: getTimingEffect,
     setTiming: (timing) => setTiming(path, client, info, littleEndian, timing),
-    getStatus: getStatusEffect,
+    getStatus: (options) => getStatus(path, client, options),
     getState: getStateEffect,
     setState,
     start: (options) =>
@@ -495,7 +502,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
       Effect.map((payload) => decodeStatus(path, VScopeMessageType.Trigger, payload)),
       catchDecode(path, VScopeMessageType.Trigger),
     ),
-    getFrame: getFrame(path, client, info, littleEndian),
+    getFrame: (options) => getFrame(path, client, info, littleEndian, options),
     getSnapshotHeader: getSnapshotHeaderEffect,
     snapshotBytes,
     collectSnapshotBytes,
@@ -607,8 +614,9 @@ const setTiming = (
 const getStatus = (
   path: string,
   client: VScopeClient,
+  options?: VScopeRequestOptions,
 ): Effect.Effect<VScopeControlStatus, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetStatus, VScopeMessageType.GetStatus).pipe(
+  client.request(VScopeMessageType.GetStatus, VScopeMessageType.GetStatus, undefined, options).pipe(
     Effect.map((payload) => decodeStatus(path, VScopeMessageType.GetStatus, payload)),
     catchDecode(path, VScopeMessageType.GetStatus),
   );
@@ -618,8 +626,9 @@ const getFrame = (
   client: VScopeClient,
   info: VScopeDeviceInfo,
   littleEndian: boolean,
+  options?: VScopeRequestOptions,
 ): Effect.Effect<Float32Array, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetFrame, VScopeMessageType.GetFrame).pipe(
+  client.request(VScopeMessageType.GetFrame, VScopeMessageType.GetFrame, undefined, options).pipe(
     Effect.map((payload) =>
       decodeFloatArray(path, VScopeMessageType.GetFrame, payload, info.channelCount, littleEndian),
     ),

@@ -42,10 +42,10 @@ export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
 });
 
 export class PollingSettings extends Schema.Class<PollingSettings>("PollingSettings")({
-  stateHz: Schema.Finite.check(Schema.isBetween({ minimum: 0.1, maximum: 60 })),
-  frameHz: Schema.Finite.check(Schema.isBetween({ minimum: 0.1, maximum: 240 })),
-  frameTimeoutMs: PositiveInt,
-  crcRetryAttempts: NonNegativeInt,
+  stateHz: Schema.Finite.check(Schema.isBetween({ minimum: 0.1, maximum: 50 })),
+  frameHz: Schema.Finite.check(Schema.isBetween({ minimum: 0.1, maximum: 100 })),
+  serialTimeoutMs: PositiveInt,
+  retryAttempts: NonNegativeInt,
 }) {}
 
 export class SnapshotSettings extends Schema.Class<SnapshotSettings>("SnapshotSettings")({
@@ -88,8 +88,8 @@ export const DEFAULT_SETTINGS = Settings.make({
   polling: PollingSettings.make({
     stateHz: 4,
     frameHz: 30,
-    frameTimeoutMs: 750,
-    crcRetryAttempts: 2,
+    serialTimeoutMs: 500,
+    retryAttempts: 2,
   }),
   snapshots: SnapshotSettings.make({
     autoSave: false,

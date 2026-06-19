@@ -118,6 +118,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-a",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
 
       expect(device.path).toBe("/dev/tty.vscope-a");
@@ -158,6 +159,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-trigger",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
       const trigger = yield* device.getTrigger;
       const updatedTrigger = yield* device.setTrigger({
@@ -186,6 +188,7 @@ describe("@vscope/serial device", () => {
             path: "/dev/tty.vscope-scoped-close",
             baudRate: 115200,
             driver,
+            requestTimeoutMillis: 1000,
           });
           closed = device.closed;
         }),
@@ -221,6 +224,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-snapshot",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
       const chunks = yield* device.snapshotBytes().pipe(Stream.runCollect);
       const bytes = yield* device.collectSnapshotBytes();
@@ -250,6 +254,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-rt",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
 
       const exit = yield* Effect.exit(device.getRtValue(0));
@@ -282,6 +287,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-validation",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
 
       const oversizedDivider = yield* Effect.exit(
@@ -327,7 +333,7 @@ describe("@vscope/serial device", () => {
           requestTimeoutMillis: 5,
         });
 
-        const timedOutFrame = yield* Effect.exit(device.getFrame);
+        const timedOutFrame = yield* Effect.exit(device.getFrame());
         yield* Effect.sleep("30 millis");
         const nextRequest = yield* Effect.exit(device.getState);
 
@@ -363,6 +369,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-wrong-response",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
 
       const result = yield* Effect.exit(device.getTiming);
@@ -390,13 +397,44 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-crc-retry",
         baudRate: 115200,
         driver,
-        crcRetryAttempts: 1,
+        requestTimeoutMillis: 1000,
+        retryAttempts: 1,
       });
 
       const timing = yield* device.getTiming;
 
       expect(timing).toEqual({ divider: 1, preTrig: 0 });
       expect(firmware.requestCount(VScopeMessageType.GetTiming)).toBe(2);
+    }),
+  );
+
+  it.live("does not retry a CRC-corrupted response when retryAttempts is 0", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-poll-no-retry",
+        deviceName: "scope-poll-no-retry",
+        corruptFirstResponsesFor: [VScopeMessageType.GetFrame],
+      });
+      const driver = fakeDriver([firmware]);
+
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-poll-no-retry",
+        baudRate: 115200,
+        driver,
+        requestTimeoutMillis: 1000,
+        retryAttempts: 3,
+      });
+
+      const result = yield* Effect.exit(device.getFrame({ retryAttempts: 0 }));
+
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure") {
+        const errors = result.cause.reasons
+          .filter((reason) => reason._tag === "Fail")
+          .map((reason) => reason.error);
+        expect(errors[0]).toBeInstanceOf(VScopeFrameParseError);
+      }
+      expect(firmware.requestCount(VScopeMessageType.GetFrame)).toBe(1);
     }),
   );
 
@@ -413,6 +451,7 @@ describe("@vscope/serial device", () => {
         path: "/dev/tty.vscope-read-error",
         baudRate: 115200,
         driver,
+        requestTimeoutMillis: 1000,
       });
 
       const closedExit = yield* Effect.exit(device.closed);
@@ -441,11 +480,23 @@ describe("@vscope/serial manager", () => {
 
     return Effect.gen(function* () {
       const manager = yield* VScopeSerial;
-      const first = yield* manager.openDevice({ path: "/dev/tty.vscope-a", baudRate: 115200 });
-      const second = yield* manager.openDevice({ path: "/dev/tty.vscope-b", baudRate: 115200 });
+      const first = yield* manager.openDevice({
+        path: "/dev/tty.vscope-a",
+        baudRate: 115200,
+        requestTimeoutMillis: 1000,
+      });
+      const second = yield* manager.openDevice({
+        path: "/dev/tty.vscope-b",
+        baudRate: 115200,
+        requestTimeoutMillis: 1000,
+      });
       const byName = yield* manager.getDevice("same-name");
       const duplicateExit = yield* Effect.exit(
-        manager.openDevice({ path: "/dev/tty.vscope-a", baudRate: 115200 }),
+        manager.openDevice({
+          path: "/dev/tty.vscope-a",
+          baudRate: 115200,
+          requestTimeoutMillis: 1000,
+        }),
       );
 
       expect(first.path).toBe("/dev/tty.vscope-a");
@@ -471,12 +522,14 @@ describe("@vscope/serial manager", () => {
       const first = yield* manager.openDevice({
         path: "/dev/tty.vscope-managed",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
       yield* first.close;
       const afterClose = yield* manager.listDevices;
       const reopened = yield* manager.openDevice({
         path: "/dev/tty.vscope-managed",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
 
       expect(afterClose).toEqual([]);
@@ -500,6 +553,7 @@ describe("@vscope/serial manager", () => {
         const device = yield* manager.openDevice({
           path: "/dev/tty.vscope-close-fail",
           baudRate: 115200,
+          requestTimeoutMillis: 1000,
         });
         const closeExit = yield* Effect.exit(device.close);
         const afterFailedClose = yield* manager.listDevices;
@@ -534,11 +588,13 @@ describe("@vscope/serial manager", () => {
       const first = yield* manager.openDevice({
         path: "/dev/tty.vscope-stale",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
       yield* first.close;
       const second = yield* manager.openDevice({
         path: "/dev/tty.vscope-stale",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
       yield* first.close;
       const devices = yield* manager.listDevices;
@@ -565,7 +621,11 @@ describe("@vscope/serial manager", () => {
         Stream.runCollect,
         Effect.forkScoped,
       );
-      const device = yield* manager.openDevice({ path: "/dev/tty.vscope-lost", baudRate: 115200 });
+      const device = yield* manager.openDevice({
+        path: "/dev/tty.vscope-lost",
+        baudRate: 115200,
+        requestTimeoutMillis: 1000,
+      });
       const closedExit = yield* Effect.exit(device.closed);
       const events = yield* Fiber.join(eventsFiber);
       const devices = yield* manager.listDevices;
@@ -609,6 +669,7 @@ describe("@vscope/serial manager", () => {
       const device = yield* manager.openDevice({
         path: "/dev/tty.vscope-close-race",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
       const closeExit = yield* Effect.exit(device.close);
       const events = yield* Fiber.join(eventsFiber);
@@ -616,6 +677,7 @@ describe("@vscope/serial manager", () => {
       const reopened = yield* manager.openDevice({
         path: "/dev/tty.vscope-close-race",
         baudRate: 115200,
+        requestTimeoutMillis: 1000,
       });
 
       expect(closeExit._tag).toBe("Failure");

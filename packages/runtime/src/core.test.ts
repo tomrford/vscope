@@ -23,6 +23,7 @@ import {
   VScopeDeviceAlreadyOpenError,
   VScopeDeviceNotFoundError,
   VScopeEndianness,
+  VScopeFrameParseError,
   VScopeInvalidArgumentError,
   VScopeSerial,
   VScopeState,
@@ -94,10 +95,10 @@ const fakeTrigger: VScopeTrigger = {
 const testSettings = Settings.make({
   ...DEFAULT_SETTINGS,
   polling: PollingSettings.make({
-    stateHz: 60,
+    stateHz: 50,
     frameHz: DEFAULT_SETTINGS.polling.frameHz,
-    frameTimeoutMs: DEFAULT_SETTINGS.polling.frameTimeoutMs,
-    crcRetryAttempts: DEFAULT_SETTINGS.polling.crcRetryAttempts,
+    serialTimeoutMs: DEFAULT_SETTINGS.polling.serialTimeoutMs,
+    retryAttempts: DEFAULT_SETTINGS.polling.retryAttempts,
   }),
 });
 
@@ -106,12 +107,12 @@ describe("@vscope/runtime core", () => {
     it.effect("hydrates persistent state and lists ports through the serial service", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
-        const snapshot = yield* core.getSnapshot;
+        const model = yield* core.readModel;
         const ports = yield* core.query({ type: "ports/list" });
 
-        expect(snapshot.settings).toEqual(testSettings);
-        expect(snapshot.preferences).toEqual(DEFAULT_PREFERENCES);
-        expect(snapshot.permissions.mode).toBe("empty");
+        expect(model.app.settings).toEqual(testSettings);
+        expect(model.app.preferences).toEqual(DEFAULT_PREFERENCES);
+        expect(model.permissions.mode).toBe("empty");
         expect(ports).toEqual({
           type: "ports/list",
           ports: [fakePort],
@@ -124,10 +125,11 @@ describe("@vscope/runtime core", () => {
     it.effect("keeps runtime/core to one active device", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
+        yield* core.dispatch({
           type: "devices/connect",
           path: fakePort.path,
         });
+        const connected = yield* core.readModel;
         const duplicate = yield* Effect.exit(
           core.dispatch({
             type: "devices/connect",
@@ -135,7 +137,7 @@ describe("@vscope/runtime core", () => {
           }),
         );
 
-        expect(connected.device?.path).toBe(fakePort.path);
+        expect(connected.activeDevice?.path).toBe(fakePort.path);
         expect(connected.permissions.mode).toBe("halted");
         expect(duplicate._tag).toBe("Failure");
       }),
@@ -196,56 +198,76 @@ describe("@vscope/runtime core", () => {
           type: "devices/connect",
           path: fakePort.path,
         });
-        const running = yield* core.dispatch({ type: "devices/run" });
-        const triggered = yield* core.dispatch({ type: "devices/trigger" });
+        yield* core.dispatch({ type: "devices/run" });
+        const running = yield* core.deviceStatus;
+        yield* core.dispatch({ type: "devices/trigger" });
+        const triggered = yield* core.deviceStatus;
         yield* advanceTestClock(80);
-        const captured = yield* core.getSnapshot;
+        const captured = yield* core.deviceStatus;
 
-        expect(running.device?.state).toBe(VScopeState.Running);
-        expect(running.device?.snapshotAvailability).toBe("not-ready");
-        expect(triggered.device?.requestedState).toBe(VScopeState.Acquiring);
-        expect(triggered.device?.intent?.status).toBe("pending");
-        expect(captured.device?.state).toBe(VScopeState.Halted);
-        expect(captured.device?.snapshotAvailability).toBe("ready");
-        expect(captured.device?.intent?.status).toBe("settled");
+        expect(running?.state).toBe(VScopeState.Running);
+        expect(running?.snapshotValid).toBe(false);
+        expect(triggered?.requestedState).toBe(VScopeState.Acquiring);
+        expect(triggered?.requestPending).toBe(true);
+        expect(captured?.state).toBe(VScopeState.Halted);
+        expect(captured?.snapshotValid).toBe(true);
+        expect(captured?.requestPending).toBe(false);
       }),
     );
   });
 
   layer(coreTestLayer())((it) => {
-    it.effect("refreshes live frames without polling RT values", () =>
+    it.effect("refreshes the live frame plane without polling RT values", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
+        yield* core.dispatch({
           type: "devices/connect",
           path: fakePort.path,
         });
+        const initialFrame = yield* core.lastFrame;
         yield* advanceTestClock(80);
-        const refreshed = yield* core.getSnapshot;
+        const refreshedFrame = yield* core.lastFrame;
+        const refreshedConfig = yield* core.deviceConfig;
 
-        expect(connected.device?.frame?.[0]).toBe(1);
-        expect(refreshed.device?.frame?.[0]).toBeGreaterThan(1);
-        expect(refreshed.device?.rtValues.get(0)).toBe(1);
+        expect(initialFrame?.[0]).toBe(1);
+        expect(refreshedFrame?.[0]).toBeGreaterThan(1);
+        expect(refreshedConfig?.rtValues.get(0)).toBe(1);
       }),
     );
   });
 
-  layer(coreTestLayer(fakeSerialLayer([fakePort], { device: { failFramesAfter: 1 } })))((it) => {
-    it.effect("keeps the device connected when frame polling fails", () =>
+  layer(coreTestLayer())((it) => {
+    it.effect("fails the frame subscription when no device is connected", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
-        const connected = yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        yield* advanceTestClock(80);
-        const refreshed = yield* core.getSnapshot;
+        const exit = yield* core.frames.pipe(Stream.runCollect, Effect.exit);
 
-        expect(connected.device?.frame?.[0]).toBe(1);
-        expect(refreshed.device?.connectionStatus).toBe("connected");
-        expect(refreshed.device?.frame?.[0]).toBe(1);
-        expect(refreshed.warnings).toEqual([]);
+        expect(exit._tag).toBe("Failure");
       }),
+    );
+  });
+
+  layer(coreTestLayer(fakeSerialLayer([fakePort], { device: { corruptFramesAfter: 1 } })))((it) => {
+    it.effect(
+      "keeps the device connected and holds the last frame when a frame poll is corrupt",
+      () =>
+        Effect.gen(function* () {
+          const core = yield* RuntimeCore;
+          yield* core.dispatch({
+            type: "devices/connect",
+            path: fakePort.path,
+          });
+          const initialFrame = yield* core.lastFrame;
+          yield* advanceTestClock(80);
+          const activeDevice = yield* core.activeDevice;
+          const app = yield* core.app;
+          const heldFrame = yield* core.lastFrame;
+
+          expect(initialFrame?.[0]).toBe(1);
+          expect(activeDevice?.connectionStatus).toBe("connected");
+          expect(heldFrame?.[0]).toBe(1);
+          expect(app.warnings).toEqual([]);
+        }),
     );
   });
 
@@ -260,7 +282,7 @@ describe("@vscope/runtime core", () => {
         yield* core.dispatch({ type: "devices/run" });
         yield* core.dispatch({ type: "devices/trigger" });
         yield* advanceTestClock(80);
-        const captured = yield* core.dispatch({
+        yield* core.dispatch({
           type: "snapshots/capture",
           label: "Boot trace",
         });
@@ -272,10 +294,10 @@ describe("@vscope/runtime core", () => {
           type: "snapshots/readSamples",
           id: listed.snapshots[0].id,
         });
+        const status = yield* core.deviceStatus;
 
-        expect(captured.snapshots.length).toBe(1);
-        expect(captured.device?.intent?.kind).toBe("captureSnapshot");
-        expect(captured.device?.intent?.status).toBe("settled");
+        expect(listed.snapshots.length).toBe(1);
+        expect(status?.snapshotValid).toBe(true);
         expect(listed.snapshots[0].label).toBe("Boot trace");
         expect(listed.snapshots[0].device).toMatchObject({
           name: fakeInfo.deviceName,
@@ -294,7 +316,7 @@ describe("@vscope/runtime core", () => {
   layer(
     coreTestLayer(fakeSerialLayer([fakePort], { device: { collectSnapshotDelayMillis: 150 } })),
   )((it) => {
-    it.effect("keeps snapshot capture intent pending until download completes", () =>
+    it.effect("captures ready snapshots even when the sample download is slow", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
         yield* core.dispatch({
@@ -311,15 +333,13 @@ describe("@vscope/runtime core", () => {
           })
           .pipe(Effect.forkScoped);
         yield* advanceTestClock(50);
-        const during = yield* core.getSnapshot;
         yield* advanceTestClock(150);
-        const captured = yield* Fiber.join(capture);
+        yield* Fiber.join(capture);
+        const snapshots = yield* core.snapshots;
+        const status = yield* core.deviceStatus;
 
-        expect(during.device?.intent?.kind).toBe("captureSnapshot");
-        expect(during.device?.intent?.status).toBe("pending");
-        expect(during.permissions.captureSnapshot).toBe(false);
-        expect(captured.device?.intent?.kind).toBe("captureSnapshot");
-        expect(captured.device?.intent?.status).toBe("settled");
+        expect(snapshots.length).toBe(1);
+        expect(status?.snapshotValid).toBe(true);
       }),
     );
   });
@@ -328,12 +348,13 @@ describe("@vscope/runtime core", () => {
     it.effect("persists settings patches through the core dispatch boundary", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
-        const snapshot = yield* core.dispatch({
+        yield* core.dispatch({
           type: "settings/patch",
           patch: { theme: "dark" },
         });
+        const app = yield* core.app;
 
-        expect(snapshot.settings.theme).toBe("dark");
+        expect(app.settings.theme).toBe("dark");
       }),
     );
   });
@@ -534,7 +555,7 @@ interface FakeSerialLayerOptions {
 }
 
 interface FakeDeviceOptions {
-  readonly failFramesAfter?: number | undefined;
+  readonly corruptFramesAfter?: number | undefined;
   readonly collectSnapshotDelayMillis?: number | undefined;
 }
 
@@ -704,10 +725,11 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
     metadata: Effect.succeed(fakeMetadata),
     getTiming: failIfMisconfigured("getTiming").pipe(Effect.as(fakeTiming)),
     setTiming: (timing) => failIfMisconfigured("setTiming").pipe(Effect.as(timing)),
-    getStatus: Effect.sync(() => {
-      advanceStatus();
-      return status();
-    }),
+    getStatus: () =>
+      Effect.sync(() => {
+        advanceStatus();
+        return status();
+      }),
     getState: Effect.sync(() => state),
     setState: (nextState) =>
       Effect.sync(() => {
@@ -743,22 +765,22 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
       acquisitionPollsRemaining = 2;
       return status();
     }),
-    getFrame: failIfMisconfigured("getFrame").pipe(
-      Effect.andThen(
-        Effect.gen(function* () {
-          if (options.failFramesAfter !== undefined && frameReads >= options.failFramesAfter) {
-            return yield* new VScopeInvalidArgumentError({
-              path,
-              operation: "getFrame",
-              reason: "Frame read failed.",
-            });
-          }
+    getFrame: () =>
+      failIfMisconfigured("getFrame").pipe(
+        Effect.andThen(
+          Effect.gen(function* () {
+            if (
+              options.corruptFramesAfter !== undefined &&
+              frameReads >= options.corruptFramesAfter
+            ) {
+              return yield* new VScopeFrameParseError({ reason: "CRC mismatch" });
+            }
 
-          frameReads += 1;
-          return Float32Array.from([frameReads, 2, 3, 4]);
-        }),
+            frameReads += 1;
+            return Float32Array.from([frameReads, 2, 3, 4]);
+          }),
+        ),
       ),
-    ),
     getSnapshotHeader: Effect.succeed({
       channelMap: fakeMetadata.channelMap,
       divider: fakeTiming.divider,

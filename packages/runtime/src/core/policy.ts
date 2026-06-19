@@ -1,6 +1,6 @@
-import { VScopeState } from "@vscope/serial";
+import { VScopeState, type VScopeControlStatus } from "@vscope/serial";
 
-import type { CoreDevice, DeviceControlCommand } from "./model";
+import type { ActiveDeviceState, DeviceControlCommand } from "./model";
 
 export type ControlMode =
   | "empty"
@@ -29,14 +29,17 @@ export interface CommandPermissions {
 export type CommandDecision =
   | {
       readonly allowed: true;
-      readonly device: CoreDevice;
+      readonly device: ActiveDeviceState;
     }
   | {
       readonly allowed: false;
       readonly reason: string;
     };
 
-export function controlModeForDevice(device: CoreDevice | null): ControlMode {
+export function controlModeForDevice(
+  device: ActiveDeviceState | null,
+  status: VScopeControlStatus | null,
+): ControlMode {
   if (!device) {
     return "empty";
   }
@@ -49,26 +52,17 @@ export function controlModeForDevice(device: CoreDevice | null): ControlMode {
     return "lost";
   }
 
-  if (!device.status) {
+  if (!status) {
     return "syncing";
   }
 
-  switch (device.status.state) {
+  switch (status.state) {
     case VScopeState.Halted:
-      if (device.requestPending || device.intent?.status === "pending") {
-        return "syncing";
-      }
-      return "halted";
+      return status.requestPending ? "syncing" : "halted";
     case VScopeState.Running:
-      if (device.requestPending || device.intent?.status === "pending") {
-        return "syncing";
-      }
-      return "running";
+      return status.requestPending ? "syncing" : "running";
     case VScopeState.Acquiring:
-      if (device.requestPending || device.intent?.status === "pending") {
-        return "syncing";
-      }
-      return "acquiring";
+      return status.requestPending ? "syncing" : "acquiring";
     case VScopeState.Misconfigured:
       return "misconfigured";
   }
@@ -95,21 +89,23 @@ export function permissionsForMode(mode: ControlMode): CommandPermissions {
   };
 }
 
-export function permissionsForDevice(device: CoreDevice | null): CommandPermissions {
-  const permissions = permissionsForMode(controlModeForDevice(device));
+export function permissionsForDevice(
+  device: ActiveDeviceState | null,
+  status: VScopeControlStatus | null,
+): CommandPermissions {
+  const permissions = permissionsForMode(controlModeForDevice(device, status));
   return {
     ...permissions,
     captureSnapshot:
       device?.connectionStatus === "connected" &&
-      device.snapshotAvailability === "ready" &&
-      !device.requestPending &&
-      device.intent?.status !== "pending",
+      status?.snapshotValid === true &&
+      !status.requestPending,
   };
 }
 
 export function decideDeviceControl(
   command: DeviceControlCommand,
-  device: CoreDevice | null,
+  device: ActiveDeviceState | null,
   permissions: CommandPermissions,
 ): CommandDecision {
   if (!device || device.connectionStatus !== "connected") {

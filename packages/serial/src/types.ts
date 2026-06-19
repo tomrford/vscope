@@ -67,8 +67,12 @@ export interface StateWaitOptions {
 }
 
 export interface OpenVScopeDeviceOptions extends OpenSerialTransportOptions {
-  readonly requestTimeoutMillis?: number | undefined;
-  readonly crcRetryAttempts?: number | undefined;
+  readonly requestTimeoutMillis: number;
+  readonly retryAttempts?: number | undefined;
+}
+
+export interface VScopeRequestOptions {
+  readonly retryAttempts?: number | undefined;
 }
 
 export interface VScopeDevice {
@@ -78,7 +82,9 @@ export interface VScopeDevice {
   readonly metadata: Effect.Effect<VScopeStaticMetadata>;
   readonly getTiming: Effect.Effect<VScopeTiming, VScopeDeviceError>;
   readonly setTiming: (timing: VScopeTiming) => Effect.Effect<VScopeTiming, VScopeDeviceError>;
-  readonly getStatus: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
+  readonly getStatus: (
+    options?: VScopeRequestOptions,
+  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getState: Effect.Effect<VScopeStateValue, VScopeDeviceError>;
   readonly setState: (
     state: VScopeStateValue,
@@ -90,7 +96,9 @@ export interface VScopeDevice {
     options?: StateWaitOptions,
   ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly trigger: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
-  readonly getFrame: Effect.Effect<Float32Array, VScopeDeviceError>;
+  readonly getFrame: (
+    options?: VScopeRequestOptions,
+  ) => Effect.Effect<Float32Array, VScopeDeviceError>;
   readonly getSnapshotHeader: Effect.Effect<VScopeSnapshotHeader, VScopeDeviceError>;
   readonly snapshotBytes: (
     options?: SnapshotBytesOptions,

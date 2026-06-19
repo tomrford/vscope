@@ -14,8 +14,6 @@ import type {
   SerialPortInfo,
   VScopeControlStatus,
   VScopeDeviceInfo,
-  VScopeState,
-  VScopeStaticMetadata,
   VScopeTiming,
   VScopeTrigger,
 } from "@vscope/serial";
@@ -25,28 +23,6 @@ import type { CommandPermissions } from "./policy";
 export type RuntimeStatus = "ready" | "degraded";
 
 export type CoreDeviceConnectionStatus = "connected" | "disconnected" | "lost";
-
-export type SnapshotAvailability = "unknown" | "not-ready" | "ready";
-
-export type DeviceIntentKind =
-  | "run"
-  | "stop"
-  | "trigger"
-  | "setTiming"
-  | "setTrigger"
-  | "setRtValue"
-  | "setChannelMap"
-  | "captureSnapshot";
-
-export type DeviceIntentStatus = "pending" | "settled" | "failed";
-
-export interface DeviceIntent {
-  readonly kind: DeviceIntentKind;
-  readonly status: DeviceIntentStatus;
-  readonly sentAt: string;
-  readonly settledAt: string | null;
-  readonly error: string | null;
-}
 
 export interface RuntimeWarning {
   readonly id: string;
@@ -60,29 +36,7 @@ export interface RuntimeLogEntry {
   readonly createdAt: string;
 }
 
-export interface CoreDevice {
-  readonly path: string;
-  readonly deviceName: string;
-  readonly connectionStatus: CoreDeviceConnectionStatus;
-  readonly info: VScopeDeviceInfo | null;
-  readonly metadata: VScopeStaticMetadata | null;
-  readonly status: VScopeControlStatus | null;
-  readonly state: VScopeState | null;
-  readonly requestedState: VScopeState | null;
-  readonly requestPending: boolean;
-  readonly snapshotAvailability: SnapshotAvailability;
-  readonly intent: DeviceIntent | null;
-  readonly timing: VScopeTiming | null;
-  readonly trigger: VScopeTrigger | null;
-  readonly channelMap: ReadonlyArray<number> | null;
-  readonly frame: ReadonlyArray<number> | null;
-  readonly rtValues: ReadonlyMap<number, number>;
-  readonly lastFrameAt: string | null;
-  readonly lastSeenAt: string;
-  readonly error: string | null;
-}
-
-export interface CoreState {
+export interface RuntimeAppState {
   readonly bootedAt: string;
   readonly updatedAt: string;
   readonly status: RuntimeStatus;
@@ -91,11 +45,34 @@ export interface CoreState {
   readonly preferences: Preferences;
   readonly preferencesRecovery: RecoveryState;
   readonly savedDevices: ReadonlyArray<SavedDevice>;
-  readonly snapshots: ReadonlyArray<SnapshotRecord>;
-  readonly device: CoreDevice | null;
-  readonly permissions: CommandPermissions;
   readonly warnings: ReadonlyArray<RuntimeWarning>;
   readonly logs: ReadonlyArray<RuntimeLogEntry>;
+}
+
+export interface ActiveDeviceState {
+  readonly path: string;
+  readonly deviceName: string;
+  readonly connectionStatus: CoreDeviceConnectionStatus;
+  readonly info: VScopeDeviceInfo | null;
+  readonly variables: ReadonlyArray<string>;
+  readonly rtLabels: ReadonlyArray<string>;
+  readonly error: string | null;
+}
+
+export interface DeviceConfigState {
+  readonly timing: VScopeTiming | null;
+  readonly trigger: VScopeTrigger | null;
+  readonly channelMap: ReadonlyArray<number>;
+  readonly rtValues: ReadonlyMap<number, number>;
+}
+
+export interface RuntimeReadModel {
+  readonly app: RuntimeAppState;
+  readonly snapshots: ReadonlyArray<SnapshotRecord>;
+  readonly activeDevice: ActiveDeviceState | null;
+  readonly deviceStatus: VScopeControlStatus | null;
+  readonly deviceConfig: DeviceConfigState | null;
+  readonly permissions: CommandPermissions;
 }
 
 export interface SnapshotCaptureCommand {

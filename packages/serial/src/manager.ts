@@ -19,6 +19,15 @@ export interface VScopeDeviceSummary {
   readonly metadata: VScopeStaticMetadata;
 }
 
+export const summarizeDevice = (device: VScopeDevice): Effect.Effect<VScopeDeviceSummary> =>
+  device.metadata.pipe(
+    Effect.map((metadata) => ({
+      path: device.path,
+      deviceName: device.deviceName,
+      metadata,
+    })),
+  );
+
 export type VScopeSerialEvent =
   | {
       readonly _tag: "DeviceOpened";
@@ -93,15 +102,6 @@ export function makeVScopeSerial(
     const lock = yield* Semaphore.make(1);
     const events = yield* PubSub.bounded<VScopeSerialEvent>({ capacity: 256, replay: 32 });
 
-    const summarize = (device: VScopeDevice): Effect.Effect<VScopeDeviceSummary> =>
-      device.metadata.pipe(
-        Effect.map((metadata) => ({
-          path: device.path,
-          deviceName: device.deviceName,
-          metadata,
-        })),
-      );
-
     const findEntryWithPath = (entries: ReadonlyMap<string, DeviceEntry>, identifier: string) => {
       const byPath = entries.get(identifier);
       if (byPath) {
@@ -129,7 +129,7 @@ export function makeVScopeSerial(
 
     const closeEntry = (path: string, entry: DeviceEntry) =>
       Effect.gen(function* () {
-        const summary = yield* summarize(entry.device);
+        const summary = yield* summarizeDevice(entry.device);
         yield* entry.close;
         yield* Scope.close(entry.scope, Exit.void);
         yield* deleteEntry(path);
@@ -159,7 +159,7 @@ export function makeVScopeSerial(
             return;
           }
 
-          const summary = yield* summarize(entry.device);
+          const summary = yield* summarizeDevice(entry.device);
           yield* Scope.close(entry.scope, Exit.fail(cause)).pipe(Effect.ignore);
           yield* deleteEntry(path);
           const event: VScopeSerialEvent = { _tag: "DeviceLost", device: summary, cause };
@@ -220,7 +220,7 @@ export function makeVScopeSerial(
               Scope.provide(deviceScope),
             );
 
-            const summary = yield* summarize(device);
+            const summary = yield* summarizeDevice(device);
             const event: VScopeSerialEvent = { _tag: "DeviceOpened", device: summary };
             yield* PubSub.publish(events, event);
             return device;
@@ -267,7 +267,7 @@ export function makeVScopeSerial(
       ),
       listDevices: Ref.get(entriesRef).pipe(
         Effect.flatMap((entries) =>
-          Effect.forEach(entries.values(), (entry) => summarize(entry.device)),
+          Effect.forEach(entries.values(), (entry) => summarizeDevice(entry.device)),
         ),
       ),
       events: Stream.fromPubSub(events),

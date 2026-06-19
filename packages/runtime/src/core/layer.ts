@@ -1,8 +1,10 @@
 import {
+  Deferred,
   Effect,
   Fiber,
   Layer,
   Option,
+  PubSub,
   Ref,
   Schedule,
   Scope,
@@ -11,15 +13,16 @@ import {
   SubscriptionRef,
 } from "effect";
 import {
+  RuntimeDeviceLost,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotDraft,
-  SnapshotRecord,
   SnapshotSamplesWrite,
   SnapshotTrigger,
+  type SnapshotRecord,
 } from "@vscope/shared";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
-import { VScopeSerial, VScopeState } from "@vscope/serial";
+import { summarizeDevice, VScopeFrameParseError, VScopeSerial, VScopeState } from "@vscope/serial";
 import type {
   VScopeControlStatus,
   VScopeDevice,
@@ -27,6 +30,7 @@ import type {
   VScopeDeviceSummary,
   VScopeSerialEvent,
   VScopeSnapshotHeader,
+  VScopeStaticMetadata,
   VScopeTiming,
   VScopeTrigger,
 } from "@vscope/serial";
@@ -38,32 +42,37 @@ import {
   RuntimeCoreSerialError,
 } from "./errors";
 import type {
+  ActiveDeviceState,
   CoreCommand,
-  CoreDevice,
   CoreQuery,
   CoreQueryResult,
-  CoreState,
+  DeviceConfigState,
   DeviceControlCommand,
-  DeviceIntent,
-  DeviceIntentKind,
+  RuntimeAppState,
   SnapshotCaptureCommand,
-  SnapshotAvailability,
 } from "./model";
 import { decideDeviceControl, permissionsForDevice } from "./policy";
 import { RuntimeCore } from "./service";
 
 const MAX_LOG_ENTRIES = 100;
 const MAX_WARNINGS = 32;
-const SETTLE_POLL_INTERVAL_MILLIS = 10;
-const SETTLE_TIMEOUT_MILLIS = 2000;
 
 interface DeviceRuntimeState {
   readonly status: VScopeControlStatus;
-  readonly timing?: VScopeTiming | undefined;
-  readonly trigger?: VScopeTrigger | undefined;
-  readonly channelMap?: ReadonlyArray<number> | undefined;
-  readonly frame?: ReadonlyArray<number> | undefined;
-  readonly rtValues?: ReadonlyMap<number, number> | undefined;
+  readonly config: DeviceConfigState | null;
+  readonly frame: ReadonlyArray<number> | null;
+}
+
+interface InitialStores {
+  readonly app: RuntimeAppState;
+  readonly snapshots: ReadonlyArray<SnapshotRecord>;
+}
+
+interface DeviceSession {
+  readonly path: string;
+  readonly frames: PubSub.PubSub<ReadonlyArray<number> | null>;
+  readonly lastFrame: Ref.Ref<ReadonlyArray<number> | null>;
+  readonly ended: Deferred.Deferred<void, RuntimeDeviceLost>;
 }
 
 type DeviceMonitorFiber = Fiber.Fiber<void, never>;
@@ -71,14 +80,85 @@ type DeviceMonitorFiber = Fiber.Fiber<void, never>;
 const makeRuntimeCore = Effect.gen(function* () {
   const persistence = yield* Persistence;
   const serial = yield* VScopeSerial;
-  const initial = yield* hydrateInitialSnapshot(persistence);
-  const state = yield* SubscriptionRef.make(initial);
+  const initial = yield* hydrateInitialStores(persistence);
+  const appRef = yield* SubscriptionRef.make(initial.app);
+  const snapshotsRef = yield* SubscriptionRef.make(initial.snapshots);
+  const activeDeviceRef = yield* SubscriptionRef.make<ActiveDeviceState | null>(null);
+  const deviceStatusRef = yield* SubscriptionRef.make<VScopeControlStatus | null>(null);
+  const deviceConfigRef = yield* SubscriptionRef.make<DeviceConfigState | null>(null);
   const parentScope = yield* Scope.Scope;
   const monitorFiber = yield* Ref.make<DeviceMonitorFiber | null>(null);
+  const sessionRef = yield* Ref.make<DeviceSession | null>(null);
   const dispatchLock = yield* Semaphore.make(1);
 
-  const applyState = (update: (snapshot: CoreState) => CoreState) =>
-    SubscriptionRef.updateAndGet(state, (snapshot) => finalizeState(update(snapshot)));
+  const updateApp = (update: (app: RuntimeAppState) => RuntimeAppState) =>
+    SubscriptionRef.updateAndGet(appRef, (app) => finalizeApp(update(app)));
+
+  const logApp = (message: string) =>
+    updateApp((app) => {
+      const now = timestamp();
+      return { ...app, logs: appendLog(app.logs, message, now) };
+    });
+
+  const warnApp = (message: string) =>
+    updateApp((app) => {
+      const now = timestamp();
+      return {
+        ...app,
+        warnings: appendWarning(app.warnings, message, now),
+        logs: appendLog(app.logs, message, now),
+      };
+    });
+
+  const updateActiveDevice = (
+    path: string,
+    update: (device: ActiveDeviceState) => ActiveDeviceState,
+  ) =>
+    SubscriptionRef.updateSome(activeDeviceRef, (device) => {
+      if (!device || device.path !== path) {
+        return Option.none();
+      }
+      const next = update(device);
+      return next === device ? Option.none() : Option.some(next);
+    });
+
+  const clearActiveDeviceError = (path: string) =>
+    updateActiveDevice(path, (device) =>
+      device.error === null ? device : { ...device, error: null },
+    );
+
+  const applyDeviceError = (path: string, error: RuntimeCoreError) =>
+    updateActiveDevice(path, (device) => ({ ...device, error: describeCause(error) }));
+
+  const openSession = (path: string, initialFrame: ReadonlyArray<number> | null) =>
+    Effect.gen(function* () {
+      const frames = yield* PubSub.sliding<ReadonlyArray<number> | null>(32);
+      const lastFrame = yield* Ref.make(initialFrame);
+      const ended = yield* Deferred.make<void, RuntimeDeviceLost>();
+      const session: DeviceSession = { path, frames, lastFrame, ended };
+      yield* Ref.set(sessionRef, session);
+      return session;
+    });
+
+  const finishSession = (session: DeviceSession, reason: RuntimeDeviceLost | null) =>
+    Ref.set(sessionRef, null).pipe(
+      Effect.andThen(
+        reason ? Deferred.fail(session.ended, reason) : Deferred.succeed(session.ended, undefined),
+      ),
+      Effect.asVoid,
+    );
+
+  const closeSession = (path: string, reason: RuntimeDeviceLost | null) =>
+    Ref.get(sessionRef).pipe(
+      Effect.flatMap((session) =>
+        session && session.path === path ? finishSession(session, reason) : Effect.void,
+      ),
+    );
+
+  const closeCurrentSession = (reason: RuntimeDeviceLost | null) =>
+    Ref.get(sessionRef).pipe(
+      Effect.flatMap((session) => (session ? finishSession(session, reason) : Effect.void)),
+    );
 
   const interruptMonitor = Effect.gen(function* () {
     const fiber = yield* Ref.getAndSet(monitorFiber, null);
@@ -87,234 +167,161 @@ const makeRuntimeCore = Effect.gen(function* () {
     }
   });
 
-  const applyConnectedDevice = (summary: VScopeDeviceSummary, runtimeState: DeviceRuntimeState) =>
-    applyState((snapshot) => {
-      const now = timestamp();
-      const existing = snapshot.device;
-      const device = buildConnectedDevice({
-        summary,
-        runtimeState,
-        existing,
-        now,
-      });
+  const frames: Stream.Stream<ReadonlyArray<number> | null, RuntimeDeviceLost> = Stream.unwrap(
+    Ref.get(sessionRef).pipe(
+      Effect.map((session) =>
+        session
+          ? Stream.fromPubSub(session.frames).pipe(Stream.haltWhen(Deferred.await(session.ended)))
+          : Stream.fail(new RuntimeDeviceLost({ reason: "No device is connected." })),
+      ),
+    ),
+  );
 
-      return {
-        ...snapshot,
-        device,
-        logs:
-          existing?.connectionStatus === "connected"
-            ? snapshot.logs
-            : appendLog(snapshot.logs, `Connected ${summary.deviceName} at ${summary.path}`, now),
-      };
+  const lastFrame = Ref.get(sessionRef).pipe(
+    Effect.flatMap((session) => (session ? Ref.get(session.lastFrame) : Effect.succeed(null))),
+  );
+
+  const permissions = Effect.gen(function* () {
+    const device = yield* SubscriptionRef.get(activeDeviceRef);
+    const status = yield* SubscriptionRef.get(deviceStatusRef);
+    return permissionsForDevice(device, status);
+  });
+
+  const readModel = Effect.gen(function* () {
+    const app = yield* SubscriptionRef.get(appRef);
+    const snapshots = yield* SubscriptionRef.get(snapshotsRef);
+    const activeDevice = yield* SubscriptionRef.get(activeDeviceRef);
+    const deviceStatus = yield* SubscriptionRef.get(deviceStatusRef);
+    const deviceConfig = yield* SubscriptionRef.get(deviceConfigRef);
+    const currentPermissions = yield* permissions;
+    return {
+      app,
+      snapshots,
+      activeDevice,
+      deviceStatus,
+      deviceConfig,
+      permissions: currentPermissions,
+    };
+  });
+
+  const publishStatus = (path: string, status: VScopeControlStatus) =>
+    Effect.gen(function* () {
+      const activeDevice = yield* SubscriptionRef.get(activeDeviceRef);
+      if (!activeDevice || activeDevice.path !== path) {
+        return;
+      }
+
+      const current = yield* SubscriptionRef.get(deviceStatusRef);
+      if (!current || !statusEquals(current, status)) {
+        yield* SubscriptionRef.set(deviceStatusRef, status);
+      }
+      yield* clearActiveDeviceError(path);
     });
 
-  const applyDisconnectedDevice = (summary: VScopeDeviceSummary) =>
-    applyState((snapshot) => {
-      const now = timestamp();
-      if (!snapshot.device || snapshot.device.path !== summary.path) {
-        return snapshot;
+  const clearLiveDeviceStores = Effect.all(
+    [SubscriptionRef.set(deviceStatusRef, null), SubscriptionRef.set(deviceConfigRef, null)],
+    { discard: true },
+  );
+
+  const markDeviceLost = (device: VScopeDevice, error: RuntimeCoreError) => {
+    const reason = describeCause(error);
+    const message = `Lost ${device.deviceName} at ${device.path}: ${reason}`;
+    return Effect.all(
+      [
+        updateActiveDevice(device.path, (active) => ({
+          ...active,
+          connectionStatus: "lost",
+          error: reason,
+        })),
+        clearLiveDeviceStores,
+        warnApp(message),
+        closeSession(device.path, new RuntimeDeviceLost({ reason })),
+        serial.removeDevice(device.path).pipe(Effect.ignore),
+      ],
+      { discard: true },
+    );
+  };
+
+  const applyConnectedDevice = (summary: VScopeDeviceSummary, runtimeState: DeviceRuntimeState) =>
+    Effect.gen(function* () {
+      const existing = yield* SubscriptionRef.get(activeDeviceRef);
+      yield* SubscriptionRef.set(activeDeviceRef, activeDeviceFromSummary(summary));
+      yield* SubscriptionRef.set(deviceStatusRef, runtimeState.status);
+      yield* SubscriptionRef.set(deviceConfigRef, runtimeState.config);
+
+      if (existing?.connectionStatus !== "connected") {
+        yield* logApp(`Connected ${summary.deviceName} at ${summary.path}`);
+      }
+    });
+
+  const applyDisconnectedDevice = (summary: {
+    readonly path: string;
+    readonly deviceName: string;
+  }) =>
+    Effect.gen(function* () {
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      if (!active || active.path !== summary.path || active.connectionStatus !== "connected") {
+        return;
       }
 
-      if (snapshot.device.connectionStatus === "lost") {
-        return snapshot;
-      }
-
-      return {
-        ...snapshot,
-        device: {
-          ...snapshot.device,
-          connectionStatus: "disconnected",
-          requestPending: false,
-          intent: null,
-          lastSeenAt: now,
-          error: null,
-        },
-        logs: appendLog(
-          snapshot.logs,
-          `Disconnected ${summary.deviceName} at ${summary.path}`,
-          now,
-        ),
-      };
+      yield* SubscriptionRef.set(activeDeviceRef, {
+        ...active,
+        connectionStatus: "disconnected",
+        error: null,
+      });
+      yield* clearLiveDeviceStores;
+      yield* logApp(`Disconnected ${summary.deviceName} at ${summary.path}`);
     });
 
   const applyLostDevice = (event: Extract<VScopeSerialEvent, { readonly _tag: "DeviceLost" }>) =>
-    applyState((snapshot) => {
-      const now = timestamp();
-      const message = `Lost ${event.device.deviceName} at ${event.device.path}: ${describeCause(
-        event.cause,
-      )}`;
-      if (!snapshot.device || snapshot.device.path !== event.device.path) {
-        return snapshot;
+    Effect.gen(function* () {
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      if (!active || active.path !== event.device.path) {
+        return;
       }
 
-      return {
-        ...snapshot,
-        device: {
-          ...snapshot.device,
-          connectionStatus: "lost",
-          requestPending: false,
-          intent: settleIntent(snapshot.device.intent, "failed", now, describeCause(event.cause)),
-          lastSeenAt: now,
-          error: describeCause(event.cause),
-        },
-        warnings: appendWarning(snapshot.warnings, message, now),
-        logs: appendLog(snapshot.logs, message, now),
-      };
+      const reason = describeCause(event.cause);
+      yield* SubscriptionRef.set(activeDeviceRef, {
+        ...active,
+        connectionStatus: "lost",
+        error: reason,
+      });
+      yield* clearLiveDeviceStores;
+      yield* warnApp(`Lost ${event.device.deviceName} at ${event.device.path}: ${reason}`);
     });
 
-  const applyStatus = (
+  const applyConfigPatch = (
     path: string,
-    status: VScopeControlStatus,
-    intentStatus?: "settled" | undefined,
-  ) =>
-    applyState((snapshot) => {
-      if (!snapshot.device || snapshot.device.path !== path) {
-        return snapshot;
-      }
-
-      const now = timestamp();
-      const intent =
-        intentStatus === "settled" || shouldSettleIntentFromStatus(snapshot.device.intent, status)
-          ? settleIntent(snapshot.device.intent, "settled", now, null)
-          : snapshot.device.intent;
-
-      return {
-        ...snapshot,
-        device: applyStatusToDevice(snapshot.device, status, now, intent),
-      };
-    });
-
-  const applyFrame = (path: string, frame: Float32Array) =>
-    applyState((snapshot) => {
-      if (!snapshot.device || snapshot.device.path !== path) {
-        return snapshot;
-      }
-
-      const now = timestamp();
-      return {
-        ...snapshot,
-        device: {
-          ...snapshot.device,
-          frame: Array.from(frame),
-          lastFrameAt: now,
-          lastSeenAt: now,
-          error: null,
-        },
-      };
-    });
-
-  const applySnapshotCaptureSuccess = (
-    path: string,
-    snapshots: ReadonlyArray<SnapshotRecord>,
-    logMessage: string,
-  ) =>
-    applyState((snapshot) => {
-      const now = timestamp();
-      const device =
-        snapshot.device && snapshot.device.path === path
-          ? {
-              ...snapshot.device,
-              intent: settleIntent(snapshot.device.intent, "settled", now, null),
-              lastSeenAt: now,
-              error: null,
-            }
-          : snapshot.device;
-      return {
-        ...snapshot,
-        device,
-        snapshots,
-        logs: appendLog(snapshot.logs, logMessage, now),
-      };
-    });
-
-  const applyIntent = (kind: DeviceIntentKind) =>
-    applyState((snapshot) => {
-      if (!snapshot.device) {
-        return snapshot;
-      }
-
-      const now = timestamp();
-      return {
-        ...snapshot,
-        device: {
-          ...snapshot.device,
-          intent: {
-            kind,
-            status: "pending",
-            sentAt: now,
-            settledAt: null,
-            error: null,
-          },
-          lastSeenAt: now,
-        },
-      };
-    });
-
-  const applyIntentFailure = (kind: DeviceIntentKind, error: RuntimeCoreError) =>
-    applyState((snapshot) => {
-      if (!snapshot.device) {
-        return snapshot;
-      }
-
-      const now = timestamp();
-      return {
-        ...snapshot,
-        device: {
-          ...snapshot.device,
-          intent: {
-            kind,
-            status: "failed",
-            sentAt: snapshot.device.intent?.sentAt ?? now,
-            settledAt: now,
-            error: describeCause(error),
-          },
-          lastSeenAt: now,
-          error: describeCause(error),
-        },
-      };
-    });
-
-  const applyDevicePatch = (
-    path: string,
+    command: DeviceControlCommand["type"],
     patch: {
-      readonly status: VScopeControlStatus;
       readonly timing?: VScopeTiming | undefined;
       readonly trigger?: VScopeTrigger | undefined;
       readonly channelMap?: ReadonlyArray<number> | undefined;
       readonly rtValue?: readonly [number, number] | undefined;
-      readonly intentSettled?: boolean | undefined;
     },
   ) =>
-    applyState((snapshot) => {
-      if (!snapshot.device || snapshot.device.path !== path) {
-        return snapshot;
+    Effect.gen(function* () {
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      const config = yield* SubscriptionRef.get(deviceConfigRef);
+      if (!active || active.path !== path || !config) {
+        return yield* new RuntimeCorePolicyError({
+          command,
+          reason: "No editable device configuration is available.",
+        });
       }
 
-      const now = timestamp();
-      const currentRtValues = new Map(snapshot.device.rtValues);
+      const rtValues = new Map(config.rtValues);
       if (patch.rtValue) {
-        currentRtValues.set(patch.rtValue[0], patch.rtValue[1]);
+        rtValues.set(patch.rtValue[0], patch.rtValue[1]);
       }
 
-      const intent = patch.intentSettled
-        ? settleIntent(snapshot.device.intent, "settled", now, null)
-        : snapshot.device.intent;
-
-      return {
-        ...snapshot,
-        device: applyStatusToDevice(
-          {
-            ...snapshot.device,
-            timing: patch.timing ?? snapshot.device.timing,
-            trigger: patch.trigger ?? snapshot.device.trigger,
-            channelMap: patch.channelMap ?? snapshot.device.channelMap,
-            rtValues: currentRtValues,
-          },
-          patch.status,
-          now,
-          intent,
-        ),
-      };
+      yield* SubscriptionRef.set(deviceConfigRef, {
+        timing: patch.timing ?? config.timing,
+        trigger: patch.trigger ?? config.trigger,
+        channelMap: patch.channelMap ?? config.channelMap,
+        rtValues,
+      });
+      yield* clearActiveDeviceError(path);
     });
 
   const handleSerialEvent = (event: VScopeSerialEvent) => {
@@ -322,9 +329,20 @@ const makeRuntimeCore = Effect.gen(function* () {
       case "DeviceOpened":
         return Effect.void;
       case "DeviceRemoved":
-        return interruptMonitor.pipe(Effect.andThen(applyDisconnectedDevice(event.device)));
+        return interruptMonitor.pipe(
+          Effect.andThen(closeSession(event.device.path, null)),
+          Effect.andThen(applyDisconnectedDevice(event.device)),
+        );
       case "DeviceLost":
-        return interruptMonitor.pipe(Effect.andThen(applyLostDevice(event)));
+        return interruptMonitor.pipe(
+          Effect.andThen(
+            closeSession(
+              event.device.path,
+              new RuntimeDeviceLost({ reason: describeCause(event.cause) }),
+            ),
+          ),
+          Effect.andThen(applyLostDevice(event)),
+        );
     }
   };
 
@@ -332,8 +350,9 @@ const makeRuntimeCore = Effect.gen(function* () {
 
   const connectDevice = (command: Extract<CoreCommand, { readonly type: "devices/connect" }>) =>
     Effect.gen(function* () {
-      const snapshot = yield* SubscriptionRef.get(state);
-      if (snapshot.device?.connectionStatus === "connected") {
+      const app = yield* SubscriptionRef.get(appRef);
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      if (active?.connectionStatus === "connected") {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason: "Disconnect the current device before connecting another one.",
@@ -341,9 +360,10 @@ const makeRuntimeCore = Effect.gen(function* () {
       }
 
       yield* interruptMonitor;
-      const config = command.serialConfig ?? snapshot.settings.defaultSerialConfig;
+      yield* closeCurrentSession(null);
+      const config = command.serialConfig ?? app.settings.defaultSerialConfig;
       const device = yield* serial
-        .openDevice(openOptions(command.path, config, snapshot.settings.polling.crcRetryAttempts))
+        .openDevice(openOptions(command.path, config, app.settings.polling))
         .pipe(
           Effect.mapError(
             (cause) => new RuntimeCoreSerialError({ operation: "devices/connect", cause }),
@@ -351,7 +371,7 @@ const makeRuntimeCore = Effect.gen(function* () {
         );
       const { summary, runtimeState } = yield* Effect.gen(function* () {
         const summary = yield* summarizeDevice(device);
-        const runtimeState = yield* readDeviceRuntimeState(device);
+        const runtimeState = yield* readDeviceRuntimeState(device, summary.metadata);
         return { summary, runtimeState };
       }).pipe(
         Effect.mapError(
@@ -359,19 +379,19 @@ const makeRuntimeCore = Effect.gen(function* () {
         ),
         Effect.tapError(() => serial.removeDevice(device.path).pipe(Effect.ignore)),
       );
-      const next = yield* applyConnectedDevice(summary, runtimeState);
-      const fiber = yield* monitorDevice(device, next.settings.polling).pipe(
+
+      yield* applyConnectedDevice(summary, runtimeState);
+      const session = yield* openSession(device.path, runtimeState.frame);
+      const fiber = yield* monitorDevice(device, session, app.settings.polling).pipe(
         Effect.forkIn(parentScope),
       );
       yield* Ref.set(monitorFiber, fiber);
-      return next;
     });
 
   const disconnectDevice = () =>
     Effect.gen(function* () {
-      const snapshot = yield* SubscriptionRef.get(state);
-      const device = snapshot.device;
-      if (!device || device.connectionStatus !== "connected") {
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      if (!active || active.connectionStatus !== "connected") {
         return yield* new RuntimeCorePolicyError({
           command: "devices/disconnect",
           reason: "No connected device is available.",
@@ -379,35 +399,32 @@ const makeRuntimeCore = Effect.gen(function* () {
       }
 
       yield* interruptMonitor;
+      yield* closeSession(active.path, null);
       yield* serial
-        .removeDevice(device.path)
+        .removeDevice(active.path)
         .pipe(
           Effect.mapError(
             (cause) => new RuntimeCoreSerialError({ operation: "devices/disconnect", cause }),
           ),
         );
 
-      if (!device.metadata) {
-        return yield* SubscriptionRef.get(state);
-      }
-
-      return yield* applyDisconnectedDevice({
-        path: device.path,
-        deviceName: device.deviceName,
-        metadata: device.metadata,
-      });
+      yield* applyDisconnectedDevice(active);
     });
 
   const monitorDevice = (
     device: VScopeDevice,
-    polling: CoreState["settings"]["polling"],
+    session: DeviceSession,
+    polling: RuntimeAppState["settings"]["polling"],
   ): Effect.Effect<void> => {
     const statusMonitor = Stream.fromSchedule(
       Schedule.spaced(`${pollMillis(polling.stateHz)} millis`),
     ).pipe(
       Stream.runForEach(() =>
-        device.getStatus.pipe(
-          Effect.flatMap((status) => applyStatus(device.path, status)),
+        device.getStatus({ retryAttempts: 0 }).pipe(
+          Effect.flatMap((status) => publishStatus(device.path, status)),
+          Effect.catch((cause) =>
+            cause instanceof VScopeFrameParseError ? Effect.void : Effect.fail(cause),
+          ),
           Effect.mapError(
             (cause) => new RuntimeCoreSerialError({ operation: "devices/status", cause }),
           ),
@@ -419,9 +436,22 @@ const makeRuntimeCore = Effect.gen(function* () {
       Schedule.spaced(`${pollMillis(polling.frameHz)} millis`),
     ).pipe(
       Stream.runForEach(() =>
-        device.getFrame.pipe(
-          Effect.flatMap((frame) => applyFrame(device.path, frame)),
-          Effect.catch(() => Effect.void),
+        device.getFrame({ retryAttempts: 0 }).pipe(
+          Effect.flatMap((frame) => {
+            const values = Array.from(frame);
+            return Ref.set(session.lastFrame, values).pipe(
+              Effect.andThen(PubSub.publish(session.frames, values)),
+              Effect.asVoid,
+            );
+          }),
+          Effect.catch((cause) =>
+            cause instanceof VScopeFrameParseError
+              ? PubSub.publish(session.frames, null).pipe(Effect.asVoid)
+              : Effect.fail(cause),
+          ),
+          Effect.mapError(
+            (cause) => new RuntimeCoreSerialError({ operation: "devices/frame", cause }),
+          ),
         ),
       ),
     );
@@ -429,45 +459,19 @@ const makeRuntimeCore = Effect.gen(function* () {
     return Effect.all([statusMonitor, frameMonitor], {
       concurrency: "unbounded",
       discard: true,
-    }).pipe(
-      Effect.catch((error) =>
-        applyState((snapshot) => {
-          if (!snapshot.device || snapshot.device.path !== device.path) {
-            return snapshot;
-          }
-
-          const now = timestamp();
-          const message = `Lost ${device.deviceName} at ${device.path}: ${describeCause(error)}`;
-          return {
-            ...snapshot,
-            device: {
-              ...snapshot.device,
-              connectionStatus: "lost",
-              requestPending: false,
-              intent: settleIntent(snapshot.device.intent, "failed", now, describeCause(error)),
-              lastSeenAt: now,
-              error: describeCause(error),
-            },
-            warnings: appendWarning(snapshot.warnings, message, now),
-            logs: appendLog(snapshot.logs, message, now),
-          };
-        }).pipe(
-          Effect.asVoid,
-          Effect.andThen(serial.removeDevice(device.path).pipe(Effect.ignore)),
-        ),
-      ),
-    );
+    }).pipe(Effect.catch((error) => markDeviceLost(device, error)));
   };
 
   const withDevice = <A>(
     command: DeviceControlCommand,
-    intentKind: DeviceIntentKind,
     operation: (device: VScopeDevice) => Effect.Effect<A, VScopeDeviceError>,
-    applyResult: (path: string, result: A) => Effect.Effect<CoreState>,
+    applyResult: (path: string, result: A) => Effect.Effect<void, RuntimeCoreError>,
   ) =>
     Effect.gen(function* () {
-      const snapshot = yield* SubscriptionRef.get(state);
-      const decision = decideDeviceControl(command, snapshot.device, snapshot.permissions);
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      const status = yield* SubscriptionRef.get(deviceStatusRef);
+      const currentPermissions = permissionsForDevice(active, status);
+      const decision = decideDeviceControl(command, active, currentPermissions);
       if (!decision.allowed) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
@@ -482,12 +486,11 @@ const makeRuntimeCore = Effect.gen(function* () {
             (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
           ),
         );
-      yield* applyIntent(intentKind);
       const result = yield* operation(device).pipe(
         Effect.mapError((cause) => new RuntimeCoreSerialError({ operation: command.type, cause })),
-        Effect.tapError((error) => applyIntentFailure(intentKind, error)),
+        Effect.tapError((error) => applyDeviceError(device.path, error)),
       );
-      return yield* applyResult(device.path, result);
+      yield* applyResult(device.path, result);
     });
 
   const controlDevice = (command: DeviceControlCommand) => {
@@ -495,115 +498,62 @@ const makeRuntimeCore = Effect.gen(function* () {
       case "devices/run":
         return withDevice(
           command,
-          "run",
-          (device) =>
-            device.start({
-              timeoutMillis: SETTLE_TIMEOUT_MILLIS,
-              pollIntervalMillis: SETTLE_POLL_INTERVAL_MILLIS,
-            }),
-          (path, status) => applyStatus(path, status, "settled"),
+          (device) => device.setState(VScopeState.Running),
+          (path, status) => publishStatus(path, status),
         );
       case "devices/stop":
         return withDevice(
           command,
-          "stop",
-          (device) =>
-            device.stop({
-              timeoutMillis: SETTLE_TIMEOUT_MILLIS,
-              pollIntervalMillis: SETTLE_POLL_INTERVAL_MILLIS,
-            }),
-          (path, status) => applyStatus(path, status, "settled"),
+          (device) => device.setState(VScopeState.Halted),
+          (path, status) => publishStatus(path, status),
         );
       case "devices/trigger":
         return withDevice(
           command,
-          "trigger",
           (device) => device.trigger,
-          (path, status) => applyStatus(path, status),
+          (path, status) => publishStatus(path, status),
         );
       case "devices/setTiming":
         return withDevice(
           command,
-          "setTiming",
-          (device) =>
-            Effect.gen(function* () {
-              const timing = yield* device.setTiming(command.timing);
-              const status = yield* device.getStatus;
-              return { timing, status };
-            }),
-          (path, result) =>
-            applyDevicePatch(path, {
-              status: result.status,
-              timing: result.timing,
-              intentSettled: true,
-            }),
+          (device) => device.setTiming(command.timing),
+          (path, timing) => applyConfigPatch(path, command.type, { timing }),
         );
       case "devices/setTrigger":
         return withDevice(
           command,
-          "setTrigger",
-          (device) =>
-            Effect.gen(function* () {
-              const trigger = yield* device.setTrigger(command.trigger);
-              const status = yield* device.getStatus;
-              return { trigger, status };
-            }),
-          (path, result) =>
-            applyDevicePatch(path, {
-              status: result.status,
-              trigger: result.trigger,
-              intentSettled: true,
-            }),
+          (device) => device.setTrigger(command.trigger),
+          (path, trigger) => applyConfigPatch(path, command.type, { trigger }),
         );
       case "devices/setRtValue":
         return withDevice(
           command,
-          "setRtValue",
-          (device) =>
-            Effect.gen(function* () {
-              const value = yield* device.setRtValue(command.index, command.value);
-              const status = yield* device.getStatus;
-              return { value, status };
-            }),
-          (path, result) =>
-            applyDevicePatch(path, {
-              status: result.status,
-              rtValue: [command.index, result.value],
-              intentSettled: true,
-            }),
+          (device) => device.setRtValue(command.index, command.value),
+          (path, value) =>
+            applyConfigPatch(path, command.type, { rtValue: [command.index, value] }),
         );
       case "devices/setChannelMap":
         return withDevice(
           command,
-          "setChannelMap",
-          (device) =>
-            Effect.gen(function* () {
-              const channelMap = yield* device.setChannelMap(command.channel, command.variable);
-              const status = yield* device.getStatus;
-              return { channelMap, status };
-            }),
-          (path, result) =>
-            applyDevicePatch(path, {
-              status: result.status,
-              channelMap: result.channelMap,
-              intentSettled: true,
-            }),
+          (device) => device.setChannelMap(command.channel, command.variable),
+          (path, channelMap) => applyConfigPatch(path, command.type, { channelMap }),
         );
     }
   };
 
   const captureSnapshot = (command: SnapshotCaptureCommand) =>
     Effect.gen(function* () {
-      const snapshot = yield* SubscriptionRef.get(state);
-      const currentDevice = snapshot.device;
-      if (!currentDevice || currentDevice.connectionStatus !== "connected") {
+      const active = yield* SubscriptionRef.get(activeDeviceRef);
+      const status = yield* SubscriptionRef.get(deviceStatusRef);
+      const currentPermissions = permissionsForDevice(active, status);
+      if (!active || active.connectionStatus !== "connected") {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason: "No connected device is available.",
         });
       }
 
-      if (!snapshot.permissions.captureSnapshot) {
+      if (!currentPermissions.captureSnapshot) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason:
@@ -611,11 +561,9 @@ const makeRuntimeCore = Effect.gen(function* () {
         });
       }
 
-      yield* applyIntent("captureSnapshot");
-
       return yield* Effect.gen(function* () {
         const device = yield* serial
-          .getDeviceByPath(currentDevice.path)
+          .getDeviceByPath(active.path)
           .pipe(
             Effect.mapError(
               (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
@@ -634,11 +582,11 @@ const makeRuntimeCore = Effect.gen(function* () {
               (cause) => new RuntimeCoreSerialError({ operation: command.type, cause }),
             ),
           );
-        const label = normalizedSnapshotLabel(command.label, currentDevice.deviceName, capturedAt);
+        const label = normalizedSnapshotLabel(command.label, active.deviceName, capturedAt);
         const record = yield* persistence
           .createSnapshot(
             snapshotDraftFromCapture({
-              device: currentDevice,
+              device: active,
               header,
               label,
               capturedAt,
@@ -661,21 +609,16 @@ const makeRuntimeCore = Effect.gen(function* () {
             ),
           );
 
-        return yield* applySnapshotCaptureSuccess(
-          currentDevice.path,
-          snapshots,
-          `Captured snapshot "${record.label}" from ${currentDevice.deviceName}`,
-        );
-      }).pipe(Effect.tapError((error) => applyIntentFailure("captureSnapshot", error)));
+        yield* SubscriptionRef.set(snapshotsRef, snapshots);
+        yield* clearActiveDeviceError(active.path);
+        yield* logApp(`Captured snapshot "${record.label}" from ${active.deviceName}`);
+      }).pipe(Effect.tapError((error) => applyDeviceError(active.path, error)));
     });
 
-  const dispatchUnlocked = (command: CoreCommand): Effect.Effect<CoreState, RuntimeCoreError> => {
+  const dispatchUnlocked = (command: CoreCommand): Effect.Effect<void, RuntimeCoreError> => {
     switch (command.type) {
       case "warnings/clear":
-        return applyState((snapshot) => ({
-          ...snapshot,
-          warnings: [],
-        }));
+        return updateApp((app) => ({ ...app, warnings: [] })).pipe(Effect.asVoid);
       case "settings/patch":
         return Effect.gen(function* () {
           const stateResult = yield* persistence
@@ -685,8 +628,8 @@ const makeRuntimeCore = Effect.gen(function* () {
                 (cause) => new RuntimeCorePersistenceError({ operation: "settings/patch", cause }),
               ),
             );
-          return yield* applyState((snapshot) => ({
-            ...snapshot,
+          yield* updateApp((app) => ({
+            ...app,
             settings: stateResult.settings,
             settingsRecovery: stateResult.recovery,
           }));
@@ -701,8 +644,8 @@ const makeRuntimeCore = Effect.gen(function* () {
                   new RuntimeCorePersistenceError({ operation: "preferences/patch", cause }),
               ),
             );
-          return yield* applyState((snapshot) => ({
-            ...snapshot,
+          yield* updateApp((app) => ({
+            ...app,
             preferences: stateResult.preferences,
             preferencesRecovery: stateResult.recovery,
           }));
@@ -724,7 +667,8 @@ const makeRuntimeCore = Effect.gen(function* () {
     }
   };
 
-  const dispatch = (command: CoreCommand) => dispatchLock.withPermit(dispatchUnlocked(command));
+  const dispatch = (command: CoreCommand): Effect.Effect<void, RuntimeCoreError> =>
+    dispatchLock.withPermit(dispatchUnlocked(command));
 
   const query = (queryRequest: CoreQuery): Effect.Effect<CoreQueryResult, RuntimeCoreError> => {
     switch (queryRequest.type) {
@@ -741,10 +685,10 @@ const makeRuntimeCore = Effect.gen(function* () {
           ),
         );
       case "snapshots/list":
-        return SubscriptionRef.get(state).pipe(
-          Effect.map((snapshot) => ({
+        return SubscriptionRef.get(snapshotsRef).pipe(
+          Effect.map((snapshots) => ({
             type: "snapshots/list",
-            snapshots: snapshot.snapshots,
+            snapshots,
           })),
         );
       case "snapshots/readSamples":
@@ -764,47 +708,55 @@ const makeRuntimeCore = Effect.gen(function* () {
   };
 
   const shutdown = interruptMonitor.pipe(
+    Effect.andThen(closeCurrentSession(null)),
     Effect.andThen(
       serial.closeAll.pipe(
         Effect.mapError((cause) => new RuntimeCoreSerialError({ operation: "shutdown", cause })),
       ),
     ),
-    Effect.flatMap(() =>
-      applyState((snapshot) => {
-        const now = timestamp();
-        return {
-          ...snapshot,
-          device:
-            snapshot.device?.connectionStatus === "connected"
-              ? {
-                  ...snapshot.device,
-                  connectionStatus: "disconnected",
-                  requestPending: false,
-                  intent: null,
-                  lastSeenAt: now,
-                }
-              : snapshot.device,
-          logs: appendLog(snapshot.logs, "Runtime core shutdown closed the serial device", now),
-        };
+    Effect.andThen(
+      Effect.gen(function* () {
+        const active = yield* SubscriptionRef.get(activeDeviceRef);
+        if (active?.connectionStatus === "connected") {
+          yield* SubscriptionRef.set(activeDeviceRef, {
+            ...active,
+            connectionStatus: "disconnected",
+            error: null,
+          });
+        }
+        yield* clearLiveDeviceStores;
+        yield* logApp("Runtime core shutdown closed the serial device");
       }),
     ),
     Effect.asVoid,
   );
 
   return {
-    changes: SubscriptionRef.changes(state),
-    getSnapshot: SubscriptionRef.get(state),
+    app: SubscriptionRef.get(appRef),
+    appChanges: SubscriptionRef.changes(appRef),
+    snapshots: SubscriptionRef.get(snapshotsRef),
+    snapshotChanges: SubscriptionRef.changes(snapshotsRef),
+    activeDevice: SubscriptionRef.get(activeDeviceRef),
+    activeDeviceChanges: SubscriptionRef.changes(activeDeviceRef),
+    deviceStatus: SubscriptionRef.get(deviceStatusRef),
+    deviceStatusChanges: SubscriptionRef.changes(deviceStatusRef),
+    deviceConfig: SubscriptionRef.get(deviceConfigRef),
+    deviceConfigChanges: SubscriptionRef.changes(deviceConfigRef),
+    permissions,
+    readModel,
     dispatch,
     query,
     shutdown,
+    frames,
+    lastFrame,
   };
 });
 
 export const RuntimeCoreLive = Layer.effect(RuntimeCore, makeRuntimeCore);
 
-function hydrateInitialSnapshot(
+function hydrateInitialStores(
   persistence: PersistenceService,
-): Effect.Effect<CoreState, RuntimeCorePersistenceError> {
+): Effect.Effect<InitialStores, RuntimeCorePersistenceError> {
   return Effect.gen(function* () {
     const bootedAt = timestamp();
     const settingsState = yield* persistence.readSettings.pipe(
@@ -830,131 +782,60 @@ function hydrateInitialSnapshot(
         ),
       );
 
-    return finalizeState({
-      bootedAt,
-      updatedAt: bootedAt,
-      status: "ready",
-      settings: settingsState.settings,
-      settingsRecovery: settingsState.recovery,
-      preferences: preferencesState.preferences,
-      preferencesRecovery: preferencesState.recovery,
-      savedDevices,
+    return {
+      app: finalizeApp({
+        bootedAt,
+        updatedAt: bootedAt,
+        status: "ready",
+        settings: settingsState.settings,
+        settingsRecovery: settingsState.recovery,
+        preferences: preferencesState.preferences,
+        preferencesRecovery: preferencesState.recovery,
+        savedDevices,
+        warnings: [],
+        logs: [],
+      }),
       snapshots,
-      device: null,
-      permissions: permissionsForDevice(null),
-      warnings: [],
-      logs: [],
-    });
+    };
   });
 }
 
-function finalizeState(snapshot: CoreState): CoreState {
+function finalizeApp(app: RuntimeAppState): RuntimeAppState {
   return {
-    ...snapshot,
+    ...app,
     updatedAt: timestamp(),
-    status: snapshot.warnings.length > 0 ? "degraded" : "ready",
-    permissions: permissionsForDevice(snapshot.device),
+    status: app.warnings.length > 0 ? "degraded" : "ready",
   };
 }
 
-function buildConnectedDevice(options: {
-  readonly summary: VScopeDeviceSummary;
-  readonly runtimeState: DeviceRuntimeState;
-  readonly existing: CoreDevice | null;
-  readonly now: string;
-}): CoreDevice {
-  const { summary, runtimeState, existing, now } = options;
-  const base: CoreDevice = {
+function activeDeviceFromSummary(summary: VScopeDeviceSummary): ActiveDeviceState {
+  return {
     path: summary.path,
     deviceName: summary.deviceName,
     connectionStatus: "connected",
     info: summary.metadata.info,
-    metadata: summary.metadata,
-    status: runtimeState.status,
-    state: runtimeState.status.state,
-    requestedState: runtimeState.status.requestedState,
-    requestPending: runtimeState.status.requestPending,
-    snapshotAvailability: snapshotAvailability(runtimeState.status),
-    intent: null,
-    timing: runtimeState.timing ?? null,
-    trigger: runtimeState.trigger ?? null,
-    channelMap: runtimeState.channelMap ?? summary.metadata.channelMap,
-    frame: runtimeState.frame ?? null,
-    rtValues: runtimeState.rtValues ?? new Map(),
-    lastFrameAt: runtimeState.frame ? now : null,
-    lastSeenAt: now,
-    error: null,
-  };
-
-  if (!existing) {
-    return base;
-  }
-
-  return {
-    ...base,
-    lastFrameAt: base.lastFrameAt ?? existing.lastFrameAt,
-  };
-}
-
-function applyStatusToDevice(
-  device: CoreDevice,
-  status: VScopeControlStatus,
-  now: string,
-  intent: DeviceIntent | null,
-): CoreDevice {
-  return {
-    ...device,
-    status,
-    state: status.state,
-    requestedState: status.requestedState,
-    requestPending: status.requestPending,
-    snapshotAvailability: snapshotAvailability(status),
-    intent,
-    lastSeenAt: now,
+    variables: summary.metadata.variables,
+    rtLabels: summary.metadata.rtLabels,
     error: null,
   };
 }
 
-function settleIntent(
-  intent: DeviceIntent | null,
-  status: "settled" | "failed",
-  now: string,
-  error: string | null,
-): DeviceIntent | null {
-  if (!intent || intent.status !== "pending") {
-    return intent;
-  }
-
-  return {
-    ...intent,
-    status,
-    settledAt: now,
-    error,
-  };
-}
-
-function shouldSettleIntentFromStatus(
-  intent: DeviceIntent | null,
-  status: VScopeControlStatus,
-): boolean {
+function statusEquals(a: VScopeControlStatus, b: VScopeControlStatus): boolean {
   return (
-    !status.requestPending && intent?.status === "pending" && intent.kind !== "captureSnapshot"
+    a.state === b.state &&
+    a.requestedState === b.requestedState &&
+    a.snapshotValid === b.snapshotValid &&
+    a.requestPending === b.requestPending &&
+    a.triggerEnabled === b.triggerEnabled &&
+    a.flags === b.flags
   );
 }
 
-function snapshotAvailability(status: VScopeControlStatus): SnapshotAvailability {
-  if (status.snapshotValid) {
-    return "ready";
-  }
-
-  if (status.state === VScopeState.Running || status.state === VScopeState.Acquiring) {
-    return "not-ready";
-  }
-
-  return "unknown";
-}
-
-function openOptions(path: string, config: SerialConfig, crcRetryAttempts: number) {
+function openOptions(
+  path: string,
+  config: SerialConfig,
+  polling: RuntimeAppState["settings"]["polling"],
+) {
   return {
     path,
     baudRate: config.baudRate,
@@ -963,36 +844,29 @@ function openOptions(path: string, config: SerialConfig, crcRetryAttempts: numbe
     parity: config.parity,
     dtr: config.dtr,
     rts: config.rts,
-    crcRetryAttempts,
+    requestTimeoutMillis: polling.serialTimeoutMs,
+    retryAttempts: polling.retryAttempts,
   };
-}
-
-function summarizeDevice(device: VScopeDevice) {
-  return device.metadata.pipe(
-    Effect.map((metadata) => ({
-      path: device.path,
-      deviceName: device.deviceName,
-      metadata,
-    })),
-  );
 }
 
 function readDeviceRuntimeState(
   device: VScopeDevice,
+  metadata: VScopeStaticMetadata,
 ): Effect.Effect<DeviceRuntimeState, VScopeDeviceError> {
   return Effect.gen(function* () {
-    const metadata = yield* device.metadata;
-    const status = yield* device.getStatus;
+    const status = yield* device.getStatus();
     if (status.state === VScopeState.Misconfigured) {
       return {
         status,
+        config: null,
+        frame: null,
       };
     }
 
     const timing = yield* device.getTiming;
     const trigger = yield* device.getTrigger;
     const channelMap = yield* device.getChannelMap;
-    const frame = yield* device.getFrame;
+    const frame = yield* device.getFrame();
     const rtValues = new Map<number, number>();
 
     for (let index = 0; index < metadata.rtLabels.length; index += 1) {
@@ -1002,11 +876,13 @@ function readDeviceRuntimeState(
 
     return {
       status,
-      timing,
-      trigger,
-      channelMap,
+      config: {
+        timing,
+        trigger,
+        channelMap,
+        rtValues,
+      },
       frame: Array.from(frame),
-      rtValues,
     };
   });
 }
@@ -1025,7 +901,7 @@ function normalizedSnapshotLabel(
 }
 
 function snapshotDraftFromCapture(options: {
-  readonly device: CoreDevice;
+  readonly device: ActiveDeviceState;
   readonly header: VScopeSnapshotHeader;
   readonly label: string;
   readonly capturedAt: string;
@@ -1047,13 +923,13 @@ function snapshotDraftFromCapture(options: {
     metadata: {
       capturedAt,
       deviceInfo: device.info,
-      variables: device.metadata?.variables ?? [],
-      rtLabels: device.metadata?.rtLabels ?? [],
+      variables: device.variables,
+      rtLabels: device.rtLabels,
     },
   });
 }
 
-function sampleRateHz(info: CoreDevice["info"], divider: number): number | null {
+function sampleRateHz(info: ActiveDeviceState["info"], divider: number): number | null {
   if (!info || divider <= 0) {
     return null;
   }

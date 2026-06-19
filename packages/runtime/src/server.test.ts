@@ -15,17 +15,23 @@ import {
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 import { makeRuntimeConfig } from "./config";
-import { makeRuntimeHttpLayer } from "./server";
-import type { CoreCommand, CoreState } from "./core/model";
+import type {
+  ActiveDeviceState,
+  CoreQueryResult,
+  DeviceConfigState,
+  RuntimeAppState,
+} from "./core/model";
+import type { CommandPermissions } from "./core/policy";
 import { RuntimeCore } from "./core/service";
 import type { RuntimeCoreService } from "./core/service";
+import { makeRuntimeHttpLayer } from "./server";
 
 describe("@vscope/runtime server", () => {
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
     it.effect("serves health, JSON RPC, and MCP tool listing", () =>
       Effect.gen(function* () {
         const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
-        const state = yield* Effect.scoped(
+        const rpcState = yield* Effect.scoped(
           Effect.gen(function* () {
             const rpc = yield* RpcClient.make(RuntimeRpcs).pipe(
               Effect.provide(
@@ -36,7 +42,10 @@ describe("@vscope/runtime server", () => {
                 }).pipe(Layer.provideMerge(RpcSerialization.layerJson)),
               ),
             );
-            return yield* rpc["runtime.getState"]();
+            const app = yield* rpc["runtime.getApp"]();
+            const activeDevice = yield* rpc["device.active.get"]();
+            const config = yield* rpc["device.config.get"]();
+            return { app, activeDevice, config };
           }),
         );
 
@@ -73,15 +82,12 @@ describe("@vscope/runtime server", () => {
         );
 
         expect(health).toEqual({ status: "ok" });
-        expect(state).toMatchObject({
-          device: {
-            deviceName: "fake-scope",
-            rtValues: [
-              [0, 1.5],
-              [1, 2.5],
-            ],
-          },
-        });
+        expect(rpcState.app.status).toBe("ready");
+        expect(rpcState.activeDevice?.deviceName).toBe("fake-scope");
+        expect(rpcState.config?.rtValues).toEqual([
+          [0, 1.5],
+          [1, 2.5],
+        ]);
         expect(JSON.stringify(tools)).toContain("vscope_write_config");
       }),
     );
@@ -98,34 +104,63 @@ function testServerLayer() {
     disableLogger: true,
   }).pipe(
     Layer.provideMerge(NodeHttpServer.layerTest),
-    Layer.provide(Layer.succeed(RuntimeCore, fakeCore(initialState()))),
+    Layer.provide(Layer.succeed(RuntimeCore, fakeCore())),
   );
 }
 
-function fakeCore(state: CoreState): RuntimeCoreService {
+function fakeCore(): RuntimeCoreService {
+  const app = initialApp();
+  const activeDevice = initialActiveDevice();
+  const status = {
+    state: VScopeState.Halted,
+    requestedState: VScopeState.Halted,
+    snapshotValid: false,
+    requestPending: false,
+    triggerEnabled: true,
+    flags: 0,
+  };
+  const config = initialConfig();
+  const snapshots: Extract<CoreQueryResult, { readonly type: "snapshots/list" }> = {
+    type: "snapshots/list",
+    snapshots: [],
+  };
+  const permissions = commandPermissions();
   return {
-    changes: Stream.fromIterable([state]),
-    getSnapshot: Effect.succeed(state),
-    dispatch: (command) => Effect.succeed(applyCommand(state, command)),
+    app: Effect.succeed(app),
+    appChanges: Stream.fromIterable([app]),
+    snapshots: Effect.succeed(snapshots.snapshots),
+    snapshotChanges: Stream.fromIterable([snapshots.snapshots]),
+    activeDevice: Effect.succeed(activeDevice),
+    activeDeviceChanges: Stream.fromIterable([activeDevice]),
+    deviceStatus: Effect.succeed(status),
+    deviceStatusChanges: Stream.fromIterable([status]),
+    deviceConfig: Effect.succeed(config),
+    deviceConfigChanges: Stream.fromIterable([config]),
+    permissions: Effect.succeed(permissions),
+    readModel: Effect.succeed({
+      app,
+      snapshots: snapshots.snapshots,
+      activeDevice,
+      deviceStatus: status,
+      deviceConfig: config,
+      permissions,
+    }),
+    dispatch: () => Effect.void,
     query: (query) =>
       Effect.succeed(
         query.type === "ports/list"
           ? { type: "ports/list", ports: [] }
           : query.type === "snapshots/list"
-            ? { type: "snapshots/list", snapshots: state.snapshots }
+            ? snapshots
             : { type: "snapshots/readSamples", samples: null },
       ),
     shutdown: Effect.void,
+    frames: Stream.empty,
+    lastFrame: Effect.succeed([10, 20]),
   };
 }
 
-function applyCommand(state: CoreState, _command: CoreCommand): CoreState {
-  return state;
-}
-
-function initialState(): CoreState {
-  const timing: VScopeTiming = { divider: 4, preTrig: 2 };
-  const trigger: VScopeTrigger = { threshold: 1.25, channel: 0, mode: "rising" };
+function initialApp(): RuntimeAppState {
   return {
     bootedAt: "2026-06-16T00:00:00.000Z",
     updatedAt: "2026-06-16T00:00:00.000Z",
@@ -135,67 +170,59 @@ function initialState(): CoreState {
     preferences: DEFAULT_PREFERENCES,
     preferencesRecovery: noRecovery,
     savedDevices: [],
-    snapshots: [],
-    device: {
-      path: "/dev/tty.fake",
-      deviceName: "fake-scope",
-      connectionStatus: "connected",
-      info: null,
-      metadata: {
-        info: {
-          channelCount: 2,
-          bufferSize: 1024,
-          isrKHz: 100,
-          variableCount: 8,
-          rtCount: 2,
-          rtBufferCapacity: 2,
-          nameLength: 32,
-          endianness: VScopeEndianness.Little,
-          deviceName: "fake-scope",
-        },
-        variables: ["a", "b", "c", "d"],
-        rtLabels: ["gain", "offset"],
-        channelMap: [0, 1],
-      },
-      status: {
-        state: VScopeState.Halted,
-        requestedState: VScopeState.Halted,
-        snapshotValid: false,
-        requestPending: false,
-        triggerEnabled: true,
-        flags: 0,
-      },
-      state: VScopeState.Halted,
-      requestedState: VScopeState.Halted,
-      requestPending: false,
-      snapshotAvailability: "unknown",
-      intent: null,
-      timing,
-      trigger,
-      channelMap: [0, 1],
-      frame: [10, 20],
-      rtValues: new Map([
-        [0, 1.5],
-        [1, 2.5],
-      ]),
-      lastFrameAt: "2026-06-16T00:00:00.000Z",
-      lastSeenAt: "2026-06-16T00:00:00.000Z",
-      error: null,
-    },
-    permissions: {
-      mode: "halted",
-      connect: false,
-      disconnect: true,
-      setTiming: true,
-      setTrigger: true,
-      setRtValue: true,
-      setChannelMap: true,
-      trigger: false,
-      run: true,
-      stop: true,
-      captureSnapshot: false,
-    },
     warnings: [],
     logs: [],
+  };
+}
+
+function initialActiveDevice(): ActiveDeviceState {
+  return {
+    path: "/dev/tty.fake",
+    deviceName: "fake-scope",
+    connectionStatus: "connected",
+    info: {
+      channelCount: 2,
+      bufferSize: 1024,
+      isrKHz: 100,
+      variableCount: 8,
+      rtCount: 2,
+      rtBufferCapacity: 2,
+      nameLength: 32,
+      endianness: VScopeEndianness.Little,
+      deviceName: "fake-scope",
+    },
+    variables: ["a", "b", "c", "d"],
+    rtLabels: ["gain", "offset"],
+    error: null,
+  };
+}
+
+function initialConfig(): DeviceConfigState {
+  const timing: VScopeTiming = { divider: 4, preTrig: 2 };
+  const trigger: VScopeTrigger = { threshold: 1.25, channel: 0, mode: "rising" };
+  return {
+    timing,
+    trigger,
+    channelMap: [0, 1],
+    rtValues: new Map([
+      [0, 1.5],
+      [1, 2.5],
+    ]),
+  };
+}
+
+function commandPermissions(): CommandPermissions {
+  return {
+    mode: "halted",
+    connect: false,
+    disconnect: true,
+    setTiming: true,
+    setTrigger: true,
+    setRtValue: true,
+    setChannelMap: true,
+    trigger: false,
+    run: true,
+    stop: true,
+    captureSnapshot: false,
   };
 }
