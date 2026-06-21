@@ -1,8 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
-import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, noRecovery } from "@vscope/shared";
+import { DEFAULT_SETTINGS, noRecovery } from "@vscope/shared";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
-import { Effect, Option, Stream } from "effect";
+import { Effect, Stream } from "effect";
 
 import { makeRuntimeApi } from "./api";
 import type {
@@ -12,7 +12,6 @@ import type {
   DeviceConfigState,
   RuntimeAppState,
 } from "./core/model";
-import type { CommandPermissions } from "./core/policy";
 import type { RuntimeCoreService } from "./core/service";
 
 describe("@vscope/runtime api", () => {
@@ -35,25 +34,11 @@ describe("@vscope/runtime api", () => {
     Effect.gen(function* () {
       const api = makeRuntimeApi(fakeCore(initialStores()));
 
-      const frame = yield* api.mcp.readFrame;
+      const frame = yield* api.rpc.readFrame;
 
       expect(frame).toEqual({
         values: [10, 20],
       });
-    }),
-  );
-
-  it.effect("exposes command permissions as a subscription", () =>
-    Effect.gen(function* () {
-      const api = makeRuntimeApi(fakeCore(initialStores()));
-
-      const permissions = yield* api.subscriptions.permissions.pipe(Stream.runHead);
-
-      expect(Option.isSome(permissions)).toBe(true);
-      if (Option.isNone(permissions)) {
-        throw new Error("Expected permissions emission");
-      }
-      expect(permissions.value.mode).toBe("halted");
     }),
   );
 });
@@ -71,7 +56,6 @@ function fakeCore(stores: FakeStores, commands: Array<CoreCommand> = []): Runtim
     type: "snapshots/list",
     snapshots: [],
   };
-  const permissions = commandPermissions();
   return {
     app: Effect.succeed(stores.app),
     appChanges: Stream.fromIterable([stores.app]),
@@ -83,14 +67,12 @@ function fakeCore(stores: FakeStores, commands: Array<CoreCommand> = []): Runtim
     deviceStatusChanges: Stream.fromIterable([stores.status]),
     deviceConfig: Effect.sync(() => config),
     deviceConfigChanges: Stream.fromIterable([config]),
-    permissions: Effect.succeed(permissions),
     readModel: Effect.sync(() => ({
       app: stores.app,
       snapshots: snapshots.snapshots,
       activeDevice: stores.activeDevice,
       deviceStatus: stores.status,
       deviceConfig: config,
-      permissions,
     })),
     dispatch: (command) =>
       Effect.sync(() => {
@@ -161,7 +143,7 @@ function applyCommand(
 }
 
 function initialStores(): FakeStores {
-  const timing: VScopeTiming = { divider: 4, preTrig: 2 };
+  const timing: VScopeTiming = { totalDurationSeconds: 0.04096, preTriggerSeconds: 0.00002 };
   const trigger: VScopeTrigger = { threshold: 1.25, channel: 0, mode: "rising" };
   return {
     app: {
@@ -170,8 +152,6 @@ function initialStores(): FakeStores {
       status: "ready",
       settings: DEFAULT_SETTINGS,
       settingsRecovery: noRecovery,
-      preferences: DEFAULT_PREFERENCES,
-      preferencesRecovery: noRecovery,
       savedDevices: [],
       warnings: [],
       logs: [],
@@ -179,7 +159,7 @@ function initialStores(): FakeStores {
     activeDevice: {
       path: "/dev/tty.fake",
       deviceName: "fake-scope",
-      connectionStatus: "connected",
+      connected: true,
       info: {
         channelCount: 2,
         bufferSize: 1024,
@@ -212,21 +192,5 @@ function initialStores(): FakeStores {
         [1, 2.5],
       ]),
     },
-  };
-}
-
-function commandPermissions(): CommandPermissions {
-  return {
-    mode: "halted",
-    connect: false,
-    disconnect: true,
-    setTiming: true,
-    setTrigger: true,
-    setRtValue: true,
-    setChannelMap: true,
-    trigger: false,
-    run: true,
-    stop: true,
-    captureSnapshot: false,
   };
 }

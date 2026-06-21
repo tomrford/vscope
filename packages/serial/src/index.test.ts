@@ -173,6 +173,30 @@ describe("@vscope/serial device", () => {
     }),
   );
 
+  it.live("implements manual trigger through SET_STATE acquiring", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-manual-trigger",
+        deviceName: "scope-manual-trigger",
+      });
+      const driver = fakeDriver([firmware]);
+
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-manual-trigger",
+        baudRate: 115200,
+        driver,
+        requestTimeoutMillis: 1000,
+      });
+
+      yield* device.start();
+      const status = yield* device.trigger;
+
+      expect(status.state).toBe(VScopeState.Acquiring);
+      expect(status.snapshotValid).toBe(false);
+      expect(firmware.requestCount(VScopeMessageType.SetState)).toBe(2);
+    }),
+  );
+
   it.live("completes the device close signal when the opening scope is released", () =>
     Effect.gen(function* () {
       const firmware = fakeFirmware({
@@ -290,10 +314,9 @@ describe("@vscope/serial device", () => {
         requestTimeoutMillis: 1000,
       });
 
-      const oversizedDivider = yield* Effect.exit(
-        device.setTiming({ divider: 0x1_0000_0000, preTrig: 0 }),
+      const tooLongDuration = yield* Effect.exit(
+        device.setTiming({ totalDurationSeconds: 214_748_365, preTriggerSeconds: 0 }),
       );
-      const fractionalState = yield* Effect.exit(device.setState(1.5 as VScopeStateValue));
       const invalidTriggerMode = yield* Effect.exit(
         device.setTrigger({
           threshold: 0,
@@ -302,7 +325,7 @@ describe("@vscope/serial device", () => {
         }),
       );
 
-      for (const exit of [oversizedDivider, fractionalState, invalidTriggerMode]) {
+      for (const exit of [tooLongDuration, invalidTriggerMode]) {
         expect(exit._tag).toBe("Failure");
         if (exit._tag === "Failure") {
           const errors = exit.cause.reasons
@@ -403,8 +426,33 @@ describe("@vscope/serial device", () => {
 
       const timing = yield* device.getTiming;
 
-      expect(timing).toEqual({ divider: 1, preTrig: 0 });
+      expect(timing).toEqual({ totalDurationSeconds: 0.05, preTriggerSeconds: 0 });
       expect(firmware.requestCount(VScopeMessageType.GetTiming)).toBe(2);
+    }),
+  );
+
+  it.live("converts public timing seconds to firmware divider and pre-trigger samples", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-timing-seconds",
+        deviceName: "scope-timing-seconds",
+      });
+      const driver = fakeDriver([firmware]);
+
+      const device = yield* openVScopeDevice({
+        path: "/dev/tty.vscope-timing-seconds",
+        baudRate: 115200,
+        driver,
+        requestTimeoutMillis: 1000,
+      });
+
+      const timing = yield* device.setTiming({
+        totalDurationSeconds: 1,
+        preTriggerSeconds: 0.25,
+      });
+
+      expect(timing).toEqual({ totalDurationSeconds: 1, preTriggerSeconds: 0.25 });
+      expect(firmware.timing).toEqual({ divider: 20, preTrig: 250 });
     }),
   );
 
@@ -707,7 +755,6 @@ interface FakeFirmwareOptions {
   readonly frameResponseDelayMillis?: number | undefined;
   readonly wrongResponseFor?: VScopeMessageType | undefined;
   readonly corruptFirstResponsesFor?: ReadonlyArray<VScopeMessageType> | undefined;
-  readonly stateTransitionStatusReads?: number | undefined;
   readonly acquisitionStatusReads?: number | undefined;
   readonly snapshotValid?: boolean | undefined;
 }
@@ -861,14 +908,12 @@ class FakeFirmware {
   readonly frameResponseDelayMillis: number;
   readonly wrongResponseFor: VScopeMessageType | undefined;
   readonly corruptFirstResponsesFor: ReadonlySet<VScopeMessageType>;
-  readonly stateTransitionStatusReads: number;
   readonly acquisitionStatusReads: number;
   closeAttempts = 0;
   #closeFailures: number;
   timing = { divider: 1, preTrig: 0 };
   state: VScopeStateValue = VScopeState.Halted;
   requestedState: VScopeStateValue = VScopeState.Halted;
-  stateTransitionReadsRemaining = 0;
   acquisitionReadsRemaining = 0;
   snapshotValid: boolean;
   controlSignals: { dtr: boolean; rts: boolean } = { dtr: false, rts: false };
@@ -896,7 +941,6 @@ class FakeFirmware {
     this.frameResponseDelayMillis = options.frameResponseDelayMillis ?? 0;
     this.wrongResponseFor = options.wrongResponseFor;
     this.corruptFirstResponsesFor = new Set(options.corruptFirstResponsesFor ?? []);
-    this.stateTransitionStatusReads = options.stateTransitionStatusReads ?? 1;
     this.acquisitionStatusReads = options.acquisitionStatusReads ?? 1;
     this.snapshotValid = options.snapshotValid ?? true;
     this.#closeFailures = options.closeFailures ?? 0;
@@ -950,13 +994,6 @@ class FakeFirmware {
         return this.response(type, this.statusPayload());
       case VScopeMessageType.SetState:
         return this.setRequestedState(payload[0] as VScopeStateValue, type);
-      case VScopeMessageType.Trigger:
-        if (this.state !== VScopeState.Running) {
-          return this.error(VScopeStatus.NotReady);
-        }
-        this.requestedState = VScopeState.Acquiring;
-        this.stateTransitionReadsRemaining = this.stateTransitionStatusReads;
-        return this.response(type, this.statusPayload());
       case VScopeMessageType.GetFrame:
         return this.response(
           type,
@@ -1026,28 +1063,17 @@ class FakeFirmware {
     }
 
     this.requestedState = requestedState;
-    this.stateTransitionReadsRemaining =
-      requestedState === this.state ? 0 : this.stateTransitionStatusReads;
+    this.state = requestedState;
+    if (requestedState === VScopeState.Running) {
+      this.snapshotValid = false;
+    } else if (requestedState === VScopeState.Acquiring) {
+      this.snapshotValid = false;
+      this.acquisitionReadsRemaining = this.acquisitionStatusReads;
+    }
     return this.response(responseType, this.statusPayload());
   }
 
   private advanceStatus(): void {
-    if (this.stateTransitionReadsRemaining > 0) {
-      this.stateTransitionReadsRemaining -= 1;
-      if (this.stateTransitionReadsRemaining === 0) {
-        if (this.requestedState === VScopeState.Running) {
-          this.state = VScopeState.Running;
-          this.snapshotValid = false;
-        } else if (this.requestedState === VScopeState.Halted) {
-          this.state = VScopeState.Halted;
-        } else {
-          this.state = VScopeState.Acquiring;
-          this.acquisitionReadsRemaining = this.acquisitionStatusReads;
-        }
-      }
-      return;
-    }
-
     if (this.state === VScopeState.Acquiring) {
       if (this.acquisitionReadsRemaining > 0) {
         this.acquisitionReadsRemaining -= 1;

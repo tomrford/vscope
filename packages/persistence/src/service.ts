@@ -4,13 +4,10 @@ import { Effect, Option, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import type { PersistenceService } from "./api.ts";
-import { SnapshotComparisonNotFoundError, SnapshotNotFoundError } from "./errors.ts";
+import { SnapshotNotFoundError } from "./errors.ts";
 import {
-  DEFAULT_PREFERENCES,
   DEFAULT_SETTINGS,
   PersistentId,
-  Preferences,
-  PreferencesState,
   SavedDevice,
   SavedDeviceDraft,
   SavedDeviceIdentity,
@@ -18,8 +15,6 @@ import {
   Settings,
   SettingsState,
   SNAPSHOT_SAMPLE_FORMAT,
-  SnapshotComparison,
-  SnapshotComparisonDraft,
   SnapshotDraft,
   SnapshotListQuery,
   SnapshotRecord,
@@ -29,9 +24,8 @@ import {
   SnapshotTrigger,
   Timestamp,
   noRecovery,
-  recovery,
   snapshotSampleByteLength,
-  type PreferencesPatch,
+  recovery,
   type SettingsPatch,
 } from "@vscope/shared";
 import {
@@ -40,19 +34,15 @@ import {
   SingletonRow,
   SnapshotRow,
   SnapshotSampleRow,
-  comparisonRows,
   createId,
   createTimestamp,
-  decodeComparisonRow,
   decodeJson,
   decodeWith,
-  pruneIncompleteComparisons,
   runSql,
   stringifyJson,
   stringProperty,
   toUint8Array,
   transactionError,
-  validateSnapshotComparisonDraftShape,
   validateSamplesForDescriptor,
   validateSnapshotDraftShape,
 } from "./codec.ts";
@@ -63,8 +53,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   const sql = yield* SqlClient.SqlClient;
 
   const writeSingleton = Effect.fn("Persistence.writeSingleton")(function* (
-    table: "settings" | "preferences",
-    value: Settings | Preferences,
+    table: "settings",
+    value: Settings,
     recoveryPending: boolean,
   ) {
     const json = yield* stringifyJson(`write ${table}`, value);
@@ -158,87 +148,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
         }),
       )
       .pipe(Effect.mapError((cause) => transactionError("patch settings transaction", cause)));
-  });
-
-  const readPreferences = Effect.fn("Persistence.readPreferences")(function* () {
-    const rows = yield* runSql(
-      "read preferences",
-      sql`
-        SELECT data_json, recovery_pending
-        FROM preferences
-        WHERE id = 1
-      `,
-    );
-
-    const row = rows[0];
-    if (row === undefined) {
-      yield* writeSingleton("preferences", DEFAULT_PREFERENCES, false);
-      return PreferencesState.make({ preferences: DEFAULT_PREFERENCES, recovery: noRecovery });
-    }
-
-    const decodedRow = yield* decodeWith(SingletonRow, "decode preferences row", row).pipe(
-      Effect.matchEffect({
-        onFailure: () =>
-          Effect.gen(function* () {
-            yield* writeSingleton("preferences", DEFAULT_PREFERENCES, true);
-            return {
-              preferences: DEFAULT_PREFERENCES,
-              recoveryState: recovery("Corrupt preferences were reset to defaults."),
-            };
-          }),
-        onSuccess: (value) =>
-          decodeJson(Preferences, "decode preferences", value.data_json).pipe(
-            Effect.matchEffect({
-              onFailure: () =>
-                Effect.gen(function* () {
-                  yield* writeSingleton("preferences", DEFAULT_PREFERENCES, true);
-                  return {
-                    preferences: DEFAULT_PREFERENCES,
-                    recoveryState: recovery("Corrupt preferences were reset to defaults."),
-                  };
-                }),
-              onSuccess: (preferences) =>
-                Effect.succeed({
-                  preferences,
-                  recoveryState:
-                    value.recovery_pending === 1
-                      ? recovery("Corrupt preferences were reset to defaults.")
-                      : noRecovery,
-                }),
-            }),
-          ),
-      }),
-    );
-
-    return PreferencesState.make({
-      preferences: decodedRow.preferences,
-      recovery: decodedRow.recoveryState,
-    });
-  });
-
-  const writePreferences = Effect.fn("Persistence.writePreferences")(function* (
-    preferences: Preferences,
-  ) {
-    const decoded = yield* decodeWith(Preferences, "write preferences", preferences);
-    yield* writeSingleton("preferences", decoded, false);
-    return PreferencesState.make({ preferences: decoded, recovery: noRecovery });
-  });
-
-  const patchPreferences = Effect.fn("Persistence.patchPreferences")(function* (
-    patch: PreferencesPatch,
-  ) {
-    return yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const current = yield* readPreferences();
-          const merged = yield* decodeWith(Preferences, "patch preferences", {
-            ...current.preferences,
-            ...patch,
-          });
-          return yield* writePreferences(merged);
-        }),
-      )
-      .pipe(Effect.mapError((cause) => transactionError("patch preferences transaction", cause)));
   });
 
   const decodeSavedDeviceRow = Effect.fn("Persistence.decodeSavedDeviceRow")(function* (
@@ -534,8 +443,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
         stored: decodedRow.has_samples === 1,
       },
       sampleRateHz: decodedRow.sample_rate_hz,
-      divider: decodedRow.divider,
-      preTriggerSamples: decodedRow.pre_trigger_samples,
+      totalDurationSeconds: decodedRow.total_duration_seconds,
+      preTriggerSeconds: decodedRow.pre_trigger_seconds,
       channelMap,
       trigger,
       rtValues,
@@ -640,8 +549,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       device: decodedDraft.device,
       sample: descriptor,
       sampleRateHz: decodedDraft.sampleRateHz,
-      divider: decodedDraft.divider,
-      preTriggerSamples: decodedDraft.preTriggerSamples,
+      totalDurationSeconds: decodedDraft.totalDurationSeconds,
+      preTriggerSeconds: decodedDraft.preTriggerSeconds,
       channelMap: decodedDraft.channelMap,
       trigger: decodedDraft.trigger,
       rtValues: decodedDraft.rtValues,
@@ -674,8 +583,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               sample_count,
               sample_format,
               sample_rate_hz,
-              divider,
-              pre_trigger_samples,
+              total_duration_seconds,
+              pre_trigger_seconds,
               channel_map_json,
               trigger_json,
               rt_values_json,
@@ -690,8 +599,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               ${record.sample.sampleCount},
               ${record.sample.format},
               ${record.sampleRateHz},
-              ${record.divider},
-              ${record.preTriggerSamples},
+              ${record.totalDurationSeconds},
+              ${record.preTriggerSeconds},
               ${channelMapJson},
               ${triggerJson},
               ${rtValuesJson},
@@ -801,14 +710,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
 
   const deleteSnapshot = Effect.fn("Persistence.deleteSnapshot")(function* (id: PersistentId) {
     const decodedId = yield* decodeWith(PersistentId, "delete snapshot", id);
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${decodedId}`);
-          yield* pruneIncompleteComparisons(sql);
-        }),
-      )
-      .pipe(Effect.mapError((cause) => transactionError("delete snapshot transaction", cause)));
+    yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${decodedId}`);
   });
 
   const writeSnapshotSamples = Effect.fn("Persistence.writeSnapshotSamples")(function* (
@@ -857,196 +759,12 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     return Option.some(blob);
   });
 
-  const listSnapshotComparisons = Effect.fn("Persistence.listSnapshotComparisons")(function* () {
-    yield* pruneIncompleteComparisons(sql);
-    const rows = yield* runSql(
-      "list snapshot comparisons",
-      sql`
-        ${comparisonRows(sql)}
-        ORDER BY created_at DESC, id DESC
-      `,
-    );
-    const comparisons: Array<SnapshotComparison> = [];
-    const corruptIds: Array<string> = [];
-
-    for (const row of rows) {
-      const decoded = yield* decodeComparisonRow(row).pipe(
-        Effect.match({
-          onFailure: () => null,
-          onSuccess: (comparison) => comparison,
-        }),
-      );
-
-      if (decoded === null) {
-        const id = stringProperty(row, "id");
-        if (id !== null) {
-          corruptIds.push(id);
-        }
-      } else {
-        comparisons.push(decoded);
-      }
-    }
-
-    for (const id of corruptIds) {
-      yield* runSql(
-        "drop corrupt snapshot comparison",
-        sql`DELETE FROM snapshot_comparisons WHERE id = ${id}`,
-      );
-      yield* Effect.logWarning(`Corrupt snapshot comparison dropped: ${id}`);
-    }
-
-    return comparisons;
-  });
-
-  const requireComparison = Effect.fn("Persistence.requireComparison")(function* (
-    id: PersistentId,
-  ) {
-    yield* pruneIncompleteComparisons(sql);
-    const decodedId = yield* decodeWith(PersistentId, "get snapshot comparison", id);
-    const rows = yield* runSql(
-      "get snapshot comparison",
-      sql`
-        ${comparisonRows(sql)}
-        WHERE id = ${decodedId}
-      `,
-    );
-    const row = rows[0];
-
-    if (row === undefined) {
-      return yield* SnapshotComparisonNotFoundError.make({ id: decodedId });
-    }
-
-    return yield* decodeComparisonRow(row);
-  });
-
-  const createSnapshotComparison = Effect.fn("Persistence.createSnapshotComparison")(function* (
-    draft: SnapshotComparisonDraft,
-  ) {
-    const decodedDraft = yield* decodeWith(
-      SnapshotComparisonDraft,
-      "create snapshot comparison",
-      draft,
-    );
-    yield* validateSnapshotComparisonDraftShape(decodedDraft);
-    const id = decodedDraft.id ?? (yield* createId("comparison"));
-    const createdAt = decodedDraft.createdAt ?? (yield* createTimestamp());
-    const comparison = yield* decodeWith(SnapshotComparison, "create snapshot comparison record", {
-      id,
-      label: decodedDraft.label,
-      snapshotIds: decodedDraft.snapshotIds,
-      options: decodedDraft.options,
-      metadata: decodedDraft.metadata,
-      createdAt,
-      updatedAt: createdAt,
-    });
-    const optionsJson = yield* stringifyJson(
-      "encode snapshot comparison options",
-      comparison.options,
-    );
-    const metadataJson = yield* stringifyJson(
-      "encode snapshot comparison metadata",
-      comparison.metadata,
-    );
-
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          for (const snapshotId of comparison.snapshotIds) {
-            yield* requireSnapshot(snapshotId);
-          }
-
-          yield* runSql(
-            "create snapshot comparison",
-            sql`
-              INSERT INTO snapshot_comparisons (
-                id,
-                label,
-                options_json,
-                metadata_json,
-                created_at,
-                updated_at
-              ) VALUES (
-                ${comparison.id},
-                ${comparison.label},
-                ${optionsJson},
-                ${metadataJson},
-                ${comparison.createdAt},
-                ${comparison.updatedAt}
-              )
-            `,
-          );
-
-          for (const [position, snapshotId] of comparison.snapshotIds.entries()) {
-            yield* runSql(
-              "create snapshot comparison member",
-              sql`
-                INSERT INTO snapshot_comparison_snapshots (
-                  comparison_id,
-                  snapshot_id,
-                  position
-                ) VALUES (
-                  ${comparison.id},
-                  ${snapshotId},
-                  ${position}
-                )
-              `,
-            );
-          }
-        }),
-      )
-      .pipe(
-        Effect.mapError((cause) =>
-          transactionError("create snapshot comparison transaction", cause),
-        ),
-      );
-
-    return comparison;
-  });
-
-  const renameSnapshotComparison = Effect.fn("Persistence.renameSnapshotComparison")(function* (
-    id: PersistentId,
-    label: string,
-  ) {
-    const current = yield* requireComparison(id);
-    const updatedAt = yield* createTimestamp();
-    const updated = yield* decodeWith(SnapshotComparison, "rename snapshot comparison", {
-      ...current,
-      label,
-      updatedAt,
-    });
-
-    yield* runSql(
-      "rename snapshot comparison",
-      sql`
-        UPDATE snapshot_comparisons
-        SET label = ${updated.label}, updated_at = ${updated.updatedAt}
-        WHERE id = ${updated.id}
-      `,
-    );
-
-    return updated;
-  });
-
-  const deleteSnapshotComparison = Effect.fn("Persistence.deleteSnapshotComparison")(function* (
-    id: PersistentId,
-  ) {
-    const decodedId = yield* decodeWith(PersistentId, "delete snapshot comparison", id);
-    yield* runSql(
-      "delete snapshot comparison",
-      sql`DELETE FROM snapshot_comparisons WHERE id = ${decodedId}`,
-    );
-  });
-
   return {
     path,
     readSettings: readSettings(),
     writeSettings,
     patchSettings,
     resetSettings: writeSettings(DEFAULT_SETTINGS),
-    readPreferences: readPreferences(),
-    writePreferences,
-    patchPreferences,
-    resetPreferences: writePreferences(DEFAULT_PREFERENCES),
     listSavedDevices: listSavedDevices(),
     getSavedDevice,
     findSavedDeviceByIdentity,
@@ -1059,9 +777,5 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     deleteSnapshot,
     writeSnapshotSamples,
     readSnapshotSamples,
-    createSnapshotComparison,
-    listSnapshotComparisons: listSnapshotComparisons(),
-    renameSnapshotComparison,
-    deleteSnapshotComparison,
   };
 });

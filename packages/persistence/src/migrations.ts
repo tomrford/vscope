@@ -16,15 +16,6 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
     `;
 
     yield* sql`
-      CREATE TABLE IF NOT EXISTS preferences (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        data_json TEXT NOT NULL,
-        recovery_pending INTEGER NOT NULL DEFAULT 0,
-        updated_at TEXT NOT NULL
-      )
-    `;
-
-    yield* sql`
       CREATE TABLE IF NOT EXISTS saved_devices (
         id TEXT PRIMARY KEY,
         port_path TEXT,
@@ -54,8 +45,8 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
         sample_count INTEGER NOT NULL,
         sample_format TEXT NOT NULL,
         sample_rate_hz REAL,
-        divider INTEGER NOT NULL,
-        pre_trigger_samples INTEGER NOT NULL,
+        total_duration_seconds REAL NOT NULL,
+        pre_trigger_seconds REAL NOT NULL,
         channel_map_json TEXT NOT NULL,
         trigger_json TEXT NOT NULL,
         rt_values_json TEXT NOT NULL,
@@ -79,39 +70,6 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
         updated_at TEXT NOT NULL,
         FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
       )
-    `;
-
-    yield* sql`
-      CREATE TABLE IF NOT EXISTS snapshot_comparisons (
-        id TEXT PRIMARY KEY,
-        label TEXT NOT NULL,
-        options_json TEXT NOT NULL,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `;
-
-    yield* sql`
-      CREATE TABLE IF NOT EXISTS snapshot_comparison_snapshots (
-        comparison_id TEXT NOT NULL,
-        snapshot_id TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        PRIMARY KEY (comparison_id, position),
-        UNIQUE (comparison_id, snapshot_id),
-        FOREIGN KEY (comparison_id) REFERENCES snapshot_comparisons(id) ON DELETE CASCADE,
-        FOREIGN KEY (snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
-      )
-    `;
-
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS snapshot_comparisons_created_at_idx
-        ON snapshot_comparisons(created_at DESC, id DESC)
-    `;
-
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS snapshot_comparison_snapshots_snapshot_id_idx
-        ON snapshot_comparison_snapshots(snapshot_id)
     `;
   }),
 });

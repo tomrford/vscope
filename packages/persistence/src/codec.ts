@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import { Effect, Schema } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { SqlError } from "effect/unstable/sql/SqlError";
 
 import {
@@ -12,8 +11,6 @@ import {
 } from "./errors.ts";
 import {
   PersistentId,
-  SnapshotComparison,
-  SnapshotComparisonDraft,
   SnapshotDraft,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
@@ -51,8 +48,8 @@ export const SnapshotRow = Schema.Struct({
   sample_count: Schema.Number,
   sample_format: Schema.String,
   sample_rate_hz: Schema.NullOr(Schema.Number),
-  divider: Schema.Number,
-  pre_trigger_samples: Schema.Number,
+  total_duration_seconds: Schema.Number,
+  pre_trigger_seconds: Schema.Number,
   channel_map_json: Schema.String,
   trigger_json: Schema.String,
   rt_values_json: Schema.String,
@@ -66,16 +63,6 @@ export const SnapshotSampleRow = Schema.Struct({
   format: Schema.String,
   byte_len: Schema.Number,
   data: Schema.Unknown,
-  updated_at: Schema.String,
-});
-
-export const SnapshotComparisonRow = Schema.Struct({
-  id: Schema.String,
-  label: Schema.String,
-  snapshot_ids_json: Schema.String,
-  options_json: Schema.String,
-  metadata_json: Schema.String,
-  created_at: Schema.String,
   updated_at: Schema.String,
 });
 
@@ -183,7 +170,6 @@ function isPersistenceError(cause: unknown): cause is PersistenceError {
     case "PersistenceQueryError":
     case "PersistenceValidationError":
     case "SnapshotNotFoundError":
-    case "SnapshotComparisonNotFoundError":
       return true;
     default:
       return false;
@@ -193,77 +179,6 @@ function isPersistenceError(cause: unknown): cause is PersistenceError {
 export function transactionError(operation: string, cause: unknown): PersistenceError {
   return isPersistenceError(cause) ? cause : queryError(operation, cause);
 }
-
-export const decodeComparisonRow = Effect.fn("Persistence.decodeComparisonRow")(function* (
-  row: unknown,
-) {
-  const decodedRow = yield* decodeWith(
-    SnapshotComparisonRow,
-    "decode snapshot comparison row",
-    row,
-  );
-  const snapshotIds = yield* decodeJson(
-    Schema.Array(PersistentId).check(Schema.isMinLength(2)),
-    "decode snapshot comparison snapshot ids",
-    decodedRow.snapshot_ids_json,
-  );
-  const options = yield* decodeJson(
-    Schema.Record(Schema.String, Schema.Json),
-    "decode snapshot comparison options",
-    decodedRow.options_json,
-  );
-  const metadata = yield* decodeJson(
-    Schema.Record(Schema.String, Schema.Json),
-    "decode snapshot comparison metadata",
-    decodedRow.metadata_json,
-  );
-
-  return yield* decodeWith(SnapshotComparison, "decode snapshot comparison", {
-    id: decodedRow.id,
-    label: decodedRow.label,
-    snapshotIds,
-    options,
-    metadata,
-    createdAt: decodedRow.created_at,
-    updatedAt: decodedRow.updated_at,
-  });
-});
-
-export function comparisonRows(sql: SqlClient.SqlClient) {
-  return sql<Schema.Schema.Type<typeof SnapshotComparisonRow>>`
-    SELECT
-      snapshot_comparisons.*,
-      COALESCE((
-        SELECT json_group_array(snapshot_id)
-        FROM (
-          SELECT snapshot_id
-          FROM snapshot_comparison_snapshots
-          WHERE comparison_id = snapshot_comparisons.id
-          ORDER BY position ASC
-        )
-      ), '[]') AS snapshot_ids_json
-    FROM snapshot_comparisons
-  `;
-}
-
-export const pruneIncompleteComparisons = Effect.fn("Persistence.pruneIncompleteComparisons")(
-  function* (sql: SqlClient.SqlClient) {
-    yield* runSql(
-      "drop incomplete snapshot comparisons",
-      sql`
-      DELETE FROM snapshot_comparisons
-      WHERE id IN (
-        SELECT snapshot_comparisons.id
-        FROM snapshot_comparisons
-        LEFT JOIN snapshot_comparison_snapshots
-          ON snapshot_comparison_snapshots.comparison_id = snapshot_comparisons.id
-        GROUP BY snapshot_comparisons.id
-        HAVING COUNT(snapshot_comparison_snapshots.snapshot_id) < 2
-      )
-    `,
-    );
-  },
-);
 
 export function toUint8Array(
   operation: string,
@@ -331,26 +246,9 @@ export function validateSnapshotDraftShape(
     );
   }
 
-  if (draft.preTriggerSamples > draft.sampleCount) {
+  if (draft.preTriggerSeconds > draft.totalDurationSeconds) {
     return invalid(
-      `preTriggerSamples ${draft.preTriggerSamples} exceeds sampleCount ${draft.sampleCount}`,
-    );
-  }
-
-  return Effect.void;
-}
-
-export function validateSnapshotComparisonDraftShape(
-  draft: SnapshotComparisonDraft,
-): Effect.Effect<void, PersistenceValidationError> {
-  const snapshotIds = new Set(draft.snapshotIds);
-
-  if (snapshotIds.size !== draft.snapshotIds.length) {
-    return Effect.fail(
-      PersistenceValidationError.make({
-        operation: "validate snapshot comparison draft",
-        reason: "snapshotIds must be unique",
-      }),
+      `preTriggerSeconds ${draft.preTriggerSeconds} exceeds totalDurationSeconds ${draft.totalDurationSeconds}`,
     );
   }
 

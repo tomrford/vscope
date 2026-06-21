@@ -13,7 +13,6 @@ import type {
 } from "./model";
 import type { SnapshotRecord } from "@vscope/shared";
 import type { VScopeControlStatus } from "@vscope/serial";
-import type { CommandPermissions } from "./policy";
 
 export interface RuntimeCoreService {
   readonly app: Effect.Effect<RuntimeAppState>;
@@ -26,7 +25,6 @@ export interface RuntimeCoreService {
   readonly deviceStatusChanges: Stream.Stream<VScopeControlStatus | null>;
   readonly deviceConfig: Effect.Effect<DeviceConfigState | null>;
   readonly deviceConfigChanges: Stream.Stream<DeviceConfigState | null>;
-  readonly permissions: Effect.Effect<CommandPermissions>;
   readonly readModel: Effect.Effect<RuntimeReadModel>;
   readonly dispatch: (command: CoreCommand) => Effect.Effect<void, RuntimeCoreError>;
   readonly query: (query: CoreQuery) => Effect.Effect<CoreQueryResult, RuntimeCoreError>;

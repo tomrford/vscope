@@ -56,7 +56,6 @@ typedef enum {
     VSCOPE_MSG_SET_TIMING = 0x03,
     VSCOPE_MSG_GET_STATUS = 0x04,
     VSCOPE_MSG_SET_STATE = 0x05,
-    VSCOPE_MSG_TRIGGER = 0x06,
     VSCOPE_MSG_GET_FRAME = 0x07,
     VSCOPE_MSG_GET_SNAPSHOT_HEADER = 0x08,
     VSCOPE_MSG_GET_SNAPSHOT_DATA = 0x09,
@@ -399,19 +398,10 @@ static void vscope_handle_set_state(const uint8_t* payload, uint16_t payload_len
     }
 
     vscope_request = (VscopeState)requested;
-    vscope_send_status(VSCOPE_MSG_SET_STATE);
-}
-
-// TRIGGER
-
-static void vscope_handle_trigger(void) {
-    if (vscope_state != VSCOPE_RUNNING) {
-        vscope_send_error(VSCOPE_ERR_NOT_READY);
-        return;
+    if (vscope_request == VSCOPE_RUNNING || vscope_request == VSCOPE_ACQUIRING) {
+        snapshot_valid = false;
     }
-
-    vscopeTrigger();
-    vscope_send_status(VSCOPE_MSG_TRIGGER);
+    vscope_send_status(VSCOPE_MSG_SET_STATE);
 }
 
 // FRAME
@@ -565,6 +555,11 @@ static void vscope_handle_set_channel_map(const uint8_t* payload, uint16_t paylo
     uint8_t catalog_idx = payload[1];
 
     if (channel_idx >= VSCOPE_NUM_CHANNELS || catalog_idx >= var_count) {
+        vscope_send_error(VSCOPE_ERR_BAD_PARAM);
+        return;
+    }
+
+    if (vscope_state != VSCOPE_HALTED) {
         vscope_send_error(VSCOPE_ERR_BAD_PARAM);
         return;
     }
@@ -726,13 +721,6 @@ static void vscope_handle_frame(uint8_t type, const uint8_t* payload, uint16_t p
             break;
         case VSCOPE_MSG_SET_STATE:
             vscope_handle_set_state(payload, payload_len);
-            break;
-        case VSCOPE_MSG_TRIGGER:
-            if (payload_len != 0U) {
-                vscope_send_error(VSCOPE_ERR_BAD_LEN);
-            } else {
-                vscope_handle_trigger();
-            }
             break;
         case VSCOPE_MSG_GET_FRAME:
             if (payload_len != 0U) {
@@ -960,6 +948,19 @@ static void vscope_check_trigger(void) {
     last_delta = current_delta;
 }
 
+static void vscope_begin_acquisition(uint16_t* run_index) {
+    vscope_capture_snapshot_meta();
+    if (vscope_acq_time == 0U) {
+        vscope_state = VSCOPE_HALTED;
+        vscope_request = VSCOPE_HALTED;
+        vscope_first_element = vscope_index;
+        snapshot_valid = true;
+    } else {
+        vscope_state = VSCOPE_ACQUIRING;
+        *run_index = 0U;
+    }
+}
+
 void vscopeAcquire(void) {
     static uint32_t divider_ticks = 0U;
     static uint16_t run_index = 0U;
@@ -967,14 +968,6 @@ void vscopeAcquire(void) {
     if (vscope_state == VSCOPE_MISCONFIGURED) {
         return;
     }
-
-    divider_ticks += 1U;
-    if (divider_ticks < vscope_divider) {
-        return;
-    }
-    divider_ticks = 0U;
-
-    vscope_check_trigger();
 
     switch (vscope_state) {
         case VSCOPE_HALTED:
@@ -987,20 +980,36 @@ void vscopeAcquire(void) {
         case VSCOPE_RUNNING:
             if (vscope_request == VSCOPE_HALTED) {
                 vscope_state = VSCOPE_HALTED;
+            } else if (vscope_request == VSCOPE_ACQUIRING) {
+                vscope_begin_acquisition(&run_index);
             }
+            break;
+        default:
+            break;
+    }
+
+    if (vscope_state != VSCOPE_RUNNING && vscope_state != VSCOPE_ACQUIRING) {
+        return;
+    }
+
+    divider_ticks += 1U;
+    if (divider_ticks < vscope_divider) {
+        return;
+    }
+    divider_ticks = 0U;
+
+    switch (vscope_state) {
+        case VSCOPE_RUNNING:
+            vscope_check_trigger();
             if (vscope_request == VSCOPE_ACQUIRING) {
-                vscope_capture_snapshot_meta();
-                if (vscope_acq_time == 0U) {
-                    vscope_state = VSCOPE_HALTED;
-                    vscope_request = VSCOPE_HALTED;
-                    vscope_first_element = vscope_index;
-                    snapshot_valid = true;
-                } else {
-                    vscope_state = VSCOPE_ACQUIRING;
-                    run_index = 1U;
+                vscope_begin_acquisition(&run_index);
+                if (vscope_state == VSCOPE_ACQUIRING) {
+                    vscope_save_frame();
+                    run_index += 1U;
                 }
+            } else {
+                vscope_save_frame();
             }
-            vscope_save_frame();
             break;
         case VSCOPE_ACQUIRING:
             if (run_index == vscope_acq_time) {
@@ -1009,8 +1018,8 @@ void vscopeAcquire(void) {
                 vscope_first_element = vscope_index;
                 snapshot_valid = true;
             } else {
-                run_index += 1U;
                 vscope_save_frame();
+                run_index += 1U;
             }
             break;
         default:

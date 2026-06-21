@@ -8,7 +8,6 @@ import { Effect, Option } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
-  DEFAULT_PREFERENCES,
   DEFAULT_SERIAL_CONFIG,
   DEFAULT_SETTINGS,
   Persistence,
@@ -16,7 +15,6 @@ import {
   SavedDeviceIdentity,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
-  SnapshotComparisonDraft,
   SnapshotDraft,
   SnapshotSamplesWrite,
   SnapshotTrigger,
@@ -52,8 +50,8 @@ function snapshotDraft(label: string, sampleCount: number): SnapshotDraft {
     channelCount: 2,
     sampleCount,
     sampleRateHz: 1_000,
-    divider: 1,
-    preTriggerSamples: 1,
+    totalDurationSeconds: sampleCount / 1_000,
+    preTriggerSeconds: 0.001,
     channelMap: [0, 1],
     trigger: SnapshotTrigger.make({
       threshold: 0.5,
@@ -123,11 +121,8 @@ describe("@vscope/persistence", () => {
 
         expect(names).toEqual([
           "persistence_migrations",
-          "preferences",
           "saved_devices",
           "settings",
-          "snapshot_comparison_snapshots",
-          "snapshot_comparisons",
           "snapshot_samples",
           "snapshots",
         ]);
@@ -135,7 +130,7 @@ describe("@vscope/persistence", () => {
     ),
   );
 
-  it.effect("settings and preferences round-trip, recover, and reset", () =>
+  it.effect("settings round-trip, recovers, and resets", () =>
     withTempPath((path) =>
       Effect.gen(function* () {
         yield* runWithPersistence(
@@ -150,13 +145,6 @@ describe("@vscope/persistence", () => {
 
             const settings = yield* persistence.patchSettings({ theme: "dark" });
             expect(settings.settings.theme).toBe("dark");
-
-            const preferences = yield* persistence.patchPreferences({
-              recentPortPaths: ["/dev/tty.usbserial"],
-              showAdvancedControls: true,
-            });
-            expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial"]);
-            expect(preferences.preferences.showAdvancedControls).toBe(true);
           }),
         );
 
@@ -165,7 +153,6 @@ describe("@vscope/persistence", () => {
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             yield* sql`UPDATE settings SET data_json = ${"{"} WHERE id = 1`;
-            yield* sql`UPDATE preferences SET data_json = ${"{"} WHERE id = 1`;
           }),
         );
 
@@ -174,33 +161,22 @@ describe("@vscope/persistence", () => {
           Effect.gen(function* () {
             const persistence = yield* Persistence;
             const settings = yield* persistence.readSettings;
-            const preferences = yield* persistence.readPreferences;
 
             expect(settings.settings).toEqual(DEFAULT_SETTINGS);
             expect(settings.recovery.pending).toBe(true);
             expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
-            expect(preferences.preferences).toEqual(DEFAULT_PREFERENCES);
-            expect(preferences.recovery.pending).toBe(true);
-            expect(preferences.recovery.message).toBe(
-              "Corrupt preferences were reset to defaults.",
-            );
 
             const resetSettings = yield* persistence.resetSettings;
             expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
             expect(resetSettings.recovery.pending).toBe(false);
             expect(resetSettings.recovery.message).toBe(null);
-
-            const resetPreferences = yield* persistence.resetPreferences;
-            expect(resetPreferences.preferences).toEqual(DEFAULT_PREFERENCES);
-            expect(resetPreferences.recovery.pending).toBe(false);
-            expect(resetPreferences.recovery.message).toBe(null);
           }),
         );
       }),
     ),
   );
 
-  it.effect("settings and preferences patches validate instead of defecting", () =>
+  it.effect("settings patches validate instead of defecting", () =>
     withTempPath((path) =>
       Effect.gen(function* () {
         const settingsError = yield* Effect.flip(
@@ -213,24 +189,11 @@ describe("@vscope/persistence", () => {
           ),
         );
         expect(settingsError).toMatchObject({ _tag: "PersistenceValidationError" });
-
-        const preferencesError = yield* Effect.flip(
-          runWithPersistence(
-            path,
-            Effect.gen(function* () {
-              const persistence = yield* Persistence;
-              yield* persistence.patchPreferences({
-                favoriteSnapshotIds: ["" as never],
-              });
-            }),
-          ),
-        );
-        expect(preferencesError).toMatchObject({ _tag: "PersistenceValidationError" });
       }),
     ),
   );
 
-  it.effect("concurrent settings and preferences patches preserve independent fields", () =>
+  it.effect("concurrent settings patches preserve independent fields", () =>
     withTempPath((path) =>
       runWithPersistence(
         path,
@@ -254,18 +217,6 @@ describe("@vscope/persistence", () => {
           expect(settings.settings.defaultSerialConfig.baudRate).toBe(57_600);
           expect(settings.settings.defaultSerialConfig.dtr).toBe(true);
           expect(settings.settings.defaultSerialConfig.rts).toBe(true);
-
-          yield* Effect.all(
-            [
-              persistence.patchPreferences({ recentPortPaths: ["/dev/tty.usbserial-a"] }),
-              persistence.patchPreferences({ showAdvancedControls: true }),
-            ],
-            { concurrency: 2 },
-          );
-
-          const preferences = yield* persistence.readPreferences;
-          expect(preferences.preferences.recentPortPaths).toEqual(["/dev/tty.usbserial-a"]);
-          expect(preferences.preferences.showAdvancedControls).toBe(true);
         }),
       ),
     ),
@@ -407,7 +358,7 @@ describe("@vscope/persistence", () => {
               const persistence = yield* Persistence;
               const invalid = SnapshotDraft.make({
                 ...snapshotDraft("Impossible trace", 1),
-                preTriggerSamples: 99,
+                preTriggerSeconds: 99,
                 trigger: SnapshotTrigger.make({
                   threshold: 0.5,
                   channel: 99,
@@ -453,76 +404,6 @@ describe("@vscope/persistence", () => {
     ),
   );
 
-  it.effect("snapshot comparisons round-trip as typed records", () =>
-    withTempPath((path) =>
-      runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          const first = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
-          const second = yield* persistence.createSnapshot(snapshotDraft("Trace B", 1));
-          const comparison = yield* persistence.createSnapshotComparison(
-            SnapshotComparisonDraft.make({
-              label: "A vs B",
-              snapshotIds: [first.id, second.id],
-              options: {
-                align: "trigger",
-              },
-              metadata: {},
-            }),
-          );
-
-          expect(comparison.id.startsWith("comparison:")).toBe(true);
-          expect(yield* persistence.listSnapshotComparisons).toEqual([comparison]);
-
-          const renamed = yield* persistence.renameSnapshotComparison(comparison.id, "Renamed");
-          expect(renamed.label).toBe("Renamed");
-
-          yield* persistence.deleteSnapshot(first.id);
-          expect(yield* persistence.listSnapshotComparisons).toEqual([]);
-
-          const third = yield* persistence.createSnapshot(snapshotDraft("Trace C", 1));
-          const replacement = yield* persistence.createSnapshotComparison(
-            SnapshotComparisonDraft.make({
-              label: "B vs C",
-              snapshotIds: [second.id, third.id],
-              options: {},
-              metadata: {},
-            }),
-          );
-          yield* persistence.deleteSnapshotComparison(replacement.id);
-          expect(yield* persistence.listSnapshotComparisons).toEqual([]);
-        }),
-      ),
-    ),
-  );
-
-  it.effect("snapshot comparisons reject duplicate member ids before SQLite insert", () =>
-    withTempPath((path) =>
-      Effect.gen(function* () {
-        const error = yield* Effect.flip(
-          runWithPersistence(
-            path,
-            Effect.gen(function* () {
-              const persistence = yield* Persistence;
-              const snapshot = yield* persistence.createSnapshot(snapshotDraft("Trace A", 1));
-
-              yield* persistence.createSnapshotComparison(
-                SnapshotComparisonDraft.make({
-                  label: "Duplicate trace",
-                  snapshotIds: [snapshot.id, snapshot.id],
-                  options: {},
-                  metadata: {},
-                }),
-              );
-            }),
-          ),
-        );
-        expect(error).toMatchObject({ _tag: "PersistenceValidationError" });
-      }),
-    ),
-  );
-
   it.effect("corrupt snapshot metadata is dropped without wiping valid captures", () =>
     withTempPath((path) =>
       Effect.gen(function* () {
@@ -547,8 +428,8 @@ describe("@vscope/persistence", () => {
               sample_count,
               sample_format,
               sample_rate_hz,
-              divider,
-              pre_trigger_samples,
+              total_duration_seconds,
+              pre_trigger_seconds,
               channel_map_json,
               trigger_json,
               rt_values_json,
@@ -563,7 +444,7 @@ describe("@vscope/persistence", () => {
               ${1},
               ${SNAPSHOT_SAMPLE_FORMAT},
               ${1_000},
-              ${1},
+              ${0.001},
               ${0},
               ${"["},
               ${"{}"},

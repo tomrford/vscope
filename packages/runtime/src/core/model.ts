@@ -1,6 +1,4 @@
 import type {
-  Preferences,
-  PreferencesPatch,
   PersistentId,
   RecoveryState,
   SavedDevice,
@@ -18,11 +16,7 @@ import type {
   VScopeTrigger,
 } from "@vscope/serial";
 
-import type { CommandPermissions } from "./policy";
-
 export type RuntimeStatus = "ready" | "degraded";
-
-export type CoreDeviceConnectionStatus = "connected" | "disconnected" | "lost";
 
 export interface RuntimeWarning {
   readonly id: string;
@@ -42,8 +36,6 @@ export interface RuntimeAppState {
   readonly status: RuntimeStatus;
   readonly settings: Settings;
   readonly settingsRecovery: RecoveryState;
-  readonly preferences: Preferences;
-  readonly preferencesRecovery: RecoveryState;
   readonly savedDevices: ReadonlyArray<SavedDevice>;
   readonly warnings: ReadonlyArray<RuntimeWarning>;
   readonly logs: ReadonlyArray<RuntimeLogEntry>;
@@ -52,7 +44,7 @@ export interface RuntimeAppState {
 export interface ActiveDeviceState {
   readonly path: string;
   readonly deviceName: string;
-  readonly connectionStatus: CoreDeviceConnectionStatus;
+  readonly connected: boolean;
   readonly info: VScopeDeviceInfo | null;
   readonly variables: ReadonlyArray<string>;
   readonly rtLabels: ReadonlyArray<string>;
@@ -72,7 +64,6 @@ export interface RuntimeReadModel {
   readonly activeDevice: ActiveDeviceState | null;
   readonly deviceStatus: VScopeControlStatus | null;
   readonly deviceConfig: DeviceConfigState | null;
-  readonly permissions: CommandPermissions;
 }
 
 export interface SnapshotCaptureCommand {
@@ -116,10 +107,6 @@ export type CoreCommand =
   | {
       readonly type: "settings/patch";
       readonly patch: SettingsPatch;
-    }
-  | {
-      readonly type: "preferences/patch";
-      readonly patch: PreferencesPatch;
     }
   | {
       readonly type: "devices/connect";

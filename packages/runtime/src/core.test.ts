@@ -1,12 +1,9 @@
 import { describe, expect, layer } from "@effect/vitest";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
 import {
-  DEFAULT_PREFERENCES,
   DEFAULT_SETTINGS,
   PersistentId,
   PollingSettings,
-  Preferences,
-  PreferencesState,
   SNAPSHOT_SAMPLE_FORMAT,
   Settings,
   SettingsState,
@@ -82,8 +79,8 @@ const fakeMetadata: VScopeStaticMetadata = {
 };
 
 const fakeTiming: VScopeTiming = {
-  divider: 2,
-  preTrig: 10,
+  totalDurationSeconds: 0.1,
+  preTriggerSeconds: 0.001,
 };
 
 const fakeTrigger: VScopeTrigger = {
@@ -111,8 +108,6 @@ describe("@vscope/runtime core", () => {
         const ports = yield* core.query({ type: "ports/list" });
 
         expect(model.app.settings).toEqual(testSettings);
-        expect(model.app.preferences).toEqual(DEFAULT_PREFERENCES);
-        expect(model.permissions.mode).toBe("empty");
         expect(ports).toEqual({
           type: "ports/list",
           ports: [fakePort],
@@ -138,7 +133,6 @@ describe("@vscope/runtime core", () => {
         );
 
         expect(connected.activeDevice?.path).toBe(fakePort.path);
-        expect(connected.permissions.mode).toBe("halted");
         expect(duplicate._tag).toBe("Failure");
       }),
     );
@@ -207,11 +201,9 @@ describe("@vscope/runtime core", () => {
 
         expect(running?.state).toBe(VScopeState.Running);
         expect(running?.snapshotValid).toBe(false);
-        expect(triggered?.requestedState).toBe(VScopeState.Acquiring);
-        expect(triggered?.requestPending).toBe(true);
+        expect(triggered?.state).toBe(VScopeState.Acquiring);
         expect(captured?.state).toBe(VScopeState.Halted);
         expect(captured?.snapshotValid).toBe(true);
-        expect(captured?.requestPending).toBe(false);
       }),
     );
   });
@@ -264,7 +256,7 @@ describe("@vscope/runtime core", () => {
           const heldFrame = yield* core.lastFrame;
 
           expect(initialFrame?.[0]).toBe(1);
-          expect(activeDevice?.connectionStatus).toBe("connected");
+          expect(activeDevice?.connected).toBe(true);
           expect(heldFrame?.[0]).toBe(1);
           expect(app.warnings).toEqual([]);
         }),
@@ -309,6 +301,39 @@ describe("@vscope/runtime core", () => {
         expect(samples.samples?.data.byteLength).toBe(
           fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
         );
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
+    it.effect("rejects saving a stale snapshot after triggering a new acquisition", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({
+          type: "devices/connect",
+          path: fakePort.path,
+        });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        yield* advanceTestClock(80);
+        expect((yield* core.deviceStatus)?.snapshotValid).toBe(true);
+
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/trigger" });
+        const triggered = yield* core.deviceStatus;
+        const error = yield* core
+          .dispatch({
+            type: "snapshots/capture",
+            label: "Stale trace",
+          })
+          .pipe(Effect.flip);
+
+        expect(triggered?.snapshotValid).toBe(false);
+        expect(error._tag).toBe("RuntimeCorePolicyError");
+        if (error._tag !== "RuntimeCorePolicyError") {
+          throw new Error(`Expected RuntimeCorePolicyError, got ${error._tag}`);
+        }
+        expect(error.reason).toContain("ready snapshot");
       }),
     );
   });
@@ -374,7 +399,6 @@ function advanceTestClock(durationMillis: number) {
 
 function fakePersistenceLayer() {
   let settings = testSettings;
-  let preferences = DEFAULT_PREFERENCES;
   const snapshots: Array<SnapshotRecord> = [];
   const snapshotSamples = new Map<PersistentId, SnapshotSampleBlob>();
   let snapshotCounter = 0;
@@ -417,40 +441,6 @@ function fakePersistenceLayer() {
         recovery: noRecovery,
       });
     }),
-    readPreferences: Effect.sync(() =>
-      PreferencesState.make({
-        preferences,
-        recovery: noRecovery,
-      }),
-    ),
-    writePreferences: (nextPreferences) =>
-      Effect.sync(() => {
-        preferences = nextPreferences;
-        return PreferencesState.make({
-          preferences,
-          recovery: noRecovery,
-        });
-      }),
-    patchPreferences: (patch) =>
-      Effect.sync(() => {
-        preferences = Preferences.make({
-          recentPortPaths: patch.recentPortPaths ?? preferences.recentPortPaths,
-          favoriteSnapshotIds: patch.favoriteSnapshotIds ?? preferences.favoriteSnapshotIds,
-          favoriteDeviceIds: patch.favoriteDeviceIds ?? preferences.favoriteDeviceIds,
-          showAdvancedControls: patch.showAdvancedControls ?? preferences.showAdvancedControls,
-        });
-        return PreferencesState.make({
-          preferences,
-          recovery: noRecovery,
-        });
-      }),
-    resetPreferences: Effect.sync(() => {
-      preferences = DEFAULT_PREFERENCES;
-      return PreferencesState.make({
-        preferences,
-        recovery: noRecovery,
-      });
-    }),
     listSavedDevices: Effect.succeed([]),
     getSavedDevice: () => Effect.succeed(Option.none()),
     findSavedDeviceByIdentity: () => Effect.succeed(Option.none()),
@@ -472,8 +462,8 @@ function fakePersistenceLayer() {
             stored: samples !== undefined,
           }),
           sampleRateHz: draft.sampleRateHz,
-          divider: draft.divider,
-          preTriggerSamples: draft.preTriggerSamples,
+          totalDurationSeconds: draft.totalDurationSeconds,
+          preTriggerSeconds: draft.preTriggerSeconds,
           channelMap: draft.channelMap,
           trigger: draft.trigger,
           rtValues: draft.rtValues,
@@ -515,12 +505,6 @@ function fakePersistenceLayer() {
         const samples = snapshotSamples.get(id);
         return samples ? Option.some(samples) : Option.none();
       }),
-    createSnapshotComparison: () =>
-      Effect.die("fake persistence createSnapshotComparison is not implemented"),
-    listSnapshotComparisons: Effect.succeed([]),
-    renameSnapshotComparison: () =>
-      Effect.die("fake persistence renameSnapshotComparison is not implemented"),
-    deleteSnapshotComparison: () => Effect.void,
   };
 
   return Layer.succeed(Persistence, service);
@@ -731,15 +715,6 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
         return status();
       }),
     getState: Effect.sync(() => state),
-    setState: (nextState) =>
-      Effect.sync(() => {
-        requestedState = nextState;
-        state = nextState;
-        if (state === VScopeState.Running) {
-          snapshotValid = false;
-        }
-        return status();
-      }),
     start: () =>
       Effect.sync(() => {
         requestedState = VScopeState.Running;
@@ -762,6 +737,8 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
         });
       }
       requestedState = VScopeState.Acquiring;
+      state = VScopeState.Acquiring;
+      snapshotValid = false;
       acquisitionPollsRemaining = 2;
       return status();
     }),
@@ -783,8 +760,9 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
       ),
     getSnapshotHeader: Effect.succeed({
       channelMap: fakeMetadata.channelMap,
-      divider: fakeTiming.divider,
-      preTrig: fakeTiming.preTrig,
+      sampleRateHz: 10_000,
+      totalDurationSeconds: 0.1,
+      preTriggerSeconds: 0.001,
       trigger: fakeTrigger,
       rtValues: [1, 2],
       channelCount: fakeInfo.channelCount,

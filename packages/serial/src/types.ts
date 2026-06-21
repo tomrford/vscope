@@ -19,8 +19,8 @@ export interface VScopeDeviceInfo {
 }
 
 export interface VScopeTiming {
-  readonly divider: number;
-  readonly preTrig: number;
+  readonly totalDurationSeconds: number;
+  readonly preTriggerSeconds: number;
 }
 
 export interface VScopeTrigger {
@@ -40,8 +40,9 @@ export interface VScopeControlStatus {
 
 export interface VScopeSnapshotHeader {
   readonly channelMap: ReadonlyArray<number>;
-  readonly divider: number;
-  readonly preTrig: number;
+  readonly sampleRateHz: number;
+  readonly totalDurationSeconds: number;
+  readonly preTriggerSeconds: number;
   readonly trigger: VScopeTrigger;
   readonly rtValues: ReadonlyArray<number>;
   readonly channelCount: number;
@@ -86,9 +87,6 @@ export interface VScopeDevice {
     options?: VScopeRequestOptions,
   ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getState: Effect.Effect<VScopeStateValue, VScopeDeviceError>;
-  readonly setState: (
-    state: VScopeStateValue,
-  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly start: (
     options?: StateWaitOptions,
   ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;

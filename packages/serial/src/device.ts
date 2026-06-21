@@ -398,7 +398,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
   const { transport, client, info, littleEndian, metadataRef } = parts;
   const path = transport.path;
 
-  const getTimingEffect = getTiming(path, client, littleEndian);
+  const getTimingEffect = getTiming(path, client, info, littleEndian);
   const getStatusEffect = getStatus(path, client);
   const getStateEffect = getStatusEffect.pipe(Effect.map((status) => status.state));
   const getSnapshotHeaderEffect = getSnapshotHeader(path, client, info, littleEndian);
@@ -491,17 +491,13 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     setTiming: (timing) => setTiming(path, client, info, littleEndian, timing),
     getStatus: (options) => getStatus(path, client, options),
     getState: getStateEffect,
-    setState,
     start: (options) =>
       setState(VScopeState.Running).pipe(
         Effect.andThen(waitForState(VScopeState.Running, options)),
       ),
     stop: (options) =>
       setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
-    trigger: client.request(VScopeMessageType.Trigger, VScopeMessageType.Trigger).pipe(
-      Effect.map((payload) => decodeStatus(path, VScopeMessageType.Trigger, payload)),
-      catchDecode(path, VScopeMessageType.Trigger),
-    ),
+    trigger: setState(VScopeState.Acquiring).pipe(Effect.map(markAcquisitionRequested)),
     getFrame: (options) => getFrame(path, client, info, littleEndian, options),
     getSnapshotHeader: getSnapshotHeaderEffect,
     snapshotBytes,
@@ -567,16 +563,14 @@ const getInfo = (
 const getTiming = (
   path: string,
   client: VScopeClient,
+  info: VScopeDeviceInfo,
   littleEndian: boolean,
 ): Effect.Effect<VScopeTiming, VScopeDeviceError> =>
   client.request(VScopeMessageType.GetTiming, VScopeMessageType.GetTiming).pipe(
     Effect.map((payload) => {
       expectLength(path, VScopeMessageType.GetTiming, payload, 8);
       const view = dataView(payload);
-      return {
-        divider: readU32(view, 0, littleEndian),
-        preTrig: readU32(view, 4, littleEndian),
-      };
+      return decodeTiming(info, readU32(view, 0, littleEndian), readU32(view, 4, littleEndian));
     }),
     catchDecode(path, VScopeMessageType.GetTiming),
   );
@@ -591,9 +585,10 @@ const setTiming = (
   validateTiming(path, info, timing).pipe(
     Effect.andThen(
       Effect.sync(() => {
+        const firmwareTiming = encodeTiming(info, timing);
         const payload = new Uint8Array(8);
-        writeU32(payload, 0, timing.divider, littleEndian);
-        writeU32(payload, 4, timing.preTrig, littleEndian);
+        writeU32(payload, 0, firmwareTiming.divider, littleEndian);
+        writeU32(payload, 4, firmwareTiming.preTrig, littleEndian);
         return payload;
       }),
     ),
@@ -603,10 +598,7 @@ const setTiming = (
     Effect.map((payload) => {
       expectLength(path, VScopeMessageType.SetTiming, payload, 8);
       const view = dataView(payload);
-      return {
-        divider: readU32(view, 0, littleEndian),
-        preTrig: readU32(view, 4, littleEndian),
-      };
+      return decodeTiming(info, readU32(view, 0, littleEndian), readU32(view, 4, littleEndian));
     }),
     catchDecode(path, VScopeMessageType.SetTiming),
   );
@@ -647,10 +639,14 @@ const getSnapshotHeader = (
       expectLength(path, VScopeMessageType.GetSnapshotHeader, payload, expectedLength);
       const view = dataView(payload);
       const offset = info.channelCount;
+      const divider = readU32(view, offset, littleEndian);
+      const preTrig = readU32(view, offset + 4, littleEndian);
+      const timing = decodeTiming(info, divider, preTrig);
       return {
         channelMap: Array.from(payload.subarray(0, info.channelCount)),
-        divider: readU32(view, offset, littleEndian),
-        preTrig: readU32(view, offset + 4, littleEndian),
+        sampleRateHz: baseSampleRateHz(info) / divider,
+        totalDurationSeconds: timing.totalDurationSeconds,
+        preTriggerSeconds: timing.preTriggerSeconds,
         trigger: {
           threshold: readF32(view, offset + 8, littleEndian),
           channel: payload[offset + 12],
@@ -921,6 +917,15 @@ const decodeStatus = (
   };
 };
 
+const markAcquisitionRequested = (status: VScopeControlStatus): VScopeControlStatus => ({
+  ...status,
+  state: VScopeState.Acquiring,
+  requestedState: VScopeState.Acquiring,
+  snapshotValid: false,
+  requestPending: false,
+  flags: status.triggerEnabled ? VScopeStatusFlag.TriggerEnabled : 0,
+});
+
 const decodeSetChannelMap = (
   path: string,
   payload: Uint8Array,
@@ -1049,18 +1054,72 @@ const validateTiming = (
   info: VScopeDeviceInfo,
   timing: VScopeTiming,
 ): Effect.Effect<void, VScopeInvalidArgumentError> => {
-  if (!Number.isInteger(timing.divider) || timing.divider <= 0 || timing.divider > UINT32_MAX) {
-    return invalid(path, "setTiming", "divider must be a positive uint32");
+  const sampleRateHz = baseSampleRateHz(info);
+  if (!Number.isFinite(timing.totalDurationSeconds) || timing.totalDurationSeconds <= 0) {
+    return invalid(path, "setTiming", "totalDurationSeconds must be a positive finite number");
   }
+
+  const minimumDurationSeconds = info.bufferSize / sampleRateHz;
+  const maximumDurationSeconds = (info.bufferSize * UINT32_MAX) / sampleRateHz;
   if (
-    !Number.isInteger(timing.preTrig) ||
-    timing.preTrig < 0 ||
-    timing.preTrig > info.bufferSize ||
-    timing.preTrig > UINT32_MAX
+    timing.totalDurationSeconds < minimumDurationSeconds ||
+    timing.totalDurationSeconds > maximumDurationSeconds
   ) {
-    return invalid(path, "setTiming", `preTrig must be between 0 and ${info.bufferSize}`);
+    return invalid(
+      path,
+      "setTiming",
+      `totalDurationSeconds must be between ${minimumDurationSeconds} and ${maximumDurationSeconds}`,
+    );
   }
+
+  const firmwareTiming = encodeTiming(info, timing);
+  if (firmwareTiming.divider <= 0 || firmwareTiming.divider > UINT32_MAX) {
+    return invalid(
+      path,
+      "setTiming",
+      "totalDurationSeconds maps outside the firmware divider range",
+    );
+  }
+
+  const maximumPreTriggerSeconds = (info.bufferSize * firmwareTiming.divider) / sampleRateHz;
+  if (!Number.isFinite(timing.preTriggerSeconds) || timing.preTriggerSeconds < 0) {
+    return invalid(path, "setTiming", "preTriggerSeconds must be a non-negative finite number");
+  }
+  if (timing.preTriggerSeconds > maximumPreTriggerSeconds) {
+    return invalid(
+      path,
+      "setTiming",
+      `preTriggerSeconds must be between 0 and ${maximumPreTriggerSeconds}`,
+    );
+  }
+  if (firmwareTiming.preTrig > info.bufferSize || firmwareTiming.preTrig > UINT32_MAX) {
+    return invalid(path, "setTiming", `preTriggerSeconds maps above ${info.bufferSize} samples`);
+  }
+
   return Effect.void;
+};
+
+const baseSampleRateHz = (info: VScopeDeviceInfo): number => info.isrKHz * 1000;
+
+const decodeTiming = (info: VScopeDeviceInfo, divider: number, preTrig: number): VScopeTiming => {
+  const sampleRateHz = baseSampleRateHz(info);
+  return {
+    totalDurationSeconds: (info.bufferSize * divider) / sampleRateHz,
+    preTriggerSeconds: (preTrig * divider) / sampleRateHz,
+  };
+};
+
+const encodeTiming = (
+  info: VScopeDeviceInfo,
+  timing: VScopeTiming,
+): { readonly divider: number; readonly preTrig: number } => {
+  const sampleRateHz = baseSampleRateHz(info);
+  const totalSamples = Math.round(timing.totalDurationSeconds * sampleRateHz);
+  const divider = Math.round(totalSamples / info.bufferSize);
+  return {
+    divider,
+    preTrig: Math.round((timing.preTriggerSeconds * sampleRateHz) / divider),
+  };
 };
 
 const validateState = (

@@ -1,8 +1,8 @@
 import { describe, expect, layer } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
-import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
-import { DEFAULT_PREFERENCES, DEFAULT_SETTINGS, RuntimeRpcs, noRecovery } from "@vscope/shared";
+import type { SerialPortInfo, VScopeTiming, VScopeTrigger } from "@vscope/serial";
+import { DEFAULT_SETTINGS, RuntimeRpcs, noRecovery } from "@vscope/shared";
 import { Effect, Layer, Stream } from "effect";
 import {
   Headers,
@@ -17,11 +17,11 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import { makeRuntimeConfig } from "./config";
 import type {
   ActiveDeviceState,
+  CoreCommand,
   CoreQueryResult,
   DeviceConfigState,
   RuntimeAppState,
 } from "./core/model";
-import type { CommandPermissions } from "./core/policy";
 import { RuntimeCore } from "./core/service";
 import type { RuntimeCoreService } from "./core/service";
 import { makeRuntimeHttpLayer } from "./server";
@@ -89,26 +89,266 @@ describe("@vscope/runtime server", () => {
           [1, 2.5],
         ]);
         expect(JSON.stringify(tools)).toContain("vscope_write_config");
+        expect(JSON.stringify(tools)).toContain("vscope_read_rt_buffers");
+        expect(JSON.stringify(tools)).toContain("vscope_write_rt_buffers");
+        expect(JSON.stringify(tools)).toContain("vscope_read_channel_catalog");
+        expect(JSON.stringify(tools)).toContain("vscope_read_channel_map");
+        expect(JSON.stringify(tools)).toContain("vscope_write_channel_map");
+        expect(JSON.stringify(tools)).not.toContain("vscope_set_rt_value");
+        expect(JSON.stringify(tools)).toContain("vscope_save_snapshot");
+        expect(JSON.stringify(tools)).not.toContain("vscope_capture_snapshot");
+      }),
+    );
+  });
+
+  layer(testServerLayer(), { excludeTestServices: true })((it) => {
+    it.effect("applies MCP config patches through core commands", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        yield* callMcpTool(sessionId, 2, "vscope_write_config", {
+          timing: {
+            totalDurationSeconds: 0.1,
+          },
+        });
+
+        expect(commands).toEqual([
+          {
+            type: "devices/setTiming",
+            timing: {
+              totalDurationSeconds: 0.1,
+              preTriggerSeconds: 0.00002,
+            },
+          },
+        ]);
+      }),
+    );
+
+    it.effect("rejects no-op MCP config patches before dispatch", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const result = yield* callMcpTool(sessionId, 2, "vscope_write_config", {});
+
+        expect(JSON.stringify(result)).toContain("At least one of timing or trigger");
+        expect(commands).toEqual([]);
+      }),
+    );
+
+    it.effect("reads and writes MCP RT buffers by index", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const readResult = yield* callMcpTool(sessionId, 2, "vscope_read_rt_buffers", {});
+        yield* callMcpTool(sessionId, 3, "vscope_write_rt_buffers", {
+          values: {
+            "1": 3.5,
+          },
+        });
+
+        expect(JSON.stringify(readResult)).toContain('"0"');
+        expect(JSON.stringify(readResult)).toContain("gain");
+        expect(JSON.stringify(readResult)).toContain("1.5");
+        expect(commands).toEqual([
+          {
+            type: "devices/setRtValue",
+            index: 1,
+            value: 3.5,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("rejects empty and invalid MCP RT buffer writes before dispatch", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const emptyResult = yield* callMcpTool(sessionId, 2, "vscope_write_rt_buffers", {
+          values: {},
+        });
+        const invalidResult = yield* callMcpTool(sessionId, 3, "vscope_write_rt_buffers", {
+          values: {
+            gain: 3.5,
+          },
+        });
+
+        expect(JSON.stringify(emptyResult)).toContain("values must contain at least one");
+        expect(JSON.stringify(invalidResult)).toContain("RT buffer index must be");
+        expect(commands).toEqual([]);
+      }),
+    );
+
+    it.effect("reads channel catalog and map, then writes MCP channel map by index", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const catalogResult = yield* callMcpTool(sessionId, 2, "vscope_read_channel_catalog", {});
+        const mapResult = yield* callMcpTool(sessionId, 3, "vscope_read_channel_map", {});
+        yield* callMcpTool(sessionId, 4, "vscope_write_channel_map", {
+          channels: {
+            "1": 3,
+          },
+        });
+
+        expect(JSON.stringify(catalogResult)).toContain("a");
+        expect(JSON.stringify(catalogResult)).toContain("d");
+        expect(JSON.stringify(mapResult)).toContain("catalogIndex");
+        expect(JSON.stringify(mapResult)).toContain("catalogName");
+        expect(commands).toEqual([
+          {
+            type: "devices/setChannelMap",
+            channel: 1,
+            variable: 3,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("rejects no-op and invalid MCP channel map writes before dispatch", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const noOpResult = yield* callMcpTool(sessionId, 2, "vscope_write_channel_map", {
+          channels: {
+            "1": 1,
+          },
+        });
+        const invalidResult = yield* callMcpTool(sessionId, 3, "vscope_write_channel_map", {
+          channels: {
+            offset: 3,
+          },
+        });
+
+        expect(JSON.stringify(noOpResult)).toContain("did not change");
+        expect(JSON.stringify(invalidResult)).toContain("channel index must be");
+        expect(commands).toEqual([]);
+      }),
+    );
+
+    it.effect("filters MCP port listings by VID and PID", () =>
+      Effect.gen(function* () {
+        const sessionId = yield* initializeMcp();
+
+        const result = yield* callMcpTool(sessionId, 2, "vscope_list_ports", {
+          vendorId: "0002",
+          productId: "0001",
+        });
+
+        expect(JSON.stringify(result)).toContain("/dev/tty.vscope");
+        expect(JSON.stringify(result)).not.toContain("/dev/tty.other");
+      }),
+    );
+
+    it.effect("saves snapshots through the renamed MCP tool", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        yield* callMcpTool(sessionId, 2, "vscope_save_snapshot", {
+          label: "bench capture",
+        });
+
+        expect(commands).toEqual([
+          {
+            type: "snapshots/capture",
+            label: "bench capture",
+          },
+        ]);
       }),
     );
   });
 });
+
+let currentCommands: Array<CoreCommand> = [];
+
+const fakePorts: ReadonlyArray<SerialPortInfo> = [
+  {
+    path: "/dev/tty.vscope",
+    manufacturer: "vscope",
+    serialNumber: "test-serial",
+    pnpId: undefined,
+    locationId: undefined,
+    productId: "0001",
+    vendorId: "0002",
+  },
+  {
+    path: "/dev/tty.other",
+    manufacturer: "other",
+    serialNumber: "other-serial",
+    pnpId: undefined,
+    locationId: undefined,
+    productId: "9999",
+    vendorId: "0002",
+  },
+];
+
+function activeCommands(): Array<CoreCommand> {
+  currentCommands.length = 0;
+  return currentCommands;
+}
+
+function initializeMcp() {
+  return Effect.gen(function* () {
+    const initialized = yield* HttpClient.post("/mcp", {
+      body: HttpBody.jsonUnsafe({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: {
+            name: "vscope-test",
+            version: "0.0.0",
+          },
+        },
+      }),
+    });
+    return yield* Effect.fromOption(Headers.get(initialized.headers, "Mcp-Session-Id"));
+  });
+}
+
+function callMcpTool(sessionId: string, id: number, name: string, args: Record<string, unknown>) {
+  return HttpClientRequest.post("/mcp").pipe(
+    HttpClientRequest.setHeaders({
+      "Mcp-Session-Id": sessionId,
+    }),
+    HttpClientRequest.bodyJsonUnsafe({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: {
+        name,
+        arguments: args,
+      },
+    }),
+    HttpClient.execute,
+    Effect.flatMap(readJson),
+  );
+}
 
 function readJson(response: HttpClientResponse.HttpClientResponse) {
   return response.json;
 }
 
 function testServerLayer() {
+  currentCommands = [];
   return HttpRouter.serve(makeRuntimeHttpLayer(makeRuntimeConfig({ databasePath: ":memory:" })), {
     disableListenLog: true,
     disableLogger: true,
   }).pipe(
     Layer.provideMerge(NodeHttpServer.layerTest),
-    Layer.provide(Layer.succeed(RuntimeCore, fakeCore())),
+    Layer.provide(Layer.succeed(RuntimeCore, fakeCore(currentCommands))),
   );
 }
 
-function fakeCore(): RuntimeCoreService {
+function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
   const app = initialApp();
   const activeDevice = initialActiveDevice();
   const status = {
@@ -124,7 +364,6 @@ function fakeCore(): RuntimeCoreService {
     type: "snapshots/list",
     snapshots: [],
   };
-  const permissions = commandPermissions();
   return {
     app: Effect.succeed(app),
     appChanges: Stream.fromIterable([app]),
@@ -136,20 +375,21 @@ function fakeCore(): RuntimeCoreService {
     deviceStatusChanges: Stream.fromIterable([status]),
     deviceConfig: Effect.succeed(config),
     deviceConfigChanges: Stream.fromIterable([config]),
-    permissions: Effect.succeed(permissions),
     readModel: Effect.succeed({
       app,
       snapshots: snapshots.snapshots,
       activeDevice,
       deviceStatus: status,
       deviceConfig: config,
-      permissions,
     }),
-    dispatch: () => Effect.void,
+    dispatch: (command) =>
+      Effect.sync(() => {
+        commands.push(command);
+      }),
     query: (query) =>
       Effect.succeed(
         query.type === "ports/list"
-          ? { type: "ports/list", ports: [] }
+          ? { type: "ports/list", ports: fakePorts }
           : query.type === "snapshots/list"
             ? snapshots
             : { type: "snapshots/readSamples", samples: null },
@@ -167,8 +407,6 @@ function initialApp(): RuntimeAppState {
     status: "ready",
     settings: DEFAULT_SETTINGS,
     settingsRecovery: noRecovery,
-    preferences: DEFAULT_PREFERENCES,
-    preferencesRecovery: noRecovery,
     savedDevices: [],
     warnings: [],
     logs: [],
@@ -179,7 +417,7 @@ function initialActiveDevice(): ActiveDeviceState {
   return {
     path: "/dev/tty.fake",
     deviceName: "fake-scope",
-    connectionStatus: "connected",
+    connected: true,
     info: {
       channelCount: 2,
       bufferSize: 1024,
@@ -198,7 +436,7 @@ function initialActiveDevice(): ActiveDeviceState {
 }
 
 function initialConfig(): DeviceConfigState {
-  const timing: VScopeTiming = { divider: 4, preTrig: 2 };
+  const timing: VScopeTiming = { totalDurationSeconds: 0.04096, preTriggerSeconds: 0.00002 };
   const trigger: VScopeTrigger = { threshold: 1.25, channel: 0, mode: "rising" };
   return {
     timing,
@@ -208,21 +446,5 @@ function initialConfig(): DeviceConfigState {
       [0, 1.5],
       [1, 2.5],
     ]),
-  };
-}
-
-function commandPermissions(): CommandPermissions {
-  return {
-    mode: "halted",
-    connect: false,
-    disconnect: true,
-    setTiming: true,
-    setTrigger: true,
-    setRtValue: true,
-    setChannelMap: true,
-    trigger: false,
-    run: true,
-    stop: true,
-    captureSnapshot: false,
   };
 }

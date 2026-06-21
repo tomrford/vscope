@@ -53,7 +53,6 @@ export const VScopeMessageType = {
   SetTiming: 0x03,
   GetStatus: 0x04,
   SetState: 0x05,
-  Trigger: 0x06,
   GetFrame: 0x07,
   GetSnapshotHeader: 0x08,
   GetSnapshotData: 0x09,

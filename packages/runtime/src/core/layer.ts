@@ -51,7 +51,7 @@ import type {
   RuntimeAppState,
   SnapshotCaptureCommand,
 } from "./model";
-import { decideDeviceControl, permissionsForDevice } from "./policy";
+import { canCaptureSnapshot, decideDeviceControl } from "./policy";
 import { RuntimeCore } from "./service";
 
 const MAX_LOG_ENTRIES = 100;
@@ -181,26 +181,18 @@ const makeRuntimeCore = Effect.gen(function* () {
     Effect.flatMap((session) => (session ? Ref.get(session.lastFrame) : Effect.succeed(null))),
   );
 
-  const permissions = Effect.gen(function* () {
-    const device = yield* SubscriptionRef.get(activeDeviceRef);
-    const status = yield* SubscriptionRef.get(deviceStatusRef);
-    return permissionsForDevice(device, status);
-  });
-
   const readModel = Effect.gen(function* () {
     const app = yield* SubscriptionRef.get(appRef);
     const snapshots = yield* SubscriptionRef.get(snapshotsRef);
     const activeDevice = yield* SubscriptionRef.get(activeDeviceRef);
     const deviceStatus = yield* SubscriptionRef.get(deviceStatusRef);
     const deviceConfig = yield* SubscriptionRef.get(deviceConfigRef);
-    const currentPermissions = yield* permissions;
     return {
       app,
       snapshots,
       activeDevice,
       deviceStatus,
       deviceConfig,
-      permissions: currentPermissions,
     };
   });
 
@@ -230,7 +222,7 @@ const makeRuntimeCore = Effect.gen(function* () {
       [
         updateActiveDevice(device.path, (active) => ({
           ...active,
-          connectionStatus: "lost",
+          connected: false,
           error: reason,
         })),
         clearLiveDeviceStores,
@@ -249,7 +241,7 @@ const makeRuntimeCore = Effect.gen(function* () {
       yield* SubscriptionRef.set(deviceStatusRef, runtimeState.status);
       yield* SubscriptionRef.set(deviceConfigRef, runtimeState.config);
 
-      if (existing?.connectionStatus !== "connected") {
+      if (existing?.connected !== true) {
         yield* logApp(`Connected ${summary.deviceName} at ${summary.path}`);
       }
     });
@@ -260,13 +252,13 @@ const makeRuntimeCore = Effect.gen(function* () {
   }) =>
     Effect.gen(function* () {
       const active = yield* SubscriptionRef.get(activeDeviceRef);
-      if (!active || active.path !== summary.path || active.connectionStatus !== "connected") {
+      if (!active || active.path !== summary.path || !active.connected) {
         return;
       }
 
       yield* SubscriptionRef.set(activeDeviceRef, {
         ...active,
-        connectionStatus: "disconnected",
+        connected: false,
         error: null,
       });
       yield* clearLiveDeviceStores;
@@ -283,7 +275,7 @@ const makeRuntimeCore = Effect.gen(function* () {
       const reason = describeCause(event.cause);
       yield* SubscriptionRef.set(activeDeviceRef, {
         ...active,
-        connectionStatus: "lost",
+        connected: false,
         error: reason,
       });
       yield* clearLiveDeviceStores;
@@ -352,7 +344,7 @@ const makeRuntimeCore = Effect.gen(function* () {
     Effect.gen(function* () {
       const app = yield* SubscriptionRef.get(appRef);
       const active = yield* SubscriptionRef.get(activeDeviceRef);
-      if (active?.connectionStatus === "connected") {
+      if (active?.connected) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason: "Disconnect the current device before connecting another one.",
@@ -391,7 +383,7 @@ const makeRuntimeCore = Effect.gen(function* () {
   const disconnectDevice = () =>
     Effect.gen(function* () {
       const active = yield* SubscriptionRef.get(activeDeviceRef);
-      if (!active || active.connectionStatus !== "connected") {
+      if (!active || !active.connected) {
         return yield* new RuntimeCorePolicyError({
           command: "devices/disconnect",
           reason: "No connected device is available.",
@@ -470,8 +462,7 @@ const makeRuntimeCore = Effect.gen(function* () {
     Effect.gen(function* () {
       const active = yield* SubscriptionRef.get(activeDeviceRef);
       const status = yield* SubscriptionRef.get(deviceStatusRef);
-      const currentPermissions = permissionsForDevice(active, status);
-      const decision = decideDeviceControl(command, active, currentPermissions);
+      const decision = decideDeviceControl(command, active, status);
       if (!decision.allowed) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
@@ -498,13 +489,13 @@ const makeRuntimeCore = Effect.gen(function* () {
       case "devices/run":
         return withDevice(
           command,
-          (device) => device.setState(VScopeState.Running),
+          (device) => device.start(),
           (path, status) => publishStatus(path, status),
         );
       case "devices/stop":
         return withDevice(
           command,
-          (device) => device.setState(VScopeState.Halted),
+          (device) => device.stop(),
           (path, status) => publishStatus(path, status),
         );
       case "devices/trigger":
@@ -545,15 +536,14 @@ const makeRuntimeCore = Effect.gen(function* () {
     Effect.gen(function* () {
       const active = yield* SubscriptionRef.get(activeDeviceRef);
       const status = yield* SubscriptionRef.get(deviceStatusRef);
-      const currentPermissions = permissionsForDevice(active, status);
-      if (!active || active.connectionStatus !== "connected") {
+      if (!active || !active.connected) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason: "No connected device is available.",
         });
       }
 
-      if (!currentPermissions.captureSnapshot) {
+      if (!canCaptureSnapshot(active, status)) {
         return yield* new RuntimeCorePolicyError({
           command: command.type,
           reason:
@@ -634,22 +624,6 @@ const makeRuntimeCore = Effect.gen(function* () {
             settingsRecovery: stateResult.recovery,
           }));
         });
-      case "preferences/patch":
-        return Effect.gen(function* () {
-          const stateResult = yield* persistence
-            .patchPreferences(command.patch)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new RuntimeCorePersistenceError({ operation: "preferences/patch", cause }),
-              ),
-            );
-          yield* updateApp((app) => ({
-            ...app,
-            preferences: stateResult.preferences,
-            preferencesRecovery: stateResult.recovery,
-          }));
-        });
       case "devices/connect":
         return connectDevice(command);
       case "devices/disconnect":
@@ -717,10 +691,10 @@ const makeRuntimeCore = Effect.gen(function* () {
     Effect.andThen(
       Effect.gen(function* () {
         const active = yield* SubscriptionRef.get(activeDeviceRef);
-        if (active?.connectionStatus === "connected") {
+        if (active?.connected) {
           yield* SubscriptionRef.set(activeDeviceRef, {
             ...active,
-            connectionStatus: "disconnected",
+            connected: false,
             error: null,
           });
         }
@@ -742,7 +716,6 @@ const makeRuntimeCore = Effect.gen(function* () {
     deviceStatusChanges: SubscriptionRef.changes(deviceStatusRef),
     deviceConfig: SubscriptionRef.get(deviceConfigRef),
     deviceConfigChanges: SubscriptionRef.changes(deviceConfigRef),
-    permissions,
     readModel,
     dispatch,
     query,
@@ -762,11 +735,6 @@ function hydrateInitialStores(
     const settingsState = yield* persistence.readSettings.pipe(
       Effect.mapError(
         (cause) => new RuntimeCorePersistenceError({ operation: "settings/read", cause }),
-      ),
-    );
-    const preferencesState = yield* persistence.readPreferences.pipe(
-      Effect.mapError(
-        (cause) => new RuntimeCorePersistenceError({ operation: "preferences/read", cause }),
       ),
     );
     const savedDevices = yield* persistence.listSavedDevices.pipe(
@@ -789,8 +757,6 @@ function hydrateInitialStores(
         status: "ready",
         settings: settingsState.settings,
         settingsRecovery: settingsState.recovery,
-        preferences: preferencesState.preferences,
-        preferencesRecovery: preferencesState.recovery,
         savedDevices,
         warnings: [],
         logs: [],
@@ -812,7 +778,7 @@ function activeDeviceFromSummary(summary: VScopeDeviceSummary): ActiveDeviceStat
   return {
     path: summary.path,
     deviceName: summary.deviceName,
-    connectionStatus: "connected",
+    connected: true,
     info: summary.metadata.info,
     variables: summary.metadata.variables,
     rtLabels: summary.metadata.rtLabels,
@@ -821,14 +787,7 @@ function activeDeviceFromSummary(summary: VScopeDeviceSummary): ActiveDeviceStat
 }
 
 function statusEquals(a: VScopeControlStatus, b: VScopeControlStatus): boolean {
-  return (
-    a.state === b.state &&
-    a.requestedState === b.requestedState &&
-    a.snapshotValid === b.snapshotValid &&
-    a.requestPending === b.requestPending &&
-    a.triggerEnabled === b.triggerEnabled &&
-    a.flags === b.flags
-  );
+  return a.state === b.state && a.snapshotValid === b.snapshotValid;
 }
 
 function openOptions(
@@ -914,9 +873,9 @@ function snapshotDraftFromCapture(options: {
     },
     channelCount: header.channelCount,
     sampleCount: header.sampleCount,
-    sampleRateHz: sampleRateHz(device.info, header.divider),
-    divider: header.divider,
-    preTriggerSamples: header.preTrig,
+    sampleRateHz: header.sampleRateHz,
+    totalDurationSeconds: header.totalDurationSeconds,
+    preTriggerSeconds: header.preTriggerSeconds,
     channelMap: Array.from(header.channelMap),
     trigger: SnapshotTrigger.make(header.trigger),
     rtValues: Array.from(header.rtValues),
@@ -927,14 +886,6 @@ function snapshotDraftFromCapture(options: {
       rtLabels: device.rtLabels,
     },
   });
-}
-
-function sampleRateHz(info: ActiveDeviceState["info"], divider: number): number | null {
-  if (!info || divider <= 0) {
-    return null;
-  }
-
-  return (info.isrKHz * 1000) / divider;
 }
 
 function appendWarning(

@@ -43,20 +43,12 @@ export class SnapshotNotFoundError extends Schema.TaggedErrorClass<SnapshotNotFo
   },
 ) {}
 
-export class SnapshotComparisonNotFoundError extends Schema.TaggedErrorClass<SnapshotComparisonNotFoundError>()(
-  "SnapshotComparisonNotFoundError",
-  {
-    id: Schema.String,
-  },
-) {}
-
 export type PersistenceError =
   | PersistenceOpenError
   | PersistenceMigrationError
   | PersistenceQueryError
   | PersistenceValidationError
-  | SnapshotNotFoundError
-  | SnapshotComparisonNotFoundError;
+  | SnapshotNotFoundError;
 
 export function errorReason(cause: unknown): string {
   if (cause instanceof Error) {

@@ -125,32 +125,6 @@ export class SettingsState extends Schema.Class<SettingsState>("SettingsState")(
   recovery: RecoveryState,
 }) {}
 
-export class Preferences extends Schema.Class<Preferences>("Preferences")({
-  recentPortPaths: Schema.Array(Schema.String),
-  favoriteSnapshotIds: Schema.Array(PersistentId),
-  favoriteDeviceIds: Schema.Array(PersistentId),
-  showAdvancedControls: Schema.Boolean,
-}) {}
-
-export type PreferencesPatch = Partial<{
-  readonly recentPortPaths: ReadonlyArray<string>;
-  readonly favoriteSnapshotIds: ReadonlyArray<PersistentId>;
-  readonly favoriteDeviceIds: ReadonlyArray<PersistentId>;
-  readonly showAdvancedControls: boolean;
-}>;
-
-export const DEFAULT_PREFERENCES = Preferences.make({
-  recentPortPaths: [],
-  favoriteSnapshotIds: [],
-  favoriteDeviceIds: [],
-  showAdvancedControls: false,
-});
-
-export class PreferencesState extends Schema.Class<PreferencesState>("PreferencesState")({
-  preferences: Preferences,
-  recovery: RecoveryState,
-}) {}
-
 export class UsbIdentity extends Schema.Class<UsbIdentity>("UsbIdentity")({
   vendorId: Schema.NullOr(Schema.String),
   productId: Schema.NullOr(Schema.String),
@@ -210,8 +184,8 @@ export class SnapshotDraft extends Schema.Class<SnapshotDraft>("SnapshotDraft")(
   channelCount: PositiveInt,
   sampleCount: NonNegativeInt,
   sampleRateHz: Schema.NullOr(NonNegativeFinite),
-  divider: PositiveInt,
-  preTriggerSamples: NonNegativeInt,
+  totalDurationSeconds: NonNegativeFinite,
+  preTriggerSeconds: NonNegativeFinite,
   channelMap: Schema.Array(NonNegativeInt),
   trigger: SnapshotTrigger,
   rtValues: Schema.Array(Schema.Finite),
@@ -225,8 +199,8 @@ export class SnapshotRecord extends Schema.Class<SnapshotRecord>("SnapshotRecord
   device: SnapshotDeviceRef,
   sample: SnapshotSampleDescriptor,
   sampleRateHz: Schema.NullOr(NonNegativeFinite),
-  divider: PositiveInt,
-  preTriggerSamples: NonNegativeInt,
+  totalDurationSeconds: NonNegativeFinite,
+  preTriggerSeconds: NonNegativeFinite,
   channelMap: Schema.Array(NonNegativeInt),
   trigger: SnapshotTrigger,
   rtValues: Schema.Array(Schema.Finite),
@@ -254,27 +228,6 @@ export class SnapshotSampleBlob extends Schema.Class<SnapshotSampleBlob>("Snapsh
 
 export class SnapshotListQuery extends Schema.Class<SnapshotListQuery>("SnapshotListQuery")({
   limit: Schema.optionalKey(PositiveInt),
-}) {}
-
-export class SnapshotComparisonDraft extends Schema.Class<SnapshotComparisonDraft>(
-  "SnapshotComparisonDraft",
-)({
-  id: Schema.optionalKey(PersistentId),
-  label: NonEmptyString,
-  snapshotIds: Schema.Array(PersistentId).check(Schema.isMinLength(2)),
-  options: JsonObject,
-  metadata: JsonObject,
-  createdAt: Schema.optionalKey(Timestamp),
-}) {}
-
-export class SnapshotComparison extends Schema.Class<SnapshotComparison>("SnapshotComparison")({
-  id: PersistentId,
-  label: NonEmptyString,
-  snapshotIds: Schema.Array(PersistentId).check(Schema.isMinLength(2)),
-  options: JsonObject,
-  metadata: JsonObject,
-  createdAt: Timestamp,
-  updatedAt: Timestamp,
 }) {}
 
 export function snapshotSampleByteLength(channelCount: number, sampleCount: number): number {

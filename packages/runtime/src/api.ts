@@ -3,7 +3,6 @@ import {
   PersistentId,
   RuntimeActiveDevice,
   RuntimeAppDto,
-  RuntimeCommandPermissions,
   RuntimeControlStatus,
   RuntimeDeviceInfo,
   RuntimeDeviceConfigPayload,
@@ -15,30 +14,27 @@ import {
   RuntimeSnapshotRecord,
   RuntimeWarningDto,
   type RuntimeDeviceLost,
-  type RuntimePreferencesPatchRequest,
   type RuntimeSettingsPatchRequest,
   type SnapshotRecord,
   type SnapshotSampleBlob,
 } from "@vscope/shared";
 import type {
   SerialPortInfo,
+  VScopeState as VScopeStateValue,
   VScopeControlStatus,
   VScopeTiming,
   VScopeTrigger,
 } from "@vscope/serial";
+import { VScopeState } from "@vscope/serial";
 
 import type { RuntimeCoreError } from "./core/errors";
 import type { ActiveDeviceState, DeviceConfigState, RuntimeAppState } from "./core/model";
-import type { CommandPermissions } from "./core/policy";
 import type { RuntimeCoreService } from "./core/service";
 
 export interface RuntimeRpcHandlers {
   readonly getApp: Effect.Effect<RuntimeAppDto>;
   readonly patchSettings: (
     patch: RuntimeSettingsPatchRequest,
-  ) => Effect.Effect<void, RuntimeCoreError>;
-  readonly patchPreferences: (
-    patch: RuntimePreferencesPatchRequest,
   ) => Effect.Effect<void, RuntimeCoreError>;
   readonly listPorts: Effect.Effect<ReadonlyArray<RuntimePortInfo>, RuntimeCoreError>;
   readonly getActiveDevice: Effect.Effect<RuntimeActiveDevice | null>;
@@ -66,31 +62,13 @@ export interface RuntimeSubscriptions {
   readonly snapshots: Stream.Stream<ReadonlyArray<RuntimeSnapshotRecord>>;
   readonly activeDevice: Stream.Stream<RuntimeActiveDevice | null>;
   readonly status: Stream.Stream<RuntimeControlStatus | null>;
-  readonly permissions: Stream.Stream<RuntimeCommandPermissions>;
   readonly config: Stream.Stream<RuntimeDeviceConfigPayload | null>;
   readonly frames: Stream.Stream<RuntimeFramePayload | null, RuntimeDeviceLost>;
-}
-
-export interface RuntimeMcpHandlers {
-  readonly getApp: Effect.Effect<RuntimeAppDto>;
-  readonly listPorts: Effect.Effect<ReadonlyArray<RuntimePortInfo>, RuntimeCoreError>;
-  readonly getActiveDevice: Effect.Effect<RuntimeActiveDevice | null>;
-  readonly connectDevice: (path: string) => Effect.Effect<void, RuntimeCoreError>;
-  readonly disconnectDevice: Effect.Effect<void, RuntimeCoreError>;
-  readonly getDeviceStatus: Effect.Effect<RuntimeControlStatus | null>;
-  readonly runDevice: Effect.Effect<void, RuntimeCoreError>;
-  readonly stopDevice: Effect.Effect<void, RuntimeCoreError>;
-  readonly triggerDevice: Effect.Effect<void, RuntimeCoreError>;
-  readonly readConfig: Effect.Effect<RuntimeDeviceConfigPayload | null>;
-  readonly readFrame: Effect.Effect<RuntimeFramePayload | null>;
-  readonly captureSnapshot: (label?: string | undefined) => Effect.Effect<void, RuntimeCoreError>;
-  readonly listSnapshots: Effect.Effect<ReadonlyArray<RuntimeSnapshotRecord>, RuntimeCoreError>;
 }
 
 export interface RuntimeApi {
   readonly rpc: RuntimeRpcHandlers;
   readonly subscriptions: RuntimeSubscriptions;
-  readonly mcp: RuntimeMcpHandlers;
   readonly snapshots: RuntimeSnapshotHandlers;
 }
 
@@ -115,7 +93,6 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
   const rpc: RuntimeRpcHandlers = {
     getApp: core.app.pipe(Effect.map(appDto)),
     patchSettings: (patch) => dispatch({ type: "settings/patch", patch }),
-    patchPreferences: (patch) => dispatch({ type: "preferences/patch", patch }),
     listPorts: core
       .query({ type: "ports/list" })
       .pipe(
@@ -146,32 +123,8 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
     snapshots: core.snapshotChanges.pipe(Stream.map((snapshots) => snapshots.map(snapshotDto))),
     activeDevice: core.activeDeviceChanges.pipe(Stream.map(activeDeviceDto)),
     status: core.deviceStatusChanges.pipe(Stream.map(statusDto)),
-    permissions: Stream.merge(
-      core.activeDeviceChanges.pipe(Stream.map(() => undefined)),
-      core.deviceStatusChanges.pipe(Stream.map(() => undefined)),
-    ).pipe(
-      Stream.mapEffect(() => core.permissions),
-      Stream.changesWith(permissionsEquals),
-      Stream.map(permissionsDto),
-    ),
     config: core.deviceConfigChanges.pipe(Stream.map(configDto)),
     frames: core.frames.pipe(Stream.map(framePayload)),
-  };
-
-  const mcp: RuntimeMcpHandlers = {
-    getApp: rpc.getApp,
-    listPorts: rpc.listPorts,
-    getActiveDevice: rpc.getActiveDevice,
-    connectDevice: rpc.connectDevice,
-    disconnectDevice: rpc.disconnectDevice,
-    getDeviceStatus: rpc.getDeviceStatus,
-    runDevice: rpc.runDevice,
-    stopDevice: rpc.stopDevice,
-    triggerDevice: rpc.triggerDevice,
-    readConfig: rpc.getConfig,
-    readFrame,
-    captureSnapshot: rpc.captureSnapshot,
-    listSnapshots,
   };
 
   const snapshots: RuntimeSnapshotHandlers = {
@@ -184,10 +137,10 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
       ),
   };
 
-  return { rpc, subscriptions, mcp, snapshots };
+  return { rpc, subscriptions, snapshots };
 }
 
-function appDto(app: RuntimeAppState): RuntimeAppDto {
+export function appDto(app: RuntimeAppState): RuntimeAppDto {
   return RuntimeAppDto.make({
     ...app,
     warnings: app.warnings.map((warning) => RuntimeWarningDto.make(warning)),
@@ -195,20 +148,26 @@ function appDto(app: RuntimeAppState): RuntimeAppDto {
   });
 }
 
-function activeDeviceDto(device: ActiveDeviceState | null): RuntimeActiveDevice | null {
+export function activeDeviceDto(device: ActiveDeviceState | null): RuntimeActiveDevice | null {
   return device
     ? RuntimeActiveDevice.make({
         ...device,
+        connected: device.connected,
         info: device.info ? RuntimeDeviceInfo.make(device.info) : null,
       })
     : null;
 }
 
-function statusDto(status: DeviceStatusInput): RuntimeControlStatus | null {
-  return status ? RuntimeControlStatus.make(status) : null;
+export function statusDto(status: DeviceStatusInput): RuntimeControlStatus | null {
+  return status
+    ? RuntimeControlStatus.make({
+        state: stateDto(status.state),
+        snapshotValid: status.snapshotValid,
+      })
+    : null;
 }
 
-function configDto(config: DeviceConfigState | null): RuntimeDeviceConfigPayload | null {
+export function configDto(config: DeviceConfigState | null): RuntimeDeviceConfigPayload | null {
   return config
     ? RuntimeDeviceConfigPayload.make({
         timing: timingDto(config.timing),
@@ -219,11 +178,11 @@ function configDto(config: DeviceConfigState | null): RuntimeDeviceConfigPayload
     : null;
 }
 
-function framePayload(values: ReadonlyArray<number> | null): RuntimeFramePayload | null {
+export function framePayload(values: ReadonlyArray<number> | null): RuntimeFramePayload | null {
   return values === null ? null : RuntimeFramePayload.make({ values });
 }
 
-function runtimePortInfo(port: SerialPortInfo): RuntimePortInfo {
+export function runtimePortInfo(port: SerialPortInfo): RuntimePortInfo {
   const result: {
     path: string;
     manufacturer?: string;
@@ -244,7 +203,7 @@ function runtimePortInfo(port: SerialPortInfo): RuntimePortInfo {
   return RuntimePortInfo.make(result);
 }
 
-function snapshotDto(snapshot: SnapshotRecord): RuntimeSnapshotRecord {
+export function snapshotDto(snapshot: SnapshotRecord): RuntimeSnapshotRecord {
   return RuntimeSnapshotRecord.make({
     ...snapshot,
   });
@@ -258,24 +217,17 @@ function triggerDto(trigger: DeviceConfigState["trigger"]): RuntimeSetTriggerReq
   return trigger ? RuntimeSetTriggerRequest.make(trigger) : null;
 }
 
-function permissionsDto(permissions: CommandPermissions): RuntimeCommandPermissions {
-  return RuntimeCommandPermissions.make(permissions);
-}
-
-function permissionsEquals(a: CommandPermissions, b: CommandPermissions): boolean {
-  return (
-    a.mode === b.mode &&
-    a.connect === b.connect &&
-    a.disconnect === b.disconnect &&
-    a.setTiming === b.setTiming &&
-    a.setTrigger === b.setTrigger &&
-    a.setRtValue === b.setRtValue &&
-    a.setChannelMap === b.setChannelMap &&
-    a.trigger === b.trigger &&
-    a.run === b.run &&
-    a.stop === b.stop &&
-    a.captureSnapshot === b.captureSnapshot
-  );
-}
-
 type DeviceStatusInput = VScopeControlStatus | null;
+
+function stateDto(state: VScopeStateValue): RuntimeControlStatus["state"] {
+  switch (state) {
+    case VScopeState.Halted:
+      return "halted";
+    case VScopeState.Running:
+      return "running";
+    case VScopeState.Acquiring:
+      return "acquiring";
+    case VScopeState.Misconfigured:
+      return "misconfigured";
+  }
+}
