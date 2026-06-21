@@ -10,15 +10,14 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   DEFAULT_SERIAL_CONFIG,
   DEFAULT_SETTINGS,
-  Persistence,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotDraft,
   SnapshotSamplesWrite,
   SnapshotTrigger,
-  initializePersistence,
-  makePersistenceLayer,
-} from "./index.ts";
+} from "@vscope/shared";
+
+import { Persistence, initializePersistence, makePersistenceLayer } from "./index.ts";
 
 function withTempPath<A, E, R>(run: (path: string) => Effect.Effect<A, E, R>) {
   return Effect.acquireRelease(

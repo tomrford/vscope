@@ -41,6 +41,11 @@ Re-scan the serial package surface after the UI is in place. Keep the runtime-ow
 - Keep the package publishable as `vscope`; the root CLI remains the only public command surface.
 - Keep localhost-only assumptions unless an auth story is added.
 - The Nix dev shell uses Node 26 and an overridden pnpm wrapper to avoid the known bad Node 24.15.0 wrapper path.
+- `noUncheckedIndexedAccess` is enabled for the core packages through the root tsconfig. `@vscope/ui` and `@vscope/liveplot` keep package tsconfigs with the flag off and are still covered by `pnpm run typecheck`.
+
+## Deferred Cleanups
+
+- `serial/device.ts` is still over the ~1000 LOC guideline. Split it when the product surface is clear enough to keep the modules stable. Current seams: `client.ts` for the client/session state machine (`makeVScopeClient`, `takeResponse`, the closed/session/close-start unions); `codec.ts` for payload decode/encode helpers; `validate.ts` for the `validate*` family. `device.ts` should keep `openVScopeDevice`, `makeDevice`, and the per-message operations.
 
 ## Tooling
 

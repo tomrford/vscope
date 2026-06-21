@@ -272,16 +272,20 @@ describe("@vscope/runtime core", () => {
           label: "Boot trace",
         });
         const listed = yield* core.listSnapshots;
-        const samples = yield* core.readSnapshotSamples(listed[0].id);
+        const snapshot = listed[0];
+        if (!snapshot) {
+          throw new Error("Expected one captured snapshot.");
+        }
+        const samples = yield* core.readSnapshotSamples(snapshot.id);
         const status = yield* core.deviceStatus;
 
         expect(listed.length).toBe(1);
         expect(status?.snapshotValid).toBe(true);
-        expect(listed[0].label).toBe("Boot trace");
-        expect(listed[0].device).toMatchObject({
+        expect(snapshot.label).toBe("Boot trace");
+        expect(snapshot.device).toMatchObject({
           name: fakeInfo.deviceName,
         });
-        expect(listed[0].sample.stored).toBe(true);
+        expect(snapshot.sample.stored).toBe(true);
         expect(samples?.data.byteLength).toBe(
           fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
         );
@@ -733,7 +737,7 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
             }
 
             frameReads += 1;
-            return Float32Array.from([frameReads, 2, 3, 4]);
+            return [frameReads, 2, 3, 4];
           }),
         ),
       ),

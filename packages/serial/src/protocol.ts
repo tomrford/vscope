@@ -119,7 +119,11 @@ const crc8Table = Uint8Array.from([
 export const vscopeCrc8 = (bytes: Uint8Array): number => {
   let crc = 0;
   for (const byte of bytes) {
-    crc = crc8Table[crc ^ byte];
+    const next = crc8Table[crc ^ byte];
+    if (next === undefined) {
+      throw new Error("CRC table lookup out of range");
+    }
+    crc = next;
   }
   return crc;
 };
@@ -133,15 +137,10 @@ export const encodeVScopeFrame = (
           reason: `Payload exceeds ${VSCOPE_MAX_PAYLOAD} bytes`,
         }),
       )
-    : Effect.sync(() => encodeVScopeFrameSync(frame));
+    : Effect.sync(() => encodeFrameBytes(frame));
 
-export const encodeVScopeFrameSync = (frame: VScopeFrame): Uint8Array => {
-  if (frame.payload.byteLength > VSCOPE_MAX_PAYLOAD) {
-    throw new VScopeFrameEncodeError({
-      reason: `Payload exceeds ${VSCOPE_MAX_PAYLOAD} bytes`,
-    });
-  }
-
+// Caller (encodeVScopeFrame) guards the payload length, so this builder assumes it.
+const encodeFrameBytes = (frame: VScopeFrame): Uint8Array => {
   const output = new Uint8Array(frame.payload.byteLength + 4);
   output[0] = VSCOPE_SYNC_BYTE;
   output[1] = frame.payload.byteLength + 2;
@@ -257,59 +256,171 @@ export class VScopeFrameParser {
   }
 }
 
-export const fixedString = (bytes: Uint8Array): string => {
-  const nul = bytes.indexOf(0);
-  const end = nul >= 0 ? nul : bytes.byteLength;
-  return new TextDecoder().decode(bytes.subarray(0, end));
-};
+const F32_BYTES = Float32Array.BYTES_PER_ELEMENT;
+const textDecoder = new TextDecoder();
+const textEncoder = new TextEncoder();
 
-export const writeFixedString = (value: string, length: number): Uint8Array => {
-  const output = new Uint8Array(length);
-  output.set(new TextEncoder().encode(value).subarray(0, length));
-  return output;
-};
+// Sequential, endianness-bound cursor over a frame payload. Every read is
+// bounds-checked and throws `RangeError` on overrun; `decoding()` in device.ts
+// maps those throws onto `VScopeDecodeError` with message context. This is the
+// single struct-codec abstraction — the only raw byte access left is the frame
+// envelope (sync/len/crc) and this class's own DataView.
+export class ByteReader {
+  readonly #view: DataView;
+  readonly #bytes: Uint8Array;
+  readonly #littleEndian: boolean;
+  #offset = 0;
 
-export const readU16 = (view: DataView, offset: number, littleEndian: boolean): number =>
-  view.getUint16(offset, littleEndian);
+  constructor(bytes: Uint8Array, littleEndian: boolean) {
+    this.#bytes = bytes;
+    this.#view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    this.#littleEndian = littleEndian;
+  }
 
-export const readU32 = (view: DataView, offset: number, littleEndian: boolean): number =>
-  view.getUint32(offset, littleEndian);
+  get remaining(): number {
+    return this.#bytes.byteLength - this.#offset;
+  }
 
-export const readF32 = (view: DataView, offset: number, littleEndian: boolean): number =>
-  view.getFloat32(offset, littleEndian);
+  #take(length: number, what: string): number {
+    if (length < 0 || length > this.remaining) {
+      throw new RangeError(
+        `ByteReader: need ${length} byte(s) for ${what} at offset ${this.#offset}, ${this.remaining} remaining`,
+      );
+    }
+    const at = this.#offset;
+    this.#offset += length;
+    return at;
+  }
 
-export const writeU16 = (
-  output: Uint8Array,
-  offset: number,
-  value: number,
-  littleEndian: boolean,
-): void =>
-  new DataView(output.buffer, output.byteOffset, output.byteLength).setUint16(
-    offset,
-    value,
-    littleEndian,
-  );
+  u8(): number {
+    return this.#view.getUint8(this.#take(1, "u8"));
+  }
 
-export const writeU32 = (
-  output: Uint8Array,
-  offset: number,
-  value: number,
-  littleEndian: boolean,
-): void =>
-  new DataView(output.buffer, output.byteOffset, output.byteLength).setUint32(
-    offset,
-    value,
-    littleEndian,
-  );
+  u16(): number {
+    return this.#view.getUint16(this.#take(2, "u16"), this.#littleEndian);
+  }
 
-export const writeF32 = (
-  output: Uint8Array,
-  offset: number,
-  value: number,
-  littleEndian: boolean,
-): void =>
-  new DataView(output.buffer, output.byteOffset, output.byteLength).setFloat32(
-    offset,
-    value,
-    littleEndian,
-  );
+  u32(): number {
+    return this.#view.getUint32(this.#take(4, "u32"), this.#littleEndian);
+  }
+
+  f32(): number {
+    return this.#view.getFloat32(this.#take(F32_BYTES, "f32"), this.#littleEndian);
+  }
+
+  bytes(length: number): Uint8Array {
+    const at = this.#take(length, "bytes");
+    return Uint8Array.from(this.#bytes.subarray(at, at + length));
+  }
+
+  fixedString(length: number): string {
+    const at = this.#take(length, "fixedString");
+    const raw = this.#bytes.subarray(at, at + length);
+    const nul = raw.indexOf(0);
+    return textDecoder.decode(nul >= 0 ? raw.subarray(0, nul) : raw);
+  }
+
+  u8Array(length: number): ReadonlyArray<number> {
+    const at = this.#take(length, "u8Array");
+    return Array.from(this.#bytes.subarray(at, at + length));
+  }
+
+  f32Array(count: number): Float32Array {
+    const at = this.#take(count * F32_BYTES, "f32Array");
+    const output = new Float32Array(count);
+    for (let index = 0; index < count; index += 1) {
+      output[index] = this.#view.getFloat32(at + index * F32_BYTES, this.#littleEndian);
+    }
+    return output;
+  }
+
+  skip(length: number): this {
+    this.#take(length, "skip");
+    return this;
+  }
+
+  // Absolute, non-advancing read — for self-describing frames (GetInfo carries
+  // its own endianness byte ahead of the multi-byte fields that depend on it).
+  peekU8(offset: number): number {
+    if (offset < 0 || offset >= this.#bytes.byteLength) {
+      throw new RangeError(
+        `ByteReader: peekU8 offset ${offset} out of range (length ${this.#bytes.byteLength})`,
+      );
+    }
+    return this.#view.getUint8(offset);
+  }
+
+  // Assert the payload was fully consumed — replaces the old per-message
+  // `expectLength` length arithmetic.
+  end(): void {
+    if (this.remaining !== 0) {
+      throw new RangeError(`ByteReader: ${this.remaining} byte(s) left unconsumed`);
+    }
+  }
+}
+
+// Fixed-capacity sequential writer; constructed with the exact frame length.
+// `toUint8Array` asserts the buffer was fully written.
+export class ByteWriter {
+  readonly #bytes: Uint8Array;
+  readonly #view: DataView;
+  readonly #littleEndian: boolean;
+  #offset = 0;
+
+  constructor(length: number, littleEndian: boolean) {
+    this.#bytes = new Uint8Array(length);
+    this.#view = new DataView(this.#bytes.buffer);
+    this.#littleEndian = littleEndian;
+  }
+
+  #take(length: number, what: string): number {
+    if (length < 0 || length > this.#bytes.byteLength - this.#offset) {
+      throw new RangeError(
+        `ByteWriter: cannot write ${length} byte(s) for ${what} at offset ${this.#offset} (capacity ${this.#bytes.byteLength})`,
+      );
+    }
+    const at = this.#offset;
+    this.#offset += length;
+    return at;
+  }
+
+  u8(value: number): this {
+    this.#view.setUint8(this.#take(1, "u8"), value);
+    return this;
+  }
+
+  u16(value: number): this {
+    this.#view.setUint16(this.#take(2, "u16"), value, this.#littleEndian);
+    return this;
+  }
+
+  u32(value: number): this {
+    this.#view.setUint32(this.#take(4, "u32"), value, this.#littleEndian);
+    return this;
+  }
+
+  f32(value: number): this {
+    this.#view.setFloat32(this.#take(F32_BYTES, "f32"), value, this.#littleEndian);
+    return this;
+  }
+
+  bytes(source: Uint8Array): this {
+    this.#bytes.set(source, this.#take(source.byteLength, "bytes"));
+    return this;
+  }
+
+  fixedString(value: string, length: number): this {
+    const at = this.#take(length, "fixedString");
+    this.#bytes.set(textEncoder.encode(value).subarray(0, length), at);
+    return this;
+  }
+
+  toUint8Array(): Uint8Array {
+    if (this.#offset !== this.#bytes.byteLength) {
+      throw new RangeError(
+        `ByteWriter: ${this.#bytes.byteLength - this.#offset} byte(s) left unwritten`,
+      );
+    }
+    return this.#bytes;
+  }
+}

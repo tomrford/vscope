@@ -1,14 +1,18 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import { DEFAULT_RUNTIME_PORT, makeRuntimeConfig, resolveRuntimePaths } from "./config";
 import { runRuntimeServer } from "./server";
 
-const packageJson = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-) as { readonly version?: string };
+const PackageJson = Schema.Struct({
+  version: Schema.optionalKey(Schema.String),
+});
+
+const packageJson = Schema.decodeUnknownSync(PackageJson)(
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")),
+);
 
 const uiDistPath = fileURLToPath(new URL("./ui", import.meta.url));
 
@@ -56,6 +60,9 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === undefined) {
+      continue;
+    }
     if (arg === "--help" || arg === "-h") {
       return { help: true, version: false, port: undefined };
     }

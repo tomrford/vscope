@@ -1,5 +1,4 @@
 import { Cause, Deferred, Effect, Exit, Queue, Ref, Schedule, Semaphore, Stream } from "effect";
-import type * as Scope from "effect/Scope";
 import type { TriggerMode } from "@vscope/shared";
 
 import {
@@ -13,10 +12,8 @@ import {
   VScopeUnexpectedResponseError,
 } from "./errors";
 import {
-  fixedString,
-  readF32,
-  readU16,
-  readU32,
+  ByteReader,
+  ByteWriter,
   VScopeEndianness,
   VScopeFrameParseError,
   type VScopeFrameParseEvent,
@@ -30,15 +27,11 @@ import {
   type VScopeStatus as VScopeStatusValue,
   VScopeTriggerMode,
   type VScopeTriggerMode as VScopeWireTriggerMode,
-  writeF32,
-  writeU16,
-  writeU32,
   encodeVScopeFrame,
 } from "./protocol";
 import {
   SerialConnectionClosedError,
   openSerialTransport,
-  type SerialOpenError,
   type SerialTransport,
 } from "./transport";
 import type {
@@ -65,6 +58,53 @@ interface VScopeClient {
   readonly closed: Effect.Effect<void, VScopeDeviceError>;
   readonly close: <E>(closeTransport: Effect.Effect<void, E>) => Effect.Effect<void, E>;
 }
+
+// Binary codec bound to the device's one endianness (the reference byte GetInfo
+// reports). Every per-message read/write goes through it, so endianness is
+// resolved once at connect rather than threaded as a boolean everywhere.
+interface Codec {
+  reader(bytes: Uint8Array): ByteReader;
+  writer(length: number): ByteWriter;
+}
+
+const makeCodec = (littleEndian: boolean): Codec => ({
+  reader: (bytes) => new ByteReader(bytes, littleEndian),
+  writer: (length) => new ByteWriter(length, littleEndian),
+});
+
+// Runs a synchronous payload decoder, mapping any throw (cursor overrun or an
+// enum-validation Error) onto a typed VScopeDecodeError carrying message context.
+const decoding = <A>(
+  path: string,
+  messageType: VScopeMessageType,
+  decode: () => A,
+): Effect.Effect<A, VScopeDecodeError> =>
+  Effect.try({
+    try: decode,
+    catch: (cause) =>
+      cause instanceof VScopeDecodeError
+        ? cause
+        : new VScopeDecodeError({
+            path,
+            messageType,
+            reason: cause instanceof Error ? cause.message : String(cause),
+          }),
+  });
+
+// Reads a fixed-shape payload and asserts it was fully consumed.
+const readPayload = <A>(
+  codec: Codec,
+  path: string,
+  messageType: VScopeMessageType,
+  payload: Uint8Array,
+  read: (reader: ByteReader) => A,
+): Effect.Effect<A, VScopeDecodeError> =>
+  decoding(path, messageType, () => {
+    const reader = codec.reader(payload);
+    const value = read(reader);
+    reader.end();
+    return value;
+  });
 
 const UINT32_MAX = 0xffff_ffff;
 
@@ -101,353 +141,357 @@ type CloseStart =
       readonly _tag: "StartClose";
     };
 
-export const openVScopeDevice = (
+export const openVScopeDevice = Effect.fn("VScope.openDevice")(function* (
   options: OpenVScopeDeviceOptions,
-): Effect.Effect<VScopeDevice, SerialOpenError | VScopeDeviceError, Scope.Scope> =>
-  Effect.gen(function* () {
-    const transport = yield* openSerialTransport(options);
-    const client = yield* makeVScopeClient(transport, {
-      requestTimeoutMillis: options.requestTimeoutMillis,
-      retryAttempts: options.retryAttempts,
-    });
-    yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
-    const info = yield* getInfo(transport.path, client);
-    const littleEndian = info.endianness === VScopeEndianness.Little;
-    const status = yield* getStatus(transport.path, client);
-    const state = status.state;
-    const variables = yield* getNames(transport.path, client, {
-      requestType: VScopeMessageType.GetVarList,
-      expectedTotal: info.variableCount,
-      nameLength: info.nameLength,
-    });
-    const rtLabels =
-      state === VScopeState.Misconfigured
-        ? []
-        : yield* getNames(transport.path, client, {
-            requestType: VScopeMessageType.GetRtLabels,
-            expectedTotal: info.rtCount,
-            nameLength: info.nameLength,
-          });
-    const channelMap =
-      state === VScopeState.Misconfigured ? [] : yield* getChannelMap(transport.path, client, info);
-    const metadataRef = yield* Ref.make<VScopeStaticMetadata>({
-      info,
-      variables,
-      rtLabels,
-      channelMap,
-    });
-
-    return makeDevice({
-      transport,
-      client,
-      info,
-      littleEndian,
-      metadataRef,
-    });
+) {
+  const transport = yield* openSerialTransport(options);
+  const client = yield* makeVScopeClient(transport, {
+    requestTimeoutMillis: options.requestTimeoutMillis,
+    retryAttempts: options.retryAttempts,
+  });
+  yield* Effect.addFinalizer(() => client.close(transport.close).pipe(Effect.ignore));
+  const info = yield* getInfo(transport.path, client);
+  const codec = makeCodec(info.endianness === VScopeEndianness.Little);
+  const status = yield* getStatus(transport.path, client, codec);
+  const state = status.state;
+  const variables = yield* getNames(transport.path, client, codec, {
+    requestType: VScopeMessageType.GetVarList,
+    expectedTotal: info.variableCount,
+    nameLength: info.nameLength,
+  });
+  const rtLabels =
+    state === VScopeState.Misconfigured
+      ? []
+      : yield* getNames(transport.path, client, codec, {
+          requestType: VScopeMessageType.GetRtLabels,
+          expectedTotal: info.rtCount,
+          nameLength: info.nameLength,
+        });
+  const channelMap =
+    state === VScopeState.Misconfigured
+      ? []
+      : yield* getChannelMap(transport.path, client, codec, info);
+  const metadataRef = yield* Ref.make<VScopeStaticMetadata>({
+    info,
+    variables,
+    rtLabels,
+    channelMap,
   });
 
-const makeVScopeClient = (
+  return makeDevice({
+    transport,
+    client,
+    info,
+    codec,
+    metadataRef,
+  });
+});
+
+const makeVScopeClient = Effect.fn("VScopeClient.make")(function* (
   transport: SerialTransport,
   options: {
     readonly requestTimeoutMillis: number;
     readonly retryAttempts?: number | undefined;
   },
-): Effect.Effect<VScopeClient, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    const events = yield* Queue.unbounded<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>();
-    const requestLock = yield* Semaphore.make(1);
-    const closed = yield* Deferred.make<void, VScopeDeviceError>();
-    const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
-    const parser = new VScopeFrameParser();
-    // One blanket timeout governs every request: without sequence IDs a late
-    // reply poisons the next exchange, so all messages share the same deadline.
-    const timeoutMillis = options.requestTimeoutMillis;
-    const defaultRetryAttempts = options.retryAttempts ?? 2;
+) {
+  const events = yield* Queue.unbounded<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>();
+  const requestLock = yield* Semaphore.make(1);
+  const closed = yield* Deferred.make<void, VScopeDeviceError>();
+  const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
+  const parser = new VScopeFrameParser();
+  // One blanket timeout governs every request: without sequence IDs a late
+  // reply poisons the next exchange, so all messages share the same deadline.
+  const timeoutMillis = options.requestTimeoutMillis;
+  const defaultRetryAttempts = options.retryAttempts ?? 2;
 
-    const ensureOpen = (requestType: VScopeMessageType) =>
-      Ref.get(closedState).pipe(
-        Effect.flatMap((state) =>
-          state._tag !== "Open"
-            ? Effect.fail(
-                new VScopeSessionClosedError({
-                  path: transport.path,
-                  requestType,
-                  reason: state._tag === "Closing" ? "closing" : state.reason,
-                }),
-              )
-            : Effect.void,
-        ),
-      );
-
-    const completeSession = (completion: SessionCompletion) =>
-      completion._tag === "None"
-        ? Effect.void
-        : completion._tag === "Success"
-          ? Queue.end(events).pipe(
-              Effect.andThen(Deferred.succeed(closed, undefined)),
-              Effect.asVoid,
+  const ensureOpen = (requestType: VScopeMessageType) =>
+    Ref.get(closedState).pipe(
+      Effect.flatMap((state) =>
+        state._tag !== "Open"
+          ? Effect.fail(
+              new VScopeSessionClosedError({
+                path: transport.path,
+                requestType,
+                reason: state._tag === "Closing" ? "closing" : state.reason,
+              }),
             )
-          : Queue.fail(events, completion.error).pipe(
-              Effect.andThen(Deferred.fail(closed, completion.error)),
-              Effect.asVoid,
-            );
-
-    const succeedSession = () =>
-      Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] =>
-        state._tag === "Closed"
-          ? [{ _tag: "None" }, state]
-          : [{ _tag: "Success" }, { _tag: "Closed", reason: "closed" }],
-      ).pipe(Effect.flatMap((completion) => completeSession(completion)));
-
-    const failSession = (error: VScopeDeviceError) =>
-      Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] => {
-        if (state._tag === "Closed") {
-          return [{ _tag: "None" }, state];
-        }
-
-        if (state._tag === "Closing") {
-          return [
-            { _tag: "None" },
-            {
-              _tag: "Closing",
-              pendingError: state.pendingError ?? error,
-            },
-          ];
-        }
-
-        return [
-          { _tag: "Failure", error },
-          { _tag: "Closed", reason: sessionCloseReason(error) },
-        ];
-      }).pipe(Effect.flatMap((completion) => completeSession(completion)));
-
-    const close = <E>(closeTransport: Effect.Effect<void, E>): Effect.Effect<void, E> =>
-      Effect.uninterruptible(
-        requestLock.withPermit(
-          Effect.gen(function* () {
-            const closeStart = yield* Ref.modify(
-              closedState,
-              (state): readonly [CloseStart, ClientClosedState] =>
-                state._tag === "Closed"
-                  ? [{ _tag: "AlreadyClosed" }, state]
-                  : [{ _tag: "StartClose" }, { _tag: "Closing", pendingError: undefined }],
-            );
-            if (closeStart._tag === "AlreadyClosed") {
-              yield* closeTransport;
-              return;
-            }
-
-            const closeExit = yield* Effect.exit(closeTransport);
-            if (Exit.isFailure(closeExit)) {
-              const pendingError = yield* Ref.modify(
-                closedState,
-                (state): readonly [VScopeDeviceError | undefined, ClientClosedState] => {
-                  if (state._tag !== "Closing") {
-                    return [undefined, state];
-                  }
-
-                  return state.pendingError
-                    ? [
-                        state.pendingError,
-                        {
-                          _tag: "Closed",
-                          reason: sessionCloseReason(state.pendingError),
-                        },
-                      ]
-                    : [undefined, { _tag: "Open" }];
-                },
-              );
-              if (pendingError) {
-                yield* completeSession({ _tag: "Failure", error: pendingError });
-              }
-              return yield* Effect.failCause(closeExit.cause);
-            }
-
-            yield* succeedSession();
-          }),
-        ),
-      );
-    yield* Effect.gen(function* () {
-      while (true) {
-        const chunk = yield* transport.read.pipe(
-          Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
-        );
-
-        for (const event of parser.pushEvents(chunk)) {
-          yield* Queue.offer(events, event);
-        }
-      }
-    }).pipe(
-      Effect.catch((error) => failSession(error)),
-      Effect.forkScoped,
+          : Effect.void,
+      ),
     );
 
-    const request: VScopeClient["request"] = (
-      requestType: VScopeMessageType,
-      responseType: VScopeMessageType,
-      payload = new Uint8Array(),
-      requestOptions = {},
-    ) =>
+  const completeSession = (completion: SessionCompletion) =>
+    completion._tag === "None"
+      ? Effect.void
+      : completion._tag === "Success"
+        ? Queue.end(events).pipe(Effect.andThen(Deferred.succeed(closed, undefined)), Effect.asVoid)
+        : Queue.fail(events, completion.error).pipe(
+            Effect.andThen(Deferred.fail(closed, completion.error)),
+            Effect.asVoid,
+          );
+
+  const succeedSession = () =>
+    Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] =>
+      state._tag === "Closed"
+        ? [{ _tag: "None" }, state]
+        : [{ _tag: "Success" }, { _tag: "Closed", reason: "closed" }],
+    ).pipe(Effect.flatMap((completion) => completeSession(completion)));
+
+  const failSession = (error: VScopeDeviceError) =>
+    Ref.modify(closedState, (state): readonly [SessionCompletion, ClientClosedState] => {
+      if (state._tag === "Closed") {
+        return [{ _tag: "None" }, state];
+      }
+
+      if (state._tag === "Closing") {
+        return [
+          { _tag: "None" },
+          {
+            _tag: "Closing",
+            pendingError: state.pendingError ?? error,
+          },
+        ];
+      }
+
+      return [
+        { _tag: "Failure", error },
+        { _tag: "Closed", reason: sessionCloseReason(error) },
+      ];
+    }).pipe(Effect.flatMap((completion) => completeSession(completion)));
+
+  const close = <E>(closeTransport: Effect.Effect<void, E>): Effect.Effect<void, E> =>
+    Effect.uninterruptible(
       requestLock.withPermit(
         Effect.gen(function* () {
-          yield* ensureOpen(requestType);
-          const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
-          const retryAttempts = requestOptions.retryAttempts ?? defaultRetryAttempts;
+          const closeStart = yield* Ref.modify(
+            closedState,
+            (state): readonly [CloseStart, ClientClosedState] =>
+              state._tag === "Closed"
+                ? [{ _tag: "AlreadyClosed" }, state]
+                : [{ _tag: "StartClose" }, { _tag: "Closing", pendingError: undefined }],
+          );
+          if (closeStart._tag === "AlreadyClosed") {
+            yield* closeTransport;
+            return;
+          }
 
-          // One write/drain/read exchange. A response timeout is fatal: without
-          // sequence IDs a late reply would poison the next request, so we tear
-          // the session down rather than recover.
-          const exchange = Effect.gen(function* () {
-            yield* transport
-              .write(encoded)
-              .pipe(
-                Effect.mapError(
-                  (cause) => new VScopeTransportError({ path: transport.path, cause }),
-                ),
-              );
-            yield* transport.drain.pipe(
-              Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
-            );
+          const closeExit = yield* Effect.exit(closeTransport);
+          if (Exit.isFailure(closeExit)) {
+            const pendingError = yield* Ref.modify(
+              closedState,
+              (state): readonly [VScopeDeviceError | undefined, ClientClosedState] => {
+                if (state._tag !== "Closing") {
+                  return [undefined, state];
+                }
 
-            return yield* takeResponse(transport.path, events, requestType, responseType);
-          }).pipe(
-            Effect.timeoutOrElse({
-              duration: `${timeoutMillis} millis`,
-              orElse: () => {
-                const error = new VScopeResponseTimeoutError({
-                  path: transport.path,
-                  requestType,
-                  timeoutMillis,
-                });
-
-                return failSession(error).pipe(
-                  Effect.andThen(transport.close.pipe(Effect.ignore)),
-                  Effect.andThen(Effect.fail(error)),
-                );
+                return state.pendingError
+                  ? [
+                      state.pendingError,
+                      {
+                        _tag: "Closed",
+                        reason: sessionCloseReason(state.pendingError),
+                      },
+                    ]
+                  : [undefined, { _tag: "Open" }];
               },
-            }),
-          );
+            );
+            if (pendingError) {
+              yield* completeSession({ _tag: "Failure", error: pendingError });
+            }
+            return yield* Effect.failCause(closeExit.cause);
+          }
 
-          // A CRC-corrupted response is a complete frame fully consumed by the
-          // parser, so the queue stays aligned and re-sending the same request is
-          // safe. Only those failures retry; everything else fails through.
-          return yield* exchange.pipe(
-            Effect.retry({
-              schedule: Schedule.recurs(retryAttempts),
-              while: (error) => error instanceof VScopeFrameParseError,
-            }),
-          );
+          yield* succeedSession();
         }),
+      ),
+    );
+  yield* Effect.gen(function* () {
+    while (true) {
+      const chunk = yield* transport.read.pipe(
+        Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
       );
 
-    return {
-      request,
-      closed: Deferred.await(closed),
-      close,
-    };
-  });
+      for (const event of parser.pushEvents(chunk)) {
+        yield* Queue.offer(events, event);
+      }
+    }
+  }).pipe(
+    Effect.catch((error) => failSession(error)),
+    Effect.forkScoped,
+  );
 
-const takeResponse = (
+  const request: VScopeClient["request"] = (
+    requestType: VScopeMessageType,
+    responseType: VScopeMessageType,
+    payload = new Uint8Array(),
+    requestOptions = {},
+  ) =>
+    requestLock.withPermit(
+      Effect.gen(function* () {
+        yield* ensureOpen(requestType);
+        const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
+        const retryAttempts = requestOptions.retryAttempts ?? defaultRetryAttempts;
+
+        // One write/drain/read exchange. A response timeout is fatal: without
+        // sequence IDs a late reply would poison the next request, so we tear
+        // the session down rather than recover.
+        const exchange = Effect.gen(function* () {
+          yield* transport
+            .write(encoded)
+            .pipe(
+              Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
+            );
+          yield* transport.drain.pipe(
+            Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
+          );
+
+          return yield* takeResponse(transport.path, events, requestType, responseType);
+        }).pipe(
+          Effect.timeoutOrElse({
+            duration: `${timeoutMillis} millis`,
+            orElse: () => {
+              const error = new VScopeResponseTimeoutError({
+                path: transport.path,
+                requestType,
+                timeoutMillis,
+              });
+
+              return failSession(error).pipe(
+                Effect.andThen(transport.close.pipe(Effect.ignore)),
+                Effect.andThen(Effect.fail(error)),
+              );
+            },
+          }),
+        );
+
+        // A CRC-corrupted response is a complete frame fully consumed by the
+        // parser, so the queue stays aligned and re-sending the same request is
+        // safe. Only those failures retry; everything else fails through.
+        return yield* exchange.pipe(
+          Effect.retry({
+            schedule: Schedule.recurs(retryAttempts),
+            while: (error) => error instanceof VScopeFrameParseError,
+          }),
+        );
+      }),
+    );
+
+  return {
+    request,
+    closed: Deferred.await(closed),
+    close,
+  };
+});
+
+const takeResponse = Effect.fn("VScopeClient.takeResponse")(function* (
   path: string,
   events: Queue.Dequeue<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>,
   requestType: VScopeMessageType,
   responseType: VScopeMessageType,
-): Effect.Effect<Uint8Array, VScopeDeviceError> =>
-  Effect.gen(function* () {
-    const event = yield* Queue.take(events).pipe(
-      Effect.mapError((error) =>
-        Cause.isDone(error)
-          ? new VScopeTransportError({
-              path,
-              cause: new SerialConnectionClosedError({ path, operation: "read" }),
-            })
-          : error,
-      ),
-    );
+) {
+  const event = yield* Queue.take(events).pipe(
+    Effect.mapError((error) =>
+      Cause.isDone(error)
+        ? new VScopeTransportError({
+            path,
+            cause: new SerialConnectionClosedError({ path, operation: "read" }),
+          })
+        : error,
+    ),
+  );
 
-    if (event._tag === "InvalidFrame") {
-      return yield* event.error;
-    }
+  if (event._tag === "InvalidFrame") {
+    return yield* event.error;
+  }
 
-    const { frame } = event;
+  const { frame } = event;
 
-    if (frame.type === VScopeMessageType.Error) {
-      return yield* decodeFirmwareError(path, requestType, frame.payload);
-    }
+  if (frame.type === VScopeMessageType.Error) {
+    return yield* decodeFirmwareError(path, requestType, frame.payload);
+  }
 
-    if (frame.type !== responseType) {
-      return yield* new VScopeUnexpectedResponseError({
-        path,
-        requestType,
-        responseType: frame.type,
-      });
-    }
+  if (frame.type !== responseType) {
+    return yield* new VScopeUnexpectedResponseError({
+      path,
+      requestType,
+      responseType: frame.type,
+    });
+  }
 
-    return frame.payload;
-  });
+  return frame.payload;
+});
 
 interface DeviceParts {
   readonly transport: SerialTransport;
   readonly client: VScopeClient;
   readonly info: VScopeDeviceInfo;
-  readonly littleEndian: boolean;
+  readonly codec: Codec;
   readonly metadataRef: Ref.Ref<VScopeStaticMetadata>;
 }
 
 const makeDevice = (parts: DeviceParts): VScopeDevice => {
-  const { transport, client, info, littleEndian, metadataRef } = parts;
+  const { transport, client, info, codec, metadataRef } = parts;
   const path = transport.path;
 
-  const getTimingEffect = getTiming(path, client, info, littleEndian);
-  const getStatusEffect = getStatus(path, client);
+  const getTimingEffect = getTiming(path, client, codec, info);
+  const getStatusEffect = getStatus(path, client, codec);
   const getStateEffect = getStatusEffect.pipe(Effect.map((status) => status.state));
-  const getSnapshotHeaderEffect = getSnapshotHeader(path, client, info, littleEndian);
-  const getVariableCatalogEffect = getNames(path, client, {
+  const getSnapshotHeaderEffect = getSnapshotHeader(path, client, codec, info);
+  const getVariableCatalogEffect = getNames(path, client, codec, {
     requestType: VScopeMessageType.GetVarList,
     expectedTotal: info.variableCount,
     nameLength: info.nameLength,
   });
-  const getRtLabelsEffect = getNames(path, client, {
+  const getRtLabelsEffect = getNames(path, client, codec, {
     requestType: VScopeMessageType.GetRtLabels,
     expectedTotal: info.rtCount,
     nameLength: info.nameLength,
   });
-  const getChannelMapEffect = getChannelMap(path, client, info);
+  const getChannelMapEffect = getChannelMap(path, client, codec, info);
 
-  const setState = (state: VScopeStateValue) =>
-    validateState(path, state).pipe(
-      Effect.andThen(
-        client
-          .request(VScopeMessageType.SetState, VScopeMessageType.SetState, Uint8Array.of(state))
-          .pipe(Effect.map((payload) => decodeStatus(path, VScopeMessageType.SetState, payload))),
-      ),
-      catchDecode(path, VScopeMessageType.SetState),
+  const setState = Effect.fn("VScope.setState")(function* (state: VScopeStateValue) {
+    yield* validateState(path, state);
+    const payload = yield* client.request(
+      VScopeMessageType.SetState,
+      VScopeMessageType.SetState,
+      Uint8Array.of(state),
     );
+    return yield* readPayload(codec, path, VScopeMessageType.SetState, payload, decodeStatus);
+  });
 
   const waitForState = (state: VScopeStateValue, options?: StateWaitOptions) =>
     pollStatus(path, getStatusEffect, state, options);
 
-  const setChannelMap = (channel: number, variable: number) =>
-    validateChannelMap(path, info, channel, variable).pipe(
-      Effect.andThen(
-        client.request(
-          VScopeMessageType.SetChannelMap,
-          VScopeMessageType.SetChannelMap,
-          Uint8Array.of(channel, variable),
-        ),
-      ),
-      Effect.flatMap((payload) => decodeSetChannelMap(path, payload)),
-      Effect.flatMap(([updatedChannel, updatedVariable]) =>
-        Ref.updateAndGet(metadataRef, (current) => {
-          const nextMap =
-            current.channelMap.length === info.channelCount
-              ? [...current.channelMap]
-              : Array.from({ length: info.channelCount }, () => 0);
-          nextMap[updatedChannel] = updatedVariable;
-          return { ...current, channelMap: nextMap };
-        }).pipe(Effect.map((metadata) => metadata.channelMap)),
-      ),
+  const setChannelMap = Effect.fn("VScope.setChannelMap")(function* (
+    channel: number,
+    variable: number,
+  ) {
+    yield* validateChannelMap(path, info, channel, variable);
+    const payload = yield* client.request(
+      VScopeMessageType.SetChannelMap,
+      VScopeMessageType.SetChannelMap,
+      Uint8Array.of(channel, variable),
     );
+    const [updatedChannel, updatedVariable] = yield* readPayload(
+      codec,
+      path,
+      VScopeMessageType.SetChannelMap,
+      payload,
+      (reader) => {
+        const updatedChannel = reader.u8();
+        const updatedVariable = reader.u8();
+        const result: readonly [number, number] = [updatedChannel, updatedVariable];
+        return result;
+      },
+    );
+    return yield* Ref.updateAndGet(metadataRef, (current) => {
+      const nextMap =
+        current.channelMap.length === info.channelCount
+          ? [...current.channelMap]
+          : Array.from({ length: info.channelCount }, () => 0);
+      nextMap[updatedChannel] = updatedVariable;
+      return { ...current, channelMap: nextMap };
+    }).pipe(Effect.map((metadata) => metadata.channelMap));
+  });
 
   const snapshotBytes = (
     options: SnapshotBytesOptions = {},
@@ -464,12 +508,13 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
           const chunkSamples = snapshotChunkSamples(header.channelCount, options.samplesPerChunk);
           const count = Math.min(chunkSamples, header.sampleCount - startSample);
 
-          return getSnapshotData(path, client, {
+          return getSnapshotData(path, client, codec, {
             startSample,
             count,
             channelCount: header.channelCount,
-            littleEndian,
-          }).pipe(Effect.map((bytes) => [bytes, startSample + count] as const));
+          }).pipe(
+            Effect.map((bytes): readonly [Uint8Array, number] => [bytes, startSample + count]),
+          );
         }),
       ),
     );
@@ -488,8 +533,8 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     info,
     metadata: Ref.get(metadataRef),
     getTiming: getTimingEffect,
-    setTiming: (timing) => setTiming(path, client, info, littleEndian, timing),
-    getStatus: (options) => getStatus(path, client, options),
+    setTiming: (timing) => setTiming(path, client, codec, info, timing),
+    getStatus: (options) => getStatus(path, client, codec, options),
     getState: getStateEffect,
     start: (options) =>
       setState(VScopeState.Running).pipe(
@@ -498,7 +543,7 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     stop: (options) =>
       setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
     trigger: setState(VScopeState.Acquiring).pipe(Effect.map(markAcquisitionRequested)),
-    getFrame: (options) => getFrame(path, client, info, littleEndian, options),
+    getFrame: (options) => getFrame(path, client, codec, info, options),
     getSnapshotHeader: getSnapshotHeaderEffect,
     snapshotBytes,
     collectSnapshotBytes,
@@ -506,202 +551,165 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     getChannelMap: getChannelMapEffect,
     setChannelMap,
     getRtLabels: getRtLabelsEffect,
-    getRtValue: (index) => getRtValue(path, client, info, littleEndian, index),
-    setRtValue: (index, value) => setRtValue(path, client, info, littleEndian, index, value),
-    getTrigger: getTrigger(path, client, littleEndian),
-    setTrigger: (trigger) => setTrigger(path, client, info, littleEndian, trigger),
+    getRtValue: (index) => getRtValue(path, client, codec, info, index),
+    setRtValue: (index, value) => setRtValue(path, client, codec, info, index, value),
+    getTrigger: getTrigger(path, client, codec),
+    setTrigger: (trigger) => setTrigger(path, client, codec, info, trigger),
     closed: client.closed,
     close: client.close(transport.close),
   };
 };
 
-const getInfo = (
+const getInfo = Effect.fn("VScope.getInfo")(function* (path: string, client: VScopeClient) {
+  const payload = yield* client.request(VScopeMessageType.GetInfo, VScopeMessageType.GetInfo);
+  return yield* decoding(path, VScopeMessageType.GetInfo, () => {
+    // GetInfo is self-describing: its endianness byte (offset 9) governs the
+    // multi-byte fields that precede it, so peek it before sequential reads.
+    const littleEndian = new ByteReader(payload, true).peekU8(9) !== VScopeEndianness.Big;
+    const reader = new ByteReader(payload, littleEndian);
+    const channelCount = reader.u8();
+    const bufferSize = reader.u16();
+    const isrKHz = reader.u16();
+    const variableCount = reader.u8();
+    const rtCount = reader.u8();
+    const rtBufferCapacity = reader.u8();
+    const nameLength = reader.u8();
+    reader.skip(1); // endianness byte, already resolved via peek
+    const deviceName = reader.fixedString(16);
+    reader.end();
+
+    return {
+      channelCount,
+      bufferSize,
+      isrKHz,
+      variableCount,
+      rtCount,
+      rtBufferCapacity,
+      nameLength,
+      endianness: littleEndian ? VScopeEndianness.Little : VScopeEndianness.Big,
+      deviceName,
+    };
+  });
+});
+
+const getTiming = Effect.fn("VScope.getTiming")(function* (
   path: string,
   client: VScopeClient,
-): Effect.Effect<VScopeDeviceInfo, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetInfo, VScopeMessageType.GetInfo).pipe(
-    Effect.map((payload) => {
-      const expectedLength = 10 + 16;
-      if (payload.byteLength !== expectedLength) {
-        throw new VScopeDecodeError({
-          path,
-          messageType: VScopeMessageType.GetInfo,
-          reason: `Expected ${expectedLength} bytes, got ${payload.byteLength}`,
-        });
-      }
-
-      const endianness =
-        payload[9] === VScopeEndianness.Big ? VScopeEndianness.Big : VScopeEndianness.Little;
-      const littleEndian = endianness === VScopeEndianness.Little;
-      const view = dataView(payload);
-
-      return {
-        channelCount: payload[0],
-        bufferSize: readU16(view, 1, littleEndian),
-        isrKHz: readU16(view, 3, littleEndian),
-        variableCount: payload[5],
-        rtCount: payload[6],
-        rtBufferCapacity: payload[7],
-        nameLength: payload[8],
-        endianness,
-        deviceName: fixedString(payload.subarray(10, 26)),
-      };
-    }),
-    Effect.catchDefect((defect) =>
-      defect instanceof VScopeDecodeError
-        ? Effect.fail(defect)
-        : Effect.fail(
-            new VScopeDecodeError({
-              path,
-              messageType: VScopeMessageType.GetInfo,
-              reason: String(defect),
-            }),
-          ),
-    ),
-  );
-
-const getTiming = (
-  path: string,
-  client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
-): Effect.Effect<VScopeTiming, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetTiming, VScopeMessageType.GetTiming).pipe(
-    Effect.map((payload) => {
-      expectLength(path, VScopeMessageType.GetTiming, payload, 8);
-      const view = dataView(payload);
-      return decodeTiming(info, readU32(view, 0, littleEndian), readU32(view, 4, littleEndian));
-    }),
-    catchDecode(path, VScopeMessageType.GetTiming),
+) {
+  const payload = yield* client.request(VScopeMessageType.GetTiming, VScopeMessageType.GetTiming);
+  return yield* readPayload(codec, path, VScopeMessageType.GetTiming, payload, (reader) =>
+    decodeTimingResponse(reader, info),
   );
+});
 
-const setTiming = (
+const setTiming = Effect.fn("VScope.setTiming")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
   timing: VScopeTiming,
-): Effect.Effect<VScopeTiming, VScopeDeviceError> =>
-  validateTiming(path, info, timing).pipe(
-    Effect.andThen(
-      Effect.sync(() => {
-        const firmwareTiming = encodeTiming(info, timing);
-        const payload = new Uint8Array(8);
-        writeU32(payload, 0, firmwareTiming.divider, littleEndian);
-        writeU32(payload, 4, firmwareTiming.preTrig, littleEndian);
-        return payload;
-      }),
-    ),
-    Effect.flatMap((payload) =>
-      client.request(VScopeMessageType.SetTiming, VScopeMessageType.SetTiming, payload),
-    ),
-    Effect.map((payload) => {
-      expectLength(path, VScopeMessageType.SetTiming, payload, 8);
-      const view = dataView(payload);
-      return decodeTiming(info, readU32(view, 0, littleEndian), readU32(view, 4, littleEndian));
-    }),
-    catchDecode(path, VScopeMessageType.SetTiming),
+) {
+  yield* validateTiming(path, info, timing);
+  const firmwareTiming = encodeTiming(info, timing);
+  const request = codec
+    .writer(8)
+    .u32(firmwareTiming.divider)
+    .u32(firmwareTiming.preTrig)
+    .toUint8Array();
+  const payload = yield* client.request(
+    VScopeMessageType.SetTiming,
+    VScopeMessageType.SetTiming,
+    request,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.SetTiming, payload, (reader) =>
+    decodeTimingResponse(reader, info),
+  );
+});
 
-const getStatus = (
+const getStatus = Effect.fn("VScope.getStatus")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   options?: VScopeRequestOptions,
-): Effect.Effect<VScopeControlStatus, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetStatus, VScopeMessageType.GetStatus, undefined, options).pipe(
-    Effect.map((payload) => decodeStatus(path, VScopeMessageType.GetStatus, payload)),
-    catchDecode(path, VScopeMessageType.GetStatus),
+) {
+  const payload = yield* client.request(
+    VScopeMessageType.GetStatus,
+    VScopeMessageType.GetStatus,
+    undefined,
+    options,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.GetStatus, payload, decodeStatus);
+});
 
-const getFrame = (
+const getFrame = Effect.fn("VScope.getFrame")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
   options?: VScopeRequestOptions,
-): Effect.Effect<Float32Array, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetFrame, VScopeMessageType.GetFrame, undefined, options).pipe(
-    Effect.map((payload) =>
-      decodeFloatArray(path, VScopeMessageType.GetFrame, payload, info.channelCount, littleEndian),
-    ),
-    catchDecode(path, VScopeMessageType.GetFrame),
+) {
+  const payload = yield* client.request(
+    VScopeMessageType.GetFrame,
+    VScopeMessageType.GetFrame,
+    undefined,
+    options,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.GetFrame, payload, (reader) =>
+    Array.from(reader.f32Array(info.channelCount)),
+  );
+});
 
-const getSnapshotHeader = (
+const getSnapshotHeader = Effect.fn("VScope.getSnapshotHeader")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
-): Effect.Effect<VScopeSnapshotHeader, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetSnapshotHeader, VScopeMessageType.GetSnapshotHeader).pipe(
-    Effect.map((payload) => {
-      const expectedLength = info.channelCount + 14 + info.rtCount * 4;
-      expectLength(path, VScopeMessageType.GetSnapshotHeader, payload, expectedLength);
-      const view = dataView(payload);
-      const offset = info.channelCount;
-      const divider = readU32(view, offset, littleEndian);
-      const preTrig = readU32(view, offset + 4, littleEndian);
-      const timing = decodeTiming(info, divider, preTrig);
-      return {
-        channelMap: Array.from(payload.subarray(0, info.channelCount)),
-        sampleRateHz: baseSampleRateHz(info) / divider,
-        totalDurationSeconds: timing.totalDurationSeconds,
-        preTriggerSeconds: timing.preTriggerSeconds,
-        trigger: {
-          threshold: readF32(view, offset + 8, littleEndian),
-          channel: payload[offset + 12],
-          mode: decodeTriggerMode(path, VScopeMessageType.GetSnapshotHeader, payload[offset + 13]),
-        },
-        rtValues: Array.from(
-          decodeFloatArray(
-            path,
-            VScopeMessageType.GetSnapshotHeader,
-            payload.subarray(offset + 14),
-            info.rtCount,
-            littleEndian,
-          ),
-        ),
-        channelCount: info.channelCount,
-        sampleCount: info.bufferSize,
-        byteLength: info.bufferSize * info.channelCount * Float32Array.BYTES_PER_ELEMENT,
-      };
-    }),
-    catchDecode(path, VScopeMessageType.GetSnapshotHeader),
+) {
+  const payload = yield* client.request(
+    VScopeMessageType.GetSnapshotHeader,
+    VScopeMessageType.GetSnapshotHeader,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.GetSnapshotHeader, payload, (reader) =>
+    decodeSnapshotHeader(reader, info),
+  );
+});
 
-const getSnapshotData = (
+const getSnapshotData = Effect.fn("VScope.getSnapshotData")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   options: {
     readonly startSample: number;
     readonly count: number;
     readonly channelCount: number;
-    readonly littleEndian: boolean;
   },
-): Effect.Effect<Uint8Array, VScopeDeviceError> =>
-  validateSnapshotRequest(path, options.channelCount, options.startSample, options.count).pipe(
-    Effect.andThen(
-      Effect.sync(() => {
-        const request = new Uint8Array(3);
-        writeU16(request, 0, options.startSample, options.littleEndian);
-        request[2] = options.count;
-        return request;
-      }),
-    ),
-    Effect.flatMap((payload) =>
-      client.request(VScopeMessageType.GetSnapshotData, VScopeMessageType.GetSnapshotData, payload),
-    ),
-    Effect.map((payload) => {
-      const expectedLength = options.count * options.channelCount * Float32Array.BYTES_PER_ELEMENT;
-      expectLength(path, VScopeMessageType.GetSnapshotData, payload, expectedLength);
-      return normalizeF32Bytes(payload, options.littleEndian);
-    }),
-    catchDecode(path, VScopeMessageType.GetSnapshotData),
+) {
+  yield* validateSnapshotRequest(path, options.channelCount, options.startSample, options.count);
+  const request = codec.writer(3).u16(options.startSample).u8(options.count).toUint8Array();
+  const payload = yield* client.request(
+    VScopeMessageType.GetSnapshotData,
+    VScopeMessageType.GetSnapshotData,
+    request,
   );
+  return yield* decoding(path, VScopeMessageType.GetSnapshotData, () => {
+    const expectedLength = options.count * options.channelCount * Float32Array.BYTES_PER_ELEMENT;
+    if (payload.byteLength !== expectedLength) {
+      throw new VScopeDecodeError({
+        path,
+        messageType: VScopeMessageType.GetSnapshotData,
+        reason: `Expected ${expectedLength} bytes, got ${payload.byteLength}`,
+      });
+    }
+    return normalizeF32Bytes(codec, payload);
+  });
+});
 
-const getNames = (
+const getNames = Effect.fn("VScope.getNames")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   options: {
     readonly requestType:
       | typeof VScopeMessageType.GetVarList
@@ -709,153 +717,125 @@ const getNames = (
     readonly expectedTotal: number;
     readonly nameLength: number;
   },
-): Effect.Effect<ReadonlyArray<string>, VScopeDeviceError> => {
-  const readPage = (
-    start: number,
-    names: ReadonlyArray<string>,
-  ): Effect.Effect<ReadonlyArray<string>, VScopeDeviceError> =>
-    client.request(options.requestType, options.requestType, Uint8Array.of(start, 0xff)).pipe(
-      Effect.flatMap((payload) => {
-        if (payload.byteLength < 3) {
-          return Effect.fail(
-            new VScopeDecodeError({
-              path,
-              messageType: options.requestType,
-              reason: `Expected at least 3 bytes, got ${payload.byteLength}`,
-            }),
-          );
-        }
+) {
+  let start = 0;
+  let names: ReadonlyArray<string> = [];
 
-        const total = payload[0];
-        const pageStart = payload[1];
-        const count = payload[2];
-        const expectedLength = 3 + count * options.nameLength;
-        if (payload.byteLength !== expectedLength) {
-          return Effect.fail(
-            new VScopeDecodeError({
-              path,
-              messageType: options.requestType,
-              reason: `Expected ${expectedLength} bytes, got ${payload.byteLength}`,
-            }),
-          );
-        }
-
-        const pageNames = Array.from({ length: count }, (_, index) => {
-          const offset = 3 + index * options.nameLength;
-          return fixedString(payload.subarray(offset, offset + options.nameLength));
-        });
-        const nextNames = [...names, ...pageNames];
-
-        if (count === 0 || nextNames.length >= total || nextNames.length >= options.expectedTotal) {
-          return Effect.succeed(nextNames.slice(0, total));
-        }
-
-        return readPage(pageStart + count, nextNames);
-      }),
+  while (true) {
+    const payload = yield* client.request(
+      options.requestType,
+      options.requestType,
+      Uint8Array.of(start, 0xff),
     );
+    const page = yield* decoding(path, options.requestType, () => {
+      const reader = codec.reader(payload);
+      const total = reader.u8();
+      const pageStart = reader.u8();
+      const count = reader.u8();
+      const pageNames = Array.from({ length: count }, () => reader.fixedString(options.nameLength));
+      reader.end();
+      return { total, pageStart, count, pageNames };
+    });
 
-  return readPage(0, []);
-};
+    names = [...names, ...page.pageNames];
+    if (page.count === 0 || names.length >= page.total || names.length >= options.expectedTotal) {
+      return names.slice(0, page.total);
+    }
 
-const getChannelMap = (
+    start = page.pageStart + page.count;
+  }
+});
+
+const getChannelMap = Effect.fn("VScope.getChannelMap")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-): Effect.Effect<ReadonlyArray<number>, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetChannelMap, VScopeMessageType.GetChannelMap).pipe(
-    Effect.map((payload) => {
-      expectLength(path, VScopeMessageType.GetChannelMap, payload, info.channelCount);
-      return Array.from(payload);
-    }),
-    catchDecode(path, VScopeMessageType.GetChannelMap),
+) {
+  const payload = yield* client.request(
+    VScopeMessageType.GetChannelMap,
+    VScopeMessageType.GetChannelMap,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.GetChannelMap, payload, (reader) =>
+    reader.u8Array(info.channelCount),
+  );
+});
 
-const getRtValue = (
+const getRtValue = Effect.fn("VScope.getRtValue")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
   index: number,
-): Effect.Effect<number, VScopeDeviceError> =>
-  validateRtIndex(path, info, index).pipe(
-    Effect.andThen(
-      client.request(
-        VScopeMessageType.GetRtBuffer,
-        VScopeMessageType.GetRtBuffer,
-        Uint8Array.of(index),
-      ),
-    ),
-    Effect.map((payload) =>
-      decodeSingleF32(path, VScopeMessageType.GetRtBuffer, payload, littleEndian),
-    ),
-    catchDecode(path, VScopeMessageType.GetRtBuffer),
+) {
+  yield* validateRtIndex(path, info, index);
+  const payload = yield* client.request(
+    VScopeMessageType.GetRtBuffer,
+    VScopeMessageType.GetRtBuffer,
+    Uint8Array.of(index),
   );
+  return yield* readPayload(codec, path, VScopeMessageType.GetRtBuffer, payload, (reader) =>
+    reader.f32(),
+  );
+});
 
-const setRtValue = (
+const setRtValue = Effect.fn("VScope.setRtValue")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
   index: number,
   value: number,
-): Effect.Effect<number, VScopeDeviceError> =>
-  validateRtIndex(path, info, index).pipe(
-    Effect.andThen(
-      Effect.sync(() => {
-        const payload = new Uint8Array(5);
-        payload[0] = index;
-        writeF32(payload, 1, value, littleEndian);
-        return payload;
-      }),
-    ),
-    Effect.flatMap((payload) =>
-      client.request(VScopeMessageType.SetRtBuffer, VScopeMessageType.SetRtBuffer, payload),
-    ),
-    Effect.map((payload) =>
-      decodeSingleF32(path, VScopeMessageType.SetRtBuffer, payload, littleEndian),
-    ),
-    catchDecode(path, VScopeMessageType.SetRtBuffer),
+) {
+  yield* validateRtIndex(path, info, index);
+  const request = codec.writer(5).u8(index).f32(value).toUint8Array();
+  const payload = yield* client.request(
+    VScopeMessageType.SetRtBuffer,
+    VScopeMessageType.SetRtBuffer,
+    request,
   );
+  return yield* readPayload(codec, path, VScopeMessageType.SetRtBuffer, payload, (reader) =>
+    reader.f32(),
+  );
+});
 
-const getTrigger = (
+const getTrigger = Effect.fn("VScope.getTrigger")(function* (
   path: string,
   client: VScopeClient,
-  littleEndian: boolean,
-): Effect.Effect<VScopeTrigger, VScopeDeviceError> =>
-  client.request(VScopeMessageType.GetTrigger, VScopeMessageType.GetTrigger).pipe(
-    Effect.map((payload) =>
-      decodeTrigger(path, VScopeMessageType.GetTrigger, payload, littleEndian),
-    ),
-    catchDecode(path, VScopeMessageType.GetTrigger),
-  );
+  codec: Codec,
+) {
+  const payload = yield* client.request(VScopeMessageType.GetTrigger, VScopeMessageType.GetTrigger);
+  return yield* readPayload(codec, path, VScopeMessageType.GetTrigger, payload, decodeTrigger);
+});
 
-const setTrigger = (
+const setTrigger = Effect.fn("VScope.setTrigger")(function* (
   path: string,
   client: VScopeClient,
+  codec: Codec,
   info: VScopeDeviceInfo,
-  littleEndian: boolean,
   trigger: VScopeTrigger,
-): Effect.Effect<VScopeTrigger, VScopeDeviceError> =>
-  Effect.gen(function* () {
-    const mode = yield* validateTrigger(path, info, trigger);
-    const payload = new Uint8Array(6);
-    writeF32(payload, 0, trigger.threshold, littleEndian);
-    payload[4] = trigger.channel;
-    payload[5] = mode;
-    const response = yield* client.request(
-      VScopeMessageType.SetTrigger,
-      VScopeMessageType.SetTrigger,
-      payload,
-    );
-    return decodeTrigger(path, VScopeMessageType.SetTrigger, response, littleEndian);
-  }).pipe(catchDecode(path, VScopeMessageType.SetTrigger));
+) {
+  const mode = yield* validateTrigger(path, info, trigger);
+  const request = codec
+    .writer(6)
+    .f32(trigger.threshold)
+    .u8(trigger.channel)
+    .u8(mode)
+    .toUint8Array();
+  const payload = yield* client.request(
+    VScopeMessageType.SetTrigger,
+    VScopeMessageType.SetTrigger,
+    request,
+  );
+  return yield* readPayload(codec, path, VScopeMessageType.SetTrigger, payload, decodeTrigger);
+});
 
-const pollStatus = (
+const pollStatus = Effect.fn("VScope.pollStatus")(function* (
   path: string,
   getStatusEffect: Effect.Effect<VScopeControlStatus, VScopeDeviceError>,
   target: VScopeStateValue,
   options: StateWaitOptions = {},
-): Effect.Effect<VScopeControlStatus, VScopeDeviceError> => {
+) {
   const timeoutMillis = options.timeoutMillis ?? 2000;
   const pollIntervalMillis = options.pollIntervalMillis ?? 20;
 
@@ -869,7 +849,7 @@ const pollStatus = (
     return yield* loop;
   });
 
-  return loop.pipe(
+  return yield* loop.pipe(
     Effect.timeoutOrElse({
       duration: `${timeoutMillis} millis`,
       orElse: () =>
@@ -882,17 +862,12 @@ const pollStatus = (
         ),
     }),
   );
-};
+});
 
-const decodeStatus = (
-  path: string,
-  messageType: VScopeMessageType,
-  payload: Uint8Array,
-): VScopeControlStatus => {
-  expectLength(path, messageType, payload, 3);
-  const state = decodeStateByte(path, messageType, payload[0]);
-  const requestedState = decodeRequestedStateByte(path, messageType, payload[1]);
-  const flags = payload[2];
+const decodeStatus = (reader: ByteReader): VScopeControlStatus => {
+  const state = decodeStateByte(reader.u8());
+  const requestedState = decodeRequestedStateByte(reader.u8());
+  const flags = reader.u8();
   return {
     state,
     requestedState,
@@ -903,11 +878,7 @@ const decodeStatus = (
   };
 };
 
-const decodeStateByte = (
-  path: string,
-  messageType: VScopeMessageType,
-  value: number | undefined,
-): VScopeStateValue => {
+const decodeStateByte = (value: number): VScopeStateValue => {
   switch (value) {
     case VScopeState.Halted:
     case VScopeState.Running:
@@ -915,30 +886,18 @@ const decodeStateByte = (
     case VScopeState.Misconfigured:
       return value;
     default:
-      throw new VScopeDecodeError({
-        path,
-        messageType,
-        reason: `Unknown state ${String(value)}`,
-      });
+      throw new Error(`Unknown state ${value}`);
   }
 };
 
-const decodeRequestedStateByte = (
-  path: string,
-  messageType: VScopeMessageType,
-  value: number | undefined,
-): VScopeStateValue => {
+const decodeRequestedStateByte = (value: number): VScopeStateValue => {
   switch (value) {
     case VScopeState.Halted:
     case VScopeState.Running:
     case VScopeState.Acquiring:
       return value;
     default:
-      throw new VScopeDecodeError({
-        path,
-        messageType,
-        reason: `Unknown requested state ${String(value)}`,
-      });
+      throw new Error(`Unknown requested state ${value}`);
   }
 };
 
@@ -951,27 +910,32 @@ const markAcquisitionRequested = (status: VScopeControlStatus): VScopeControlSta
   flags: status.triggerEnabled ? VScopeStatusFlag.TriggerEnabled : 0,
 });
 
-const decodeSetChannelMap = (
-  path: string,
-  payload: Uint8Array,
-): Effect.Effect<readonly [number, number], VScopeDecodeError> =>
-  Effect.sync(() => {
-    expectLength(path, VScopeMessageType.SetChannelMap, payload, 2);
-    return [payload[0], payload[1]] as const;
-  }).pipe(catchDecode(path, VScopeMessageType.SetChannelMap));
+const decodeTrigger = (reader: ByteReader): VScopeTrigger => {
+  const threshold = reader.f32();
+  const channel = reader.u8();
+  const mode = decodeTriggerMode(reader.u8());
+  return { threshold, channel, mode };
+};
 
-const decodeTrigger = (
-  path: string,
-  messageType: VScopeMessageType,
-  payload: Uint8Array,
-  littleEndian: boolean,
-): VScopeTrigger => {
-  expectLength(path, messageType, payload, 6);
-  const view = dataView(payload);
+const decodeSnapshotHeader = (reader: ByteReader, info: VScopeDeviceInfo): VScopeSnapshotHeader => {
+  const channelMap = reader.u8Array(info.channelCount);
+  const divider = reader.u32();
+  const preTrig = reader.u32();
+  const timing = decodeTiming(info, divider, preTrig);
+  const threshold = reader.f32();
+  const channel = reader.u8();
+  const mode = decodeTriggerMode(reader.u8());
+  const rtValues = Array.from(reader.f32Array(info.rtCount));
   return {
-    threshold: readF32(view, 0, littleEndian),
-    channel: payload[4],
-    mode: decodeTriggerMode(path, messageType, payload[5]),
+    channelMap,
+    sampleRateHz: baseSampleRateHz(info) / divider,
+    totalDurationSeconds: timing.totalDurationSeconds,
+    preTriggerSeconds: timing.preTriggerSeconds,
+    trigger: { threshold, channel, mode },
+    rtValues,
+    channelCount: info.channelCount,
+    sampleCount: info.bufferSize,
+    byteLength: info.bufferSize * info.channelCount * Float32Array.BYTES_PER_ELEMENT,
   };
 };
 
@@ -990,11 +954,7 @@ function encodeTriggerMode(mode: TriggerMode): VScopeWireTriggerMode | null {
   }
 }
 
-function decodeTriggerMode(
-  path: string,
-  messageType: VScopeMessageType,
-  mode: number,
-): TriggerMode {
+function decodeTriggerMode(mode: number): TriggerMode {
   switch (mode) {
     case VScopeTriggerMode.Disabled:
       return "disabled";
@@ -1005,11 +965,7 @@ function decodeTriggerMode(
     case VScopeTriggerMode.Both:
       return "both";
     default:
-      throw new VScopeDecodeError({
-        path,
-        messageType,
-        reason: `Invalid trigger mode ${mode}`,
-      });
+      throw new Error(`Invalid trigger mode ${mode}`);
   }
 }
 
@@ -1018,60 +974,35 @@ const decodeFirmwareError = (
   requestType: VScopeMessageType,
   payload: Uint8Array,
 ): VScopeFirmwareError => {
-  const status = payload[0] as VScopeStatusValue | undefined;
+  const status = payload.byteLength >= 1 ? new ByteReader(payload, true).u8() : undefined;
   return new VScopeFirmwareError({
     path,
     requestType,
-    status: status ?? VScopeStatus.BadParam,
+    status: decodeFirmwareStatus(status),
     statusName: statusName(status),
   });
 };
 
-const decodeSingleF32 = (
-  path: string,
-  messageType: VScopeMessageType,
-  payload: Uint8Array,
-  littleEndian: boolean,
-): number => {
-  expectLength(path, messageType, payload, 4);
-  return readF32(dataView(payload), 0, littleEndian);
+const decodeFirmwareStatus = (value: number | undefined): VScopeStatusValue => {
+  switch (value) {
+    case VScopeStatus.BadLen:
+    case VScopeStatus.BadParam:
+    case VScopeStatus.Range:
+    case VScopeStatus.NotReady:
+      return value;
+    default:
+      return VScopeStatus.BadParam;
+  }
 };
 
-const decodeFloatArray = (
-  path: string,
-  messageType: VScopeMessageType,
-  payload: Uint8Array,
-  count: number,
-  littleEndian: boolean,
-): Float32Array => {
-  expectLength(path, messageType, payload, count * Float32Array.BYTES_PER_ELEMENT);
-  const view = dataView(payload);
-  const output = new Float32Array(count);
-  for (let index = 0; index < count; index += 1) {
-    output[index] = readF32(view, index * Float32Array.BYTES_PER_ELEMENT, littleEndian);
-  }
-  return output;
-};
-
-const normalizeF32Bytes = (payload: Uint8Array, littleEndian: boolean): Uint8Array => {
-  if (littleEndian) {
-    return Uint8Array.from(payload);
-  }
-
-  const output = new Uint8Array(payload.byteLength);
-  const input = dataView(payload);
-  const outputView = dataView(output);
+const normalizeF32Bytes = (codec: Codec, payload: Uint8Array): Uint8Array => {
   const count = payload.byteLength / Float32Array.BYTES_PER_ELEMENT;
-
+  const reader = codec.reader(payload);
+  const writer = new ByteWriter(payload.byteLength, true);
   for (let index = 0; index < count; index += 1) {
-    outputView.setFloat32(
-      index * Float32Array.BYTES_PER_ELEMENT,
-      input.getFloat32(index * Float32Array.BYTES_PER_ELEMENT, false),
-      true,
-    );
+    writer.f32(reader.f32());
   }
-
-  return output;
+  return writer.toUint8Array();
 };
 
 const validateTiming = (
@@ -1132,6 +1063,12 @@ const decodeTiming = (info: VScopeDeviceInfo, divider: number, preTrig: number):
     totalDurationSeconds: (info.bufferSize * divider) / sampleRateHz,
     preTriggerSeconds: (preTrig * divider) / sampleRateHz,
   };
+};
+
+const decodeTimingResponse = (reader: ByteReader, info: VScopeDeviceInfo): VScopeTiming => {
+  const divider = reader.u32();
+  const preTrig = reader.u32();
+  return decodeTiming(info, divider, preTrig);
 };
 
 const encodeTiming = (
@@ -1233,38 +1170,6 @@ const invalid = (
 ): Effect.Effect<never, VScopeInvalidArgumentError> =>
   Effect.fail(new VScopeInvalidArgumentError({ path, operation, reason }));
 
-const expectLength = (
-  path: string,
-  messageType: VScopeMessageType,
-  payload: Uint8Array,
-  expected: number,
-): void => {
-  if (payload.byteLength !== expected) {
-    throw new VScopeDecodeError({
-      path,
-      messageType,
-      reason: `Expected ${expected} bytes, got ${payload.byteLength}`,
-    });
-  }
-};
-
-const catchDecode =
-  (path: string, messageType: VScopeMessageType) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    effect.pipe(
-      Effect.catchDefect((defect) =>
-        defect instanceof VScopeDecodeError
-          ? Effect.fail(defect)
-          : Effect.fail(
-              new VScopeDecodeError({
-                path,
-                messageType,
-                reason: String(defect),
-              }),
-            ),
-      ),
-    );
-
 const concatBytes = (chunks: Iterable<Uint8Array>): Uint8Array => {
   const chunkArray = Array.from(chunks);
   const byteLength = chunkArray.reduce((sum, chunk) => sum + chunk.byteLength, 0);
@@ -1279,10 +1184,7 @@ const concatBytes = (chunks: Iterable<Uint8Array>): Uint8Array => {
   return output;
 };
 
-const dataView = (bytes: Uint8Array): DataView =>
-  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-
-const statusName = (status: VScopeStatusValue | undefined): string => {
+const statusName = (status: number | undefined): string => {
   switch (status) {
     case VScopeStatus.BadLen:
       return "BAD_LEN";

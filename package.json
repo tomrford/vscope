@@ -43,7 +43,7 @@
     "pack:dry": "pnpm pack --dry-run",
     "prepublishOnly": "pnpm run check && pnpm run pack:dry",
     "test": "pnpm -r test",
-    "typecheck": "tsc --project tsconfig.json --noEmit"
+    "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project packages/liveplot/tsconfig.json --noEmit && tsc --project packages/ui/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@effect/platform-browser": "4.0.0-beta.78",

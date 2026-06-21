@@ -1,5 +1,8 @@
+import type { Schema } from "effect";
 import type {
   RecoveryState,
+  RuntimeLogEntryDto,
+  RuntimeWarningDto,
   SerialConfig,
   Settings,
   SettingsPatch,
@@ -14,17 +17,8 @@ import type {
 
 export type RuntimeStatus = "ready" | "degraded";
 
-export interface RuntimeWarning {
-  readonly id: string;
-  readonly message: string;
-  readonly createdAt: string;
-}
-
-export interface RuntimeLogEntry {
-  readonly id: string;
-  readonly message: string;
-  readonly createdAt: string;
-}
+export type RuntimeWarning = Schema.Schema.Type<typeof RuntimeWarningDto>;
+export type RuntimeLogEntry = Schema.Schema.Type<typeof RuntimeLogEntryDto>;
 
 export interface RuntimeAppState {
   readonly bootedAt: string;

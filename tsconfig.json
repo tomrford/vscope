@@ -5,6 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
+    "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
@@ -26,5 +27,13 @@
     ]
   },
   "include": ["packages/**/*.ts", "src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "out", "grepo", "reference"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "out",
+    "grepo",
+    "reference",
+    "packages/ui",
+    "packages/liveplot"
+  ]
 }

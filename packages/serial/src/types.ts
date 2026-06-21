@@ -96,7 +96,7 @@ export interface VScopeDevice {
   readonly trigger: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getFrame: (
     options?: VScopeRequestOptions,
-  ) => Effect.Effect<Float32Array, VScopeDeviceError>;
+  ) => Effect.Effect<ReadonlyArray<number>, VScopeDeviceError>;
   readonly getSnapshotHeader: Effect.Effect<VScopeSnapshotHeader, VScopeDeviceError>;
   readonly snapshotBytes: (
     options?: SnapshotBytesOptions,

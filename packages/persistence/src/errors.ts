@@ -50,10 +50,4 @@ export type PersistenceError =
   | PersistenceValidationError
   | SnapshotNotFoundError;
 
-export function errorReason(cause: unknown): string {
-  if (cause instanceof Error) {
-    return cause.message;
-  }
-
-  return String(cause);
-}
+export { errorReason } from "@vscope/shared";

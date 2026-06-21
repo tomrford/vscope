@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
-import { Cause, Data, Effect, Exit, Queue, Schema, Semaphore, Stream } from "effect";
-import type * as Scope from "effect/Scope";
+import { Cause, Data, Effect, Exit, Queue, Schema, Semaphore } from "effect";
 import { SerialPort } from "serialport";
 
 export type SerialBytes = Uint8Array | Buffer;
@@ -139,8 +138,6 @@ export interface SerialTransport {
   readonly baudRate: number;
   readonly isOpen: Effect.Effect<boolean>;
   readonly read: Effect.Effect<Uint8Array, SerialReadError | SerialConnectionClosedError>;
-  readonly readQueue: Queue.Dequeue<Uint8Array, SerialReadError | Cause.Done>;
-  readonly chunks: Stream.Stream<Uint8Array, SerialReadError>;
   readonly write: (
     bytes: SerialBytes,
   ) => Effect.Effect<void, SerialWriteError | SerialConnectionClosedError>;
@@ -153,6 +150,10 @@ interface TransportState {
   closed: boolean;
 }
 
+// Sole external trust boundary: the `serialport` package's constructor/callback
+// types are looser than the SerialPortConstructor contract we drive it through.
+// This is the one sanctioned `as` in the codebase — do not copy it; decode or
+// validate at other boundaries instead.
 const serialPortConstructor = SerialPort as unknown as SerialPortConstructor;
 
 export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => ({
@@ -198,12 +199,12 @@ export const listSerialPorts = (
     catch: (cause) => new SerialListError({ cause }),
   }).pipe(Effect.flatMap((ports) => Effect.forEach(ports, decodeSerialPortInfo)));
 
-export const openSerialTransport = (
+export const openSerialTransport = Effect.fn("SerialTransport.open")(function* (
   options: OpenSerialTransportOptions,
-): Effect.Effect<SerialTransport, SerialOpenError, Scope.Scope> => {
+) {
   const { driver = defaultSerialDriver, ...openOptions } = options;
 
-  return Effect.acquireRelease(
+  return yield* Effect.acquireRelease(
     Effect.gen(function* () {
       const port = yield* openPort(driver, openOptions);
       const queue = yield* Queue.unbounded<Uint8Array, SerialReadError | Cause.Done>();
@@ -214,7 +215,7 @@ export const openSerialTransport = (
     }),
     (transport) => transport.close.pipe(Effect.ignore),
   );
-};
+});
 
 const openPort = (
   driver: SerialDriver,
@@ -380,8 +381,6 @@ const makeTransport = (
         Cause.isDone(cause) ? new SerialConnectionClosedError({ path, operation: "read" }) : cause,
       ),
     ),
-    readQueue: readQueue,
-    chunks: Stream.fromQueue(readQueue),
     write: (bytes) =>
       operationLock.withPermit(
         Effect.gen(function* () {

@@ -5,6 +5,8 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect, Fiber, Stream } from "effect";
 
 import {
+  ByteReader,
+  ByteWriter,
   encodeVScopeFrame,
   makeSerialDriver,
   openVScopeDevice,
@@ -27,10 +29,6 @@ import {
   VScopeUnexpectedResponseError,
   makeVScopeSerialLayer,
   vscopeCrc8,
-  writeF32,
-  writeFixedString,
-  writeU16,
-  writeU32,
   type SerialCallback,
   type SerialDriver,
   type SerialOpenOptions,
@@ -40,7 +38,7 @@ import {
   type VScopeState as VScopeStateValue,
   type VScopeTriggerMode as VScopeTriggerModeValue,
 } from ".";
-import { readF32, readU16, VScopeEndianness as Endianness } from "./protocol";
+import { VScopeEndianness as Endianness } from "./protocol";
 
 describe("@vscope/serial protocol", () => {
   it.effect("encodes and parses split C-compatible frames", () =>
@@ -90,7 +88,7 @@ describe("@vscope/serial protocol", () => {
         type: VScopeMessageType.GetStatus,
         payload: Uint8Array.of(1, 2, 3),
       });
-      encoded[encoded.byteLength - 1] ^= 0xff;
+      corruptCrc(encoded);
       const parser = new VScopeFrameParser();
 
       const events = parser.pushEvents(encoded);
@@ -992,23 +990,19 @@ class FakeFirmware {
         return this.response(type, this.infoPayload());
       case VScopeMessageType.GetTiming:
         return this.response(type, this.timingPayload());
-      case VScopeMessageType.SetTiming:
-        this.timing = {
-          divider: new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(
-            0,
-            this.littleEndian,
-          ),
-          preTrig: new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(
-            4,
-            this.littleEndian,
-          ),
-        };
+      case VScopeMessageType.SetTiming: {
+        const reader = new ByteReader(payload, this.littleEndian);
+        this.timing = { divider: reader.u32(), preTrig: reader.u32() };
         return this.response(type, this.timingPayload());
+      }
       case VScopeMessageType.GetStatus:
         this.advanceStatus();
         return this.response(type, this.statusPayload());
       case VScopeMessageType.SetState:
-        return this.setRequestedState(payload[0] as VScopeStateValue, type);
+        return this.setRequestedState(
+          fakeState(new ByteReader(payload, this.littleEndian).u8()),
+          type,
+        );
       case VScopeMessageType.GetFrame:
         return this.response(
           type,
@@ -1026,38 +1020,44 @@ class FakeFirmware {
         return this.namePage(type, this.variables, payload);
       case VScopeMessageType.GetChannelMap:
         return this.response(type, Uint8Array.from(this.channelMap));
-      case VScopeMessageType.SetChannelMap:
-        this.channelMap[payload[0]] = payload[1];
-        return this.response(type, Uint8Array.of(payload[0], payload[1]));
+      case VScopeMessageType.SetChannelMap: {
+        const reader = new ByteReader(payload, this.littleEndian);
+        const channel = reader.u8();
+        const variable = reader.u8();
+        this.channelMap[channel] = variable;
+        return this.response(type, Uint8Array.of(channel, variable));
+      }
       case VScopeMessageType.GetRtLabels:
         return this.namePage(type, this.rtLabels, payload);
-      case VScopeMessageType.GetRtBuffer:
-        return this.failRtRead || payload[0] >= this.rtValues.length
+      case VScopeMessageType.GetRtBuffer: {
+        const reader = new ByteReader(payload, this.littleEndian);
+        const index = reader.u8();
+        const value = this.rtValues[index];
+        return this.failRtRead || value === undefined
           ? this.error(VScopeStatus.Range)
-          : this.response(type, this.floatsPayload(Float32Array.of(this.rtValues[payload[0]])));
-      case VScopeMessageType.SetRtBuffer:
-        if (payload[0] >= this.rtValues.length) {
+          : this.response(type, this.floatsPayload(Float32Array.of(value)));
+      }
+      case VScopeMessageType.SetRtBuffer: {
+        const reader = new ByteReader(payload, this.littleEndian);
+        const index = reader.u8();
+        const value = reader.f32();
+        if (index >= this.rtValues.length) {
           return this.error(VScopeStatus.Range);
         }
-        this.rtValues[payload[0]] = readF32(
-          new DataView(payload.buffer, payload.byteOffset, payload.byteLength),
-          1,
-          this.littleEndian,
-        );
-        return this.response(type, this.floatsPayload(Float32Array.of(this.rtValues[payload[0]])));
+        this.rtValues[index] = value;
+        return this.response(type, this.floatsPayload(Float32Array.of(value)));
+      }
       case VScopeMessageType.GetTrigger:
         return this.response(type, this.triggerPayload());
-      case VScopeMessageType.SetTrigger:
+      case VScopeMessageType.SetTrigger: {
+        const reader = new ByteReader(payload, this.littleEndian);
         this.trigger = {
-          threshold: readF32(
-            new DataView(payload.buffer, payload.byteOffset, payload.byteLength),
-            0,
-            this.littleEndian,
-          ),
-          channel: payload[4],
-          mode: payload[5] as VScopeTriggerModeValue,
+          threshold: reader.f32(),
+          channel: reader.u8(),
+          mode: fakeTriggerMode(reader.u8()),
         };
         return this.response(type, this.triggerPayload());
+      }
       default:
         return this.error(VScopeStatus.BadParam);
     }
@@ -1117,7 +1117,7 @@ class FakeFirmware {
     const shouldCorrupt = this.corruptFirstResponsesFor.has(type) && this.requestCount(type) === 1;
     const bytes = Effect.runSync(encodeVScopeFrame({ type, payload }));
     if (shouldCorrupt) {
-      bytes[bytes.byteLength - 1] ^= 0xff;
+      corruptCrc(bytes);
     }
 
     return {
@@ -1131,52 +1131,52 @@ class FakeFirmware {
   }
 
   private infoPayload(): Uint8Array {
-    const payload = new Uint8Array(26);
-    payload[0] = 5;
-    writeU16(payload, 1, 1000, this.littleEndian);
-    writeU16(payload, 3, 20, this.littleEndian);
-    payload[5] = this.variables.length;
-    payload[6] = this.rtLabels.length;
-    payload[7] = 16;
-    payload[8] = 16;
-    payload[9] = this.endianness;
-    payload.set(writeFixedString(this.deviceName, 16), 10);
-    return payload;
+    return new ByteWriter(26, this.littleEndian)
+      .u8(5)
+      .u16(1000)
+      .u16(20)
+      .u8(this.variables.length)
+      .u8(this.rtLabels.length)
+      .u8(16)
+      .u8(16)
+      .u8(this.endianness)
+      .fixedString(this.deviceName, 16)
+      .toUint8Array();
   }
 
   private timingPayload(): Uint8Array {
-    const payload = new Uint8Array(8);
-    writeU32(payload, 0, this.timing.divider, this.littleEndian);
-    writeU32(payload, 4, this.timing.preTrig, this.littleEndian);
-    return payload;
+    return new ByteWriter(8, this.littleEndian)
+      .u32(this.timing.divider)
+      .u32(this.timing.preTrig)
+      .toUint8Array();
   }
 
   private triggerPayload(): Uint8Array {
-    const payload = new Uint8Array(6);
-    writeF32(payload, 0, this.trigger.threshold, this.littleEndian);
-    payload[4] = this.trigger.channel;
-    payload[5] = this.trigger.mode;
-    return payload;
+    return new ByteWriter(6, this.littleEndian)
+      .f32(this.trigger.threshold)
+      .u8(this.trigger.channel)
+      .u8(this.trigger.mode)
+      .toUint8Array();
   }
 
   private snapshotHeaderPayload(): Uint8Array {
-    const payload = new Uint8Array(5 + 14 + this.rtValues.length * 4);
-    payload.set(this.channelMap, 0);
-    writeU32(payload, 5, this.timing.divider, this.littleEndian);
-    writeU32(payload, 9, this.timing.preTrig, this.littleEndian);
-    writeF32(payload, 13, this.trigger.threshold, this.littleEndian);
-    payload[17] = this.trigger.channel;
-    payload[18] = this.trigger.mode;
-    for (let index = 0; index < this.rtValues.length; index += 1) {
-      writeF32(payload, 19 + index * 4, this.rtValues[index], this.littleEndian);
+    const writer = new ByteWriter(5 + 14 + this.rtValues.length * 4, this.littleEndian)
+      .bytes(Uint8Array.from(this.channelMap))
+      .u32(this.timing.divider)
+      .u32(this.timing.preTrig)
+      .f32(this.trigger.threshold)
+      .u8(this.trigger.channel)
+      .u8(this.trigger.mode);
+    for (const value of this.rtValues) {
+      writer.f32(value);
     }
-    return payload;
+    return writer.toUint8Array();
   }
 
   private snapshotData(payload: Uint8Array): FakeFirmwareResponse {
-    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    const startSample = readU16(view, 0, this.littleEndian);
-    const count = payload[2];
+    const reader = new ByteReader(payload, this.littleEndian);
+    const startSample = reader.u16();
+    const count = reader.u8();
     const start = startSample * 5;
     const end = start + count * 5;
     return this.response(
@@ -1190,27 +1190,65 @@ class FakeFirmware {
     names: ReadonlyArray<string>,
     request: Uint8Array,
   ): FakeFirmwareResponse {
-    const start = request[0];
-    const requested = request[1];
+    const reader = new ByteReader(request, this.littleEndian);
+    const start = reader.u8();
+    const requested = reader.u8();
     const maxEntries = Math.floor((252 - 3) / 16);
     const count = Math.min(requested, Math.max(0, names.length - start), maxEntries);
-    const payload = new Uint8Array(3 + count * 16);
-    payload[0] = names.length;
-    payload[1] = start;
-    payload[2] = count;
+    const writer = new ByteWriter(3 + count * 16, this.littleEndian)
+      .u8(names.length)
+      .u8(start)
+      .u8(count);
 
     for (let index = 0; index < count; index += 1) {
-      payload.set(writeFixedString(names[start + index], 16), 3 + index * 16);
+      const name = names[start + index];
+      if (name === undefined) {
+        throw new Error(`Missing fake firmware name at index ${start + index}`);
+      }
+      writer.fixedString(name, 16);
     }
 
-    return this.response(type, payload);
+    return this.response(type, writer.toUint8Array());
   }
 
   private floatsPayload(values: Float32Array): Uint8Array {
-    const payload = new Uint8Array(values.length * 4);
-    for (let index = 0; index < values.length; index += 1) {
-      writeF32(payload, index * 4, values[index], this.littleEndian);
+    const writer = new ByteWriter(values.length * 4, this.littleEndian);
+    for (const value of values) {
+      writer.f32(value);
     }
-    return payload;
+    return writer.toUint8Array();
+  }
+}
+
+function corruptCrc(bytes: Uint8Array): void {
+  const crcIndex = bytes.byteLength - 1;
+  const crc = bytes[crcIndex];
+  if (crc === undefined) {
+    throw new Error("Cannot corrupt CRC of an empty frame.");
+  }
+  bytes[crcIndex] = crc ^ 0xff;
+}
+
+function fakeState(value: number): VScopeStateValue {
+  switch (value) {
+    case VScopeState.Halted:
+    case VScopeState.Running:
+    case VScopeState.Acquiring:
+    case VScopeState.Misconfigured:
+      return value;
+    default:
+      throw new Error(`Unknown fake firmware state ${value}`);
+  }
+}
+
+function fakeTriggerMode(value: number): VScopeTriggerModeValue {
+  switch (value) {
+    case VScopeTriggerMode.Disabled:
+    case VScopeTriggerMode.Rising:
+    case VScopeTriggerMode.Falling:
+    case VScopeTriggerMode.Both:
+      return value;
+    default:
+      throw new Error(`Unknown fake firmware trigger mode ${value}`);
   }
 }
