@@ -1,15 +1,11 @@
 import type {
-  PersistentId,
   RecoveryState,
-  SavedDevice,
   SerialConfig,
   Settings,
   SettingsPatch,
-  SnapshotSampleBlob,
   SnapshotRecord,
 } from "@vscope/shared";
 import type {
-  SerialPortInfo,
   VScopeControlStatus,
   VScopeDeviceInfo,
   VScopeTiming,
@@ -36,7 +32,6 @@ export interface RuntimeAppState {
   readonly status: RuntimeStatus;
   readonly settings: Settings;
   readonly settingsRecovery: RecoveryState;
-  readonly savedDevices: ReadonlyArray<SavedDevice>;
   readonly warnings: ReadonlyArray<RuntimeWarning>;
   readonly logs: ReadonlyArray<RuntimeLogEntry>;
 }
@@ -118,29 +113,3 @@ export type CoreCommand =
     }
   | SnapshotCaptureCommand
   | DeviceControlCommand;
-
-export type CoreQuery =
-  | {
-      readonly type: "ports/list";
-    }
-  | {
-      readonly type: "snapshots/list";
-    }
-  | {
-      readonly type: "snapshots/readSamples";
-      readonly id: PersistentId;
-    };
-
-export type CoreQueryResult =
-  | {
-      readonly type: "ports/list";
-      readonly ports: ReadonlyArray<SerialPortInfo>;
-    }
-  | {
-      readonly type: "snapshots/list";
-      readonly snapshots: ReadonlyArray<SnapshotRecord>;
-    }
-  | {
-      readonly type: "snapshots/readSamples";
-      readonly samples: SnapshotSampleBlob | null;
-    };

@@ -8,10 +8,6 @@ import { SnapshotNotFoundError } from "./errors.ts";
 import {
   DEFAULT_SETTINGS,
   PersistentId,
-  SavedDevice,
-  SavedDeviceDraft,
-  SavedDeviceIdentity,
-  SerialConfig,
   Settings,
   SettingsState,
   SNAPSHOT_SAMPLE_FORMAT,
@@ -22,15 +18,12 @@ import {
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
   SnapshotTrigger,
-  Timestamp,
   noRecovery,
   snapshotSampleByteLength,
   recovery,
   type SettingsPatch,
 } from "@vscope/shared";
 import {
-  CreatedAtRow,
-  SavedDeviceRow,
   SingletonRow,
   SnapshotRow,
   SnapshotSampleRow,
@@ -130,9 +123,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   });
 
   const writeSettings = Effect.fn("Persistence.writeSettings")(function* (settings: Settings) {
-    const decoded = yield* decodeWith(Settings, "write settings", settings);
-    yield* writeSingleton("settings", decoded, false);
-    return SettingsState.make({ settings: decoded, recovery: noRecovery });
+    yield* writeSingleton("settings", settings, false);
+    return SettingsState.make({ settings, recovery: noRecovery });
   });
 
   const patchSettings = Effect.fn("Persistence.patchSettings")(function* (patch: SettingsPatch) {
@@ -148,262 +140,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
         }),
       )
       .pipe(Effect.mapError((cause) => transactionError("patch settings transaction", cause)));
-  });
-
-  const decodeSavedDeviceRow = Effect.fn("Persistence.decodeSavedDeviceRow")(function* (
-    row: unknown,
-  ) {
-    const decodedRow = yield* decodeWith(SavedDeviceRow, "decode saved device row", row);
-    const serialConfig = yield* decodeJson(
-      SerialConfig,
-      "decode saved device serial config",
-      decodedRow.serial_config_json,
-    );
-    const metadata = yield* decodeJson(
-      Schema.Record(Schema.String, Schema.Json),
-      "decode saved device metadata",
-      decodedRow.metadata_json,
-    );
-
-    return yield* decodeWith(SavedDevice, "decode saved device", {
-      id: decodedRow.id,
-      portPath: decodedRow.port_path,
-      displayName: decodedRow.display_name,
-      usb: {
-        vendorId: decodedRow.vendor_id,
-        productId: decodedRow.product_id,
-        serialNumber: decodedRow.serial_number,
-        manufacturer: decodedRow.manufacturer,
-      },
-      serialConfig,
-      metadata,
-      createdAt: decodedRow.created_at,
-      updatedAt: decodedRow.updated_at,
-    });
-  });
-
-  const listSavedDevices = Effect.fn("Persistence.listSavedDevices")(function* () {
-    const rows = yield* runSql(
-      "list saved devices",
-      sql`
-        SELECT *
-        FROM saved_devices
-        ORDER BY updated_at DESC, id DESC
-      `,
-    );
-    const devices: Array<SavedDevice> = [];
-    const corruptIds: Array<string> = [];
-
-    for (const row of rows) {
-      const decoded = yield* decodeSavedDeviceRow(row).pipe(
-        Effect.match({
-          onFailure: () => null,
-          onSuccess: (device) => device,
-        }),
-      );
-
-      if (decoded === null) {
-        const id = stringProperty(row, "id");
-        if (id !== null) {
-          corruptIds.push(id);
-        }
-      } else {
-        devices.push(decoded);
-      }
-    }
-
-    for (const id of corruptIds) {
-      yield* runSql("drop corrupt saved device", sql`DELETE FROM saved_devices WHERE id = ${id}`);
-      yield* Effect.logWarning(`Corrupt saved device dropped: ${id}`);
-    }
-
-    return devices;
-  });
-
-  const decodeSavedDeviceOption = Effect.fn("Persistence.decodeSavedDeviceOption")(function* (
-    operation: string,
-    row: unknown | undefined,
-  ) {
-    if (row === undefined) {
-      return Option.none<SavedDevice>();
-    }
-
-    return yield* decodeSavedDeviceRow(row).pipe(
-      Effect.matchEffect({
-        onFailure: (error) =>
-          Effect.gen(function* () {
-            const id = stringProperty(row, "id");
-            if (id === null) {
-              return yield* error;
-            }
-
-            yield* runSql(
-              `drop corrupt saved device during ${operation}`,
-              sql`DELETE FROM saved_devices WHERE id = ${id}`,
-            );
-            yield* Effect.logWarning(`Corrupt saved device dropped: ${id}`);
-            return Option.none<SavedDevice>();
-          }),
-        onSuccess: (device) => Effect.succeed(Option.some(device)),
-      }),
-    );
-  });
-
-  const getSavedDevice = Effect.fn("Persistence.getSavedDevice")(function* (id: PersistentId) {
-    const decodedId = yield* decodeWith(PersistentId, "get saved device", id);
-    const rows = yield* runSql(
-      "get saved device",
-      sql`
-        SELECT *
-        FROM saved_devices
-        WHERE id = ${decodedId}
-      `,
-    );
-
-    return yield* decodeSavedDeviceOption("get saved device", rows[0]);
-  });
-
-  const findSavedDeviceByIdentity = Effect.fn("Persistence.findSavedDeviceByIdentity")(function* (
-    identity: SavedDeviceIdentity,
-  ) {
-    const decodedIdentity = yield* decodeWith(
-      SavedDeviceIdentity,
-      "find saved device by identity",
-      identity,
-    );
-    const { productId, serialNumber, vendorId } = decodedIdentity.usb;
-
-    if (vendorId !== null && productId !== null && serialNumber !== null) {
-      const rows = yield* runSql(
-        "find saved device by usb identity",
-        sql`
-          SELECT *
-          FROM saved_devices
-          WHERE vendor_id = ${vendorId}
-            AND product_id = ${productId}
-            AND serial_number = ${serialNumber}
-          ORDER BY updated_at DESC, id DESC
-          LIMIT 1
-        `,
-      );
-      const device = yield* decodeSavedDeviceOption("find saved device by usb identity", rows[0]);
-
-      if (Option.isSome(device) || decodedIdentity.portPath === null) {
-        return device;
-      }
-    }
-
-    if (decodedIdentity.portPath === null) {
-      return Option.none<SavedDevice>();
-    }
-
-    const rows = yield* runSql(
-      "find saved device by port path",
-      sql`
-        SELECT *
-        FROM saved_devices
-        WHERE port_path = ${decodedIdentity.portPath}
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 1
-      `,
-    );
-
-    return yield* decodeSavedDeviceOption("find saved device by port path", rows[0]);
-  });
-
-  const upsertSavedDevice = Effect.fn("Persistence.upsertSavedDevice")(function* (
-    draft: SavedDeviceDraft,
-  ) {
-    const decodedDraft = yield* decodeWith(SavedDeviceDraft, "upsert saved device", draft);
-    const id = decodedDraft.id ?? (yield* createId("device"));
-    const updatedAt = yield* createTimestamp();
-    return yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const createdRows = yield* runSql(
-            "read saved device created_at",
-            sql`SELECT created_at FROM saved_devices WHERE id = ${id}`,
-          );
-          const createdRow = createdRows[0];
-          const createdAt =
-            createdRow === undefined
-              ? updatedAt
-              : yield* decodeWith(CreatedAtRow, "decode saved device created_at", createdRow).pipe(
-                  Effect.flatMap((row) =>
-                    decodeWith(Timestamp, "decode saved device created timestamp", row.created_at),
-                  ),
-                );
-          const device = yield* decodeWith(SavedDevice, "upsert saved device record", {
-            id,
-            portPath: decodedDraft.portPath,
-            displayName: decodedDraft.displayName,
-            usb: decodedDraft.usb,
-            serialConfig: decodedDraft.serialConfig,
-            metadata: decodedDraft.metadata,
-            createdAt,
-            updatedAt,
-          });
-          const serialConfigJson = yield* stringifyJson(
-            "encode saved device serial config",
-            device.serialConfig,
-          );
-          const metadataJson = yield* stringifyJson(
-            "encode saved device metadata",
-            device.metadata,
-          );
-
-          yield* runSql(
-            "upsert saved device",
-            sql`
-              INSERT INTO saved_devices (
-                id,
-                port_path,
-                display_name,
-                vendor_id,
-                product_id,
-                serial_number,
-                manufacturer,
-                serial_config_json,
-                metadata_json,
-                created_at,
-                updated_at
-              ) VALUES (
-                ${device.id},
-                ${device.portPath},
-                ${device.displayName},
-                ${device.usb.vendorId},
-                ${device.usb.productId},
-                ${device.usb.serialNumber},
-                ${device.usb.manufacturer},
-                ${serialConfigJson},
-                ${metadataJson},
-                ${device.createdAt},
-                ${device.updatedAt}
-              )
-              ON CONFLICT (id) DO UPDATE SET
-                port_path = excluded.port_path,
-                display_name = excluded.display_name,
-                vendor_id = excluded.vendor_id,
-                product_id = excluded.product_id,
-                serial_number = excluded.serial_number,
-                manufacturer = excluded.manufacturer,
-                serial_config_json = excluded.serial_config_json,
-                metadata_json = excluded.metadata_json,
-                updated_at = excluded.updated_at
-            `,
-          );
-
-          return device;
-        }),
-      )
-      .pipe(Effect.mapError((cause) => transactionError("upsert saved device transaction", cause)));
-  });
-
-  const forgetSavedDevice = Effect.fn("Persistence.forgetSavedDevice")(function* (
-    id: PersistentId,
-  ) {
-    const decodedId = yield* decodeWith(PersistentId, "forget saved device", id);
-    yield* runSql("forget saved device", sql`DELETE FROM saved_devices WHERE id = ${decodedId}`);
   });
 
   const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (row: unknown) {
@@ -455,7 +191,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   });
 
   const getSnapshot = Effect.fn("Persistence.getSnapshot")(function* (id: PersistentId) {
-    const decodedId = yield* decodeWith(PersistentId, "get snapshot", id);
     const rows = yield* runSql(
       "get snapshot",
       sql`
@@ -464,7 +199,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
           CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
         FROM snapshots
         LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-        WHERE snapshots.id = ${decodedId}
+        WHERE snapshots.id = ${id}
       `,
     );
 
@@ -488,14 +223,9 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     record: SnapshotRecord,
     samples: SnapshotSamplesWrite,
   ) {
-    const decodedSamples = yield* decodeWith(
-      SnapshotSamplesWrite,
-      "write snapshot samples",
-      samples,
-    );
-    yield* validateSamplesForDescriptor(record.sample, decodedSamples);
+    yield* validateSamplesForDescriptor(record.sample, samples);
     const updatedAt = yield* createTimestamp();
-    const bytes = Buffer.from(decodedSamples.data);
+    const bytes = Buffer.from(samples.data);
 
     return yield* sql
       .withTransaction(
@@ -504,7 +234,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
             "write snapshot samples",
             sql`
             INSERT INTO snapshot_samples (snapshot_id, format, byte_len, data, updated_at)
-            VALUES (${record.id}, ${decodedSamples.format}, ${decodedSamples.data.byteLength}, ${bytes}, ${updatedAt})
+            VALUES (${record.id}, ${samples.format}, ${samples.data.byteLength}, ${bytes}, ${updatedAt})
             ON CONFLICT (snapshot_id) DO UPDATE SET
               format = excluded.format,
               byte_len = excluded.byte_len,
@@ -528,42 +258,39 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     draft: SnapshotDraft,
     samples?: SnapshotSamplesWrite,
   ) {
-    const decodedDraft = yield* decodeWith(SnapshotDraft, "create snapshot", draft);
-    yield* validateSnapshotDraftShape(decodedDraft);
-    const id = decodedDraft.id ?? (yield* createId("snapshot"));
-    const createdAt = decodedDraft.createdAt ?? (yield* createTimestamp());
+    yield* validateSnapshotDraftShape(draft);
+    const id = draft.id ?? (yield* createId("snapshot"));
+    const createdAt = draft.createdAt ?? (yield* createTimestamp());
     const descriptor = yield* decodeWith(
       SnapshotSampleDescriptor,
       "create snapshot sample descriptor",
       {
         format: SNAPSHOT_SAMPLE_FORMAT,
-        channelCount: decodedDraft.channelCount,
-        sampleCount: decodedDraft.sampleCount,
-        byteLength: snapshotSampleByteLength(decodedDraft.channelCount, decodedDraft.sampleCount),
+        channelCount: draft.channelCount,
+        sampleCount: draft.sampleCount,
+        byteLength: snapshotSampleByteLength(draft.channelCount, draft.sampleCount),
         stored: samples !== undefined,
       },
     );
     const record = yield* decodeWith(SnapshotRecord, "create snapshot record", {
       id,
-      label: decodedDraft.label,
-      device: decodedDraft.device,
+      label: draft.label,
+      device: draft.device,
       sample: descriptor,
-      sampleRateHz: decodedDraft.sampleRateHz,
-      totalDurationSeconds: decodedDraft.totalDurationSeconds,
-      preTriggerSeconds: decodedDraft.preTriggerSeconds,
-      channelMap: decodedDraft.channelMap,
-      trigger: decodedDraft.trigger,
-      rtValues: decodedDraft.rtValues,
-      metadata: decodedDraft.metadata,
+      sampleRateHz: draft.sampleRateHz,
+      totalDurationSeconds: draft.totalDurationSeconds,
+      preTriggerSeconds: draft.preTriggerSeconds,
+      channelMap: draft.channelMap,
+      trigger: draft.trigger,
+      rtValues: draft.rtValues,
+      metadata: draft.metadata,
       createdAt,
       updatedAt: createdAt,
     });
     const decodedSamples =
       samples === undefined
         ? undefined
-        : yield* decodeWith(SnapshotSamplesWrite, "create snapshot samples", samples).pipe(
-            Effect.tap((payload) => validateSamplesForDescriptor(record.sample, payload)),
-          );
+        : yield* validateSamplesForDescriptor(record.sample, samples).pipe(Effect.as(samples));
     const channelMapJson = yield* stringifyJson("encode snapshot channel map", record.channelMap);
     const triggerJson = yield* stringifyJson("encode snapshot trigger", record.trigger);
     const rtValuesJson = yield* stringifyJson("encode snapshot rt values", record.rtValues);
@@ -636,10 +363,9 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   const listSnapshots = Effect.fn("Persistence.listSnapshots")(function* (
     query: SnapshotListQuery = SnapshotListQuery.make({}),
   ) {
-    const decodedQuery = yield* decodeWith(SnapshotListQuery, "list snapshots query", query);
     const rows = yield* runSql(
       "list snapshots",
-      decodedQuery.limit === undefined
+      query.limit === undefined
         ? sql`
             SELECT
               snapshots.*,
@@ -655,7 +381,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
             FROM snapshots
             LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
             ORDER BY snapshots.created_at DESC, snapshots.id DESC
-            LIMIT ${decodedQuery.limit}
+            LIMIT ${query.limit}
           `,
     );
 
@@ -709,8 +435,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   });
 
   const deleteSnapshot = Effect.fn("Persistence.deleteSnapshot")(function* (id: PersistentId) {
-    const decodedId = yield* decodeWith(PersistentId, "delete snapshot", id);
-    yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${decodedId}`);
+    yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
   });
 
   const writeSnapshotSamples = Effect.fn("Persistence.writeSnapshotSamples")(function* (
@@ -765,11 +490,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     writeSettings,
     patchSettings,
     resetSettings: writeSettings(DEFAULT_SETTINGS),
-    listSavedDevices: listSavedDevices(),
-    getSavedDevice,
-    findSavedDeviceByIdentity,
-    upsertSavedDevice,
-    forgetSavedDevice,
     createSnapshot,
     listSnapshots,
     getSnapshot,

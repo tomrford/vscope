@@ -1,19 +1,21 @@
 import { Buffer } from "node:buffer";
-import { Cause, Data, Effect, Exit, Queue, Semaphore, Stream } from "effect";
+import { Cause, Data, Effect, Exit, Queue, Schema, Semaphore, Stream } from "effect";
 import type * as Scope from "effect/Scope";
 import { SerialPort } from "serialport";
 
 export type SerialBytes = Uint8Array | Buffer;
 
-export interface SerialPortInfo {
-  readonly path: string;
-  readonly manufacturer: string | undefined;
-  readonly serialNumber: string | undefined;
-  readonly pnpId: string | undefined;
-  readonly locationId: string | undefined;
-  readonly productId: string | undefined;
-  readonly vendorId: string | undefined;
-}
+export class SerialPortInfo extends Schema.Class<SerialPortInfo>("SerialPortInfo")({
+  path: Schema.String,
+  manufacturer: Schema.optionalKey(Schema.String),
+  serialNumber: Schema.optionalKey(Schema.String),
+  pnpId: Schema.optionalKey(Schema.String),
+  locationId: Schema.optionalKey(Schema.String),
+  productId: Schema.optionalKey(Schema.String),
+  vendorId: Schema.optionalKey(Schema.String),
+}) {}
+
+type SerialPortInfoInput = Parameters<typeof SerialPortInfo.make>[0];
 
 export interface SerialOpenOptions {
   readonly path: string;
@@ -160,19 +162,33 @@ export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => (
 
 export const defaultSerialDriver: SerialDriver = makeSerialDriver(serialPortConstructor);
 
-export const mapSerialPortInfo = (info: unknown): SerialPortInfo => {
+const serialPortInfoInput = (info: unknown): SerialPortInfoInput => {
   const value = isRecord(info) ? info : {};
+  const manufacturer = optionalStringField(value.manufacturer);
+  const serialNumber = optionalStringField(value.serialNumber);
+  const pnpId = optionalStringField(value.pnpId);
+  const locationId = optionalStringField(value.locationId);
+  const productId = optionalStringField(value.productId);
+  const vendorId = optionalStringField(value.vendorId);
 
   return {
     path: stringField(value.path),
-    manufacturer: optionalStringField(value.manufacturer),
-    serialNumber: optionalStringField(value.serialNumber),
-    pnpId: optionalStringField(value.pnpId),
-    locationId: optionalStringField(value.locationId),
-    productId: optionalStringField(value.productId),
-    vendorId: optionalStringField(value.vendorId),
+    ...(manufacturer !== undefined ? { manufacturer } : {}),
+    ...(serialNumber !== undefined ? { serialNumber } : {}),
+    ...(pnpId !== undefined ? { pnpId } : {}),
+    ...(locationId !== undefined ? { locationId } : {}),
+    ...(productId !== undefined ? { productId } : {}),
+    ...(vendorId !== undefined ? { vendorId } : {}),
   };
 };
+
+export const mapSerialPortInfo = (info: unknown): SerialPortInfo =>
+  SerialPortInfo.make(serialPortInfoInput(info));
+
+const decodeSerialPortInfo = (info: unknown): Effect.Effect<SerialPortInfo, SerialListError> =>
+  Schema.decodeUnknownEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
+    Effect.mapError((cause) => new SerialListError({ cause })),
+  );
 
 export const listSerialPorts = (
   driver: SerialDriver = defaultSerialDriver,
@@ -180,7 +196,7 @@ export const listSerialPorts = (
   Effect.tryPromise({
     try: () => driver.list(),
     catch: (cause) => new SerialListError({ cause }),
-  }).pipe(Effect.map((ports) => ports.map(mapSerialPortInfo)));
+  }).pipe(Effect.flatMap((ports) => Effect.forEach(ports, decodeSerialPortInfo)));
 
 export const openSerialTransport = (
   options: OpenSerialTransportOptions,

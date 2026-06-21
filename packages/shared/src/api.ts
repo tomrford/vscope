@@ -7,7 +7,6 @@ import {
   NetworkSettings,
   PollingSettings,
   RecoveryState,
-  SavedDevice,
   SerialConfig,
   Settings,
   SnapshotRecord,
@@ -108,12 +107,6 @@ export class RuntimePortInfo extends Schema.Class<RuntimePortInfo>("RuntimePortI
   vendorId: Schema.optionalKey(Schema.String),
 }) {}
 
-export class RuntimeSnapshotRecord extends Schema.Class<RuntimeSnapshotRecord>(
-  "RuntimeSnapshotRecord",
-)({
-  ...SnapshotRecord.fields,
-}) {}
-
 export class RuntimeDeviceInfo extends Schema.Class<RuntimeDeviceInfo>("RuntimeDeviceInfo")({
   channelCount: NonNegativeInt,
   bufferSize: NonNegativeInt,
@@ -178,7 +171,6 @@ export class RuntimeAppDto extends Schema.Class<RuntimeAppDto>("RuntimeAppDto")(
   status: Schema.Literals(["ready", "degraded"]),
   settings: Settings,
   settingsRecovery: RecoveryState,
-  savedDevices: Schema.Array(SavedDevice),
   warnings: Schema.Array(RuntimeWarningDto),
   logs: Schema.Array(RuntimeLogEntryDto),
 }) {}
@@ -260,11 +252,11 @@ export class RuntimeRpcs extends RpcGroup.make(
     error: RuntimeApiError,
   }),
   Rpc.make("snapshots.list", {
-    success: Schema.Array(RuntimeSnapshotRecord),
+    success: Schema.Array(SnapshotRecord),
     error: RuntimeApiError,
   }),
   Rpc.make("snapshots.index", {
-    success: RpcSchema.Stream(Schema.Array(RuntimeSnapshotRecord), Schema.Never),
+    success: RpcSchema.Stream(Schema.Array(SnapshotRecord), Schema.Never),
   }),
 ) {}
 

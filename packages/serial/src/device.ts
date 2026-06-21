@@ -890,31 +890,56 @@ const decodeStatus = (
   payload: Uint8Array,
 ): VScopeControlStatus => {
   expectLength(path, messageType, payload, 3);
-  const state = payload[0];
-  const requestedState = payload[1];
+  const state = decodeStateByte(path, messageType, payload[0]);
+  const requestedState = decodeRequestedStateByte(path, messageType, payload[1]);
   const flags = payload[2];
-  if (state > VScopeState.Misconfigured) {
-    throw new VScopeDecodeError({
-      path,
-      messageType,
-      reason: `Unknown state ${state}`,
-    });
-  }
-  if (requestedState > VScopeState.Acquiring) {
-    throw new VScopeDecodeError({
-      path,
-      messageType,
-      reason: `Unknown requested state ${requestedState}`,
-    });
-  }
   return {
-    state: state as VScopeStateValue,
-    requestedState: requestedState as VScopeStateValue,
+    state,
+    requestedState,
     snapshotValid: (flags & VScopeStatusFlag.SnapshotValid) !== 0,
     requestPending: (flags & VScopeStatusFlag.RequestPending) !== 0,
     triggerEnabled: (flags & VScopeStatusFlag.TriggerEnabled) !== 0,
     flags,
   };
+};
+
+const decodeStateByte = (
+  path: string,
+  messageType: VScopeMessageType,
+  value: number | undefined,
+): VScopeStateValue => {
+  switch (value) {
+    case VScopeState.Halted:
+    case VScopeState.Running:
+    case VScopeState.Acquiring:
+    case VScopeState.Misconfigured:
+      return value;
+    default:
+      throw new VScopeDecodeError({
+        path,
+        messageType,
+        reason: `Unknown state ${String(value)}`,
+      });
+  }
+};
+
+const decodeRequestedStateByte = (
+  path: string,
+  messageType: VScopeMessageType,
+  value: number | undefined,
+): VScopeStateValue => {
+  switch (value) {
+    case VScopeState.Halted:
+    case VScopeState.Running:
+    case VScopeState.Acquiring:
+      return value;
+    default:
+      throw new VScopeDecodeError({
+        path,
+        messageType,
+        reason: `Unknown requested state ${String(value)}`,
+      });
+  }
 };
 
 const markAcquisitionRequested = (status: VScopeControlStatus): VScopeControlStatus => ({

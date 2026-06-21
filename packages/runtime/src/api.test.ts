@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { DEFAULT_SETTINGS, noRecovery } from "@vscope/shared";
+import { DEFAULT_SETTINGS, noRecovery, type SnapshotRecord } from "@vscope/shared";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { VScopeTiming, VScopeTrigger } from "@vscope/serial";
 import { Effect, Stream } from "effect";
@@ -8,7 +8,6 @@ import { makeRuntimeApi } from "./api";
 import type {
   ActiveDeviceState,
   CoreCommand,
-  CoreQueryResult,
   DeviceConfigState,
   RuntimeAppState,
 } from "./core/model";
@@ -52,15 +51,12 @@ interface FakeStores {
 
 function fakeCore(stores: FakeStores, commands: Array<CoreCommand> = []): RuntimeCoreService {
   let config = stores.config;
-  const snapshots: Extract<CoreQueryResult, { readonly type: "snapshots/list" }> = {
-    type: "snapshots/list",
-    snapshots: [],
-  };
+  const snapshots: ReadonlyArray<SnapshotRecord> = [];
   return {
     app: Effect.succeed(stores.app),
     appChanges: Stream.fromIterable([stores.app]),
-    snapshots: Effect.succeed(snapshots.snapshots),
-    snapshotChanges: Stream.fromIterable([snapshots.snapshots]),
+    snapshots: Effect.succeed(snapshots),
+    snapshotChanges: Stream.fromIterable([snapshots]),
     activeDevice: Effect.succeed(stores.activeDevice),
     activeDeviceChanges: Stream.fromIterable([stores.activeDevice]),
     deviceStatus: Effect.succeed(stores.status),
@@ -69,7 +65,7 @@ function fakeCore(stores: FakeStores, commands: Array<CoreCommand> = []): Runtim
     deviceConfigChanges: Stream.fromIterable([config]),
     readModel: Effect.sync(() => ({
       app: stores.app,
-      snapshots: snapshots.snapshots,
+      snapshots,
       activeDevice: stores.activeDevice,
       deviceStatus: stores.status,
       deviceConfig: config,
@@ -79,23 +75,9 @@ function fakeCore(stores: FakeStores, commands: Array<CoreCommand> = []): Runtim
         commands.push(command);
         config = applyCommand(config, command);
       }),
-    query: (query) =>
-      Effect.sync((): CoreQueryResult => {
-        switch (query.type) {
-          case "ports/list":
-            return {
-              type: "ports/list",
-              ports: [],
-            };
-          case "snapshots/list":
-            return snapshots;
-          case "snapshots/readSamples":
-            return {
-              type: "snapshots/readSamples",
-              samples: null,
-            };
-        }
-      }),
+    listPorts: Effect.succeed([]),
+    listSnapshots: Effect.succeed(snapshots),
+    readSnapshotSamples: () => Effect.succeed(null),
     shutdown: Effect.void,
     frames: Stream.empty,
     lastFrame: Effect.sync(() => (stores.activeDevice ? [10, 20] : null)),
@@ -152,7 +134,6 @@ function initialStores(): FakeStores {
       status: "ready",
       settings: DEFAULT_SETTINGS,
       settingsRecovery: noRecovery,
-      savedDevices: [],
       warnings: [],
       logs: [],
     },

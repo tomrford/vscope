@@ -18,8 +18,8 @@ import {
   RuntimeSnapshotCaptureRequest,
   RuntimeTimingPatch,
   RuntimeTriggerPatch,
-  RuntimeSnapshotRecord,
   RuntimePortInfo,
+  SnapshotRecord,
   PersistentId,
   type Settings,
 } from "@vscope/shared";
@@ -41,7 +41,6 @@ import {
   framePayload,
   makeRuntimeApi,
   runtimePortInfo,
-  snapshotDto,
   statusDto,
   type RuntimeApi,
 } from "./api";
@@ -323,9 +322,8 @@ function describeTaggedError(error: unknown): string {
   }
 
   if ("_tag" in error && typeof error._tag === "string") {
-    const details = Object.getOwnPropertyNames(error)
-      .filter((key) => key !== "_tag" && key !== "stack")
-      .map((key) => [key, (error as Record<string, unknown>)[key]] as const)
+    const details = Object.entries(error)
+      .filter(([key]) => key !== "_tag" && key !== "stack")
       .map(([key, value]) => `${key}=${describeErrorField(value)}`);
     return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
   }
@@ -342,11 +340,22 @@ function describeErrorField(value: unknown): string {
     return describeTaggedError(value);
   }
 
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {
-  return new RuntimeApiError({ message: describeError(error) });
+  return new RuntimeApiError({ message: describeRuntimeCoreError(error) });
+}
+
+function describeRuntimeCoreError(error: RuntimeCoreError): string {
+  switch (error._tag) {
+    case "RuntimeCorePersistenceError":
+      return `${error.operation}: ${describeError(error.cause)}`;
+    case "RuntimeCorePolicyError":
+      return `${error.command}: ${error.reason}`;
+    case "RuntimeCoreSerialError":
+      return `${error.operation}: ${describeError(error.cause)}`;
+  }
 }
 
 function writeConfig(
@@ -780,7 +789,7 @@ const RuntimeMcpToolkit = Toolkit.make(
   }),
   Tool.make("vscope_list_snapshots", {
     description: "List saved snapshot metadata.",
-    success: Schema.Array(RuntimeSnapshotRecord),
+    success: Schema.Array(SnapshotRecord),
     failure: RuntimeApiError,
   })
     .annotate(Tool.Readonly, true)
@@ -795,11 +804,10 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
     return RuntimeMcpToolkit.of({
       vscope_get_app: () => core.app.pipe(Effect.map(appDto)),
       vscope_list_ports: (filters) =>
-        core.query({ type: "ports/list" }).pipe(
-          Effect.map((result) => {
-            const ports = result.type === "ports/list" ? result.ports.map(runtimePortInfo) : [];
-            return ports.filter((port) => matchesPortFilters(port, filters));
-          }),
+        core.listPorts.pipe(
+          Effect.map((ports) =>
+            ports.map(runtimePortInfo).filter((port) => matchesPortFilters(port, filters)),
+          ),
           Effect.mapError(runtimeApiError),
         ),
       vscope_get_active_device: () =>
@@ -841,13 +849,7 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
         core
           .dispatch({ type: "snapshots/capture", label })
           .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
-      vscope_list_snapshots: () =>
-        core.query({ type: "snapshots/list" }).pipe(
-          Effect.map((result) =>
-            result.type === "snapshots/list" ? result.snapshots.map(snapshotDto) : [],
-          ),
-          Effect.mapError(runtimeApiError),
-        ),
+      vscope_list_snapshots: () => core.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
     });
   }),
 );

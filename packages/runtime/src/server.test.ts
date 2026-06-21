@@ -2,7 +2,7 @@ import { describe, expect, layer } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { SerialPortInfo, VScopeTiming, VScopeTrigger } from "@vscope/serial";
-import { DEFAULT_SETTINGS, RuntimeRpcs, noRecovery } from "@vscope/shared";
+import { DEFAULT_SETTINGS, RuntimeRpcs, noRecovery, type SnapshotRecord } from "@vscope/shared";
 import { Effect, Layer, Stream } from "effect";
 import {
   Headers,
@@ -18,7 +18,6 @@ import { makeRuntimeConfig } from "./config";
 import type {
   ActiveDeviceState,
   CoreCommand,
-  CoreQueryResult,
   DeviceConfigState,
   RuntimeAppState,
 } from "./core/model";
@@ -272,8 +271,6 @@ const fakePorts: ReadonlyArray<SerialPortInfo> = [
     path: "/dev/tty.vscope",
     manufacturer: "vscope",
     serialNumber: "test-serial",
-    pnpId: undefined,
-    locationId: undefined,
     productId: "0001",
     vendorId: "0002",
   },
@@ -281,8 +278,6 @@ const fakePorts: ReadonlyArray<SerialPortInfo> = [
     path: "/dev/tty.other",
     manufacturer: "other",
     serialNumber: "other-serial",
-    pnpId: undefined,
-    locationId: undefined,
     productId: "9999",
     vendorId: "0002",
   },
@@ -360,15 +355,12 @@ function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
     flags: 0,
   };
   const config = initialConfig();
-  const snapshots: Extract<CoreQueryResult, { readonly type: "snapshots/list" }> = {
-    type: "snapshots/list",
-    snapshots: [],
-  };
+  const snapshots: ReadonlyArray<SnapshotRecord> = [];
   return {
     app: Effect.succeed(app),
     appChanges: Stream.fromIterable([app]),
-    snapshots: Effect.succeed(snapshots.snapshots),
-    snapshotChanges: Stream.fromIterable([snapshots.snapshots]),
+    snapshots: Effect.succeed(snapshots),
+    snapshotChanges: Stream.fromIterable([snapshots]),
     activeDevice: Effect.succeed(activeDevice),
     activeDeviceChanges: Stream.fromIterable([activeDevice]),
     deviceStatus: Effect.succeed(status),
@@ -377,7 +369,7 @@ function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
     deviceConfigChanges: Stream.fromIterable([config]),
     readModel: Effect.succeed({
       app,
-      snapshots: snapshots.snapshots,
+      snapshots,
       activeDevice,
       deviceStatus: status,
       deviceConfig: config,
@@ -386,14 +378,9 @@ function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
       Effect.sync(() => {
         commands.push(command);
       }),
-    query: (query) =>
-      Effect.succeed(
-        query.type === "ports/list"
-          ? { type: "ports/list", ports: fakePorts }
-          : query.type === "snapshots/list"
-            ? snapshots
-            : { type: "snapshots/readSamples", samples: null },
-      ),
+    listPorts: Effect.succeed(fakePorts),
+    listSnapshots: Effect.succeed(snapshots),
+    readSnapshotSamples: () => Effect.succeed(null),
     shutdown: Effect.void,
     frames: Stream.empty,
     lastFrame: Effect.succeed([10, 20]),
@@ -407,7 +394,6 @@ function initialApp(): RuntimeAppState {
     status: "ready",
     settings: DEFAULT_SETTINGS,
     settingsRecovery: noRecovery,
-    savedDevices: [],
     warnings: [],
     logs: [],
   };

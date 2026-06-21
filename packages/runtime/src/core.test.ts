@@ -43,8 +43,6 @@ const fakePort: SerialPortInfo = {
   path: "/dev/tty.vscope",
   manufacturer: "vscope",
   serialNumber: "test-serial",
-  pnpId: undefined,
-  locationId: undefined,
   productId: "0001",
   vendorId: "0002",
 };
@@ -53,8 +51,6 @@ const secondPort: SerialPortInfo = {
   path: "/dev/tty.second",
   manufacturer: "vscope",
   serialNumber: "test-serial-2",
-  pnpId: undefined,
-  locationId: undefined,
   productId: "0001",
   vendorId: "0002",
 };
@@ -105,13 +101,10 @@ describe("@vscope/runtime core", () => {
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
         const model = yield* core.readModel;
-        const ports = yield* core.query({ type: "ports/list" });
+        const ports = yield* core.listPorts;
 
         expect(model.app.settings).toEqual(testSettings);
-        expect(ports).toEqual({
-          type: "ports/list",
-          ports: [fakePort],
-        });
+        expect(ports).toEqual([fakePort]);
       }),
     );
   });
@@ -278,27 +271,18 @@ describe("@vscope/runtime core", () => {
           type: "snapshots/capture",
           label: "Boot trace",
         });
-        const listed = yield* core.query({ type: "snapshots/list" });
-        if (listed.type !== "snapshots/list") {
-          throw new Error("Expected snapshots/list result");
-        }
-        const samples = yield* core.query({
-          type: "snapshots/readSamples",
-          id: listed.snapshots[0].id,
-        });
+        const listed = yield* core.listSnapshots;
+        const samples = yield* core.readSnapshotSamples(listed[0].id);
         const status = yield* core.deviceStatus;
 
-        expect(listed.snapshots.length).toBe(1);
+        expect(listed.length).toBe(1);
         expect(status?.snapshotValid).toBe(true);
-        expect(listed.snapshots[0].label).toBe("Boot trace");
-        expect(listed.snapshots[0].device).toMatchObject({
+        expect(listed[0].label).toBe("Boot trace");
+        expect(listed[0].device).toMatchObject({
           name: fakeInfo.deviceName,
         });
-        expect(listed.snapshots[0].sample.stored).toBe(true);
-        if (samples.type !== "snapshots/readSamples") {
-          throw new Error("Expected snapshots/readSamples result");
-        }
-        expect(samples.samples?.data.byteLength).toBe(
+        expect(listed[0].sample.stored).toBe(true);
+        expect(samples?.data.byteLength).toBe(
           fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
         );
       }),
@@ -441,11 +425,6 @@ function fakePersistenceLayer() {
         recovery: noRecovery,
       });
     }),
-    listSavedDevices: Effect.succeed([]),
-    getSavedDevice: () => Effect.succeed(Option.none()),
-    findSavedDeviceByIdentity: () => Effect.succeed(Option.none()),
-    upsertSavedDevice: () => Effect.die("fake persistence upsertSavedDevice is not implemented"),
-    forgetSavedDevice: () => Effect.void,
     createSnapshot: (draft, samples) =>
       Effect.sync(() => {
         const id = persistentId(`snapshot:${(snapshotCounter += 1)}`);

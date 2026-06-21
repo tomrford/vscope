@@ -14,9 +14,11 @@ import {
 } from "effect";
 import {
   RuntimeDeviceLost,
+  type PersistentId,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotDraft,
+  type SnapshotSampleBlob,
   SnapshotSamplesWrite,
   SnapshotTrigger,
   type SnapshotRecord,
@@ -44,11 +46,11 @@ import {
 import type {
   ActiveDeviceState,
   CoreCommand,
-  CoreQuery,
-  CoreQueryResult,
   DeviceConfigState,
   DeviceControlCommand,
+  RuntimeLogEntry,
   RuntimeAppState,
+  RuntimeWarning,
   SnapshotCaptureCommand,
 } from "./model";
 import { canCaptureSnapshot, decideDeviceControl } from "./policy";
@@ -644,42 +646,21 @@ const makeRuntimeCore = Effect.gen(function* () {
   const dispatch = (command: CoreCommand): Effect.Effect<void, RuntimeCoreError> =>
     dispatchLock.withPermit(dispatchUnlocked(command));
 
-  const query = (queryRequest: CoreQuery): Effect.Effect<CoreQueryResult, RuntimeCoreError> => {
-    switch (queryRequest.type) {
-      case "ports/list":
-        return serial.listPorts.pipe(
-          Effect.map(
-            (ports): CoreQueryResult => ({
-              type: "ports/list",
-              ports,
-            }),
-          ),
-          Effect.mapError(
-            (cause) => new RuntimeCoreSerialError({ operation: "ports/list", cause }),
-          ),
-        );
-      case "snapshots/list":
-        return SubscriptionRef.get(snapshotsRef).pipe(
-          Effect.map((snapshots) => ({
-            type: "snapshots/list",
-            snapshots,
-          })),
-        );
-      case "snapshots/readSamples":
-        return persistence.readSnapshotSamples(queryRequest.id).pipe(
-          Effect.map(
-            (samples): CoreQueryResult => ({
-              type: "snapshots/readSamples",
-              samples: Option.getOrNull(samples),
-            }),
-          ),
-          Effect.mapError(
-            (cause) =>
-              new RuntimeCorePersistenceError({ operation: "snapshots/readSamples", cause }),
-          ),
-        );
-    }
-  };
+  const listPorts = serial.listPorts.pipe(
+    Effect.mapError((cause) => new RuntimeCoreSerialError({ operation: "ports/list", cause })),
+  );
+
+  const listSnapshots = SubscriptionRef.get(snapshotsRef);
+
+  const readSnapshotSamples = (
+    id: PersistentId,
+  ): Effect.Effect<SnapshotSampleBlob | null, RuntimeCoreError> =>
+    persistence.readSnapshotSamples(id).pipe(
+      Effect.map(Option.getOrNull),
+      Effect.mapError(
+        (cause) => new RuntimeCorePersistenceError({ operation: "snapshots/readSamples", cause }),
+      ),
+    );
 
   const shutdown = interruptMonitor.pipe(
     Effect.andThen(closeCurrentSession(null)),
@@ -718,7 +699,9 @@ const makeRuntimeCore = Effect.gen(function* () {
     deviceConfigChanges: SubscriptionRef.changes(deviceConfigRef),
     readModel,
     dispatch,
-    query,
+    listPorts,
+    listSnapshots,
+    readSnapshotSamples,
     shutdown,
     frames,
     lastFrame,
@@ -737,11 +720,6 @@ function hydrateInitialStores(
         (cause) => new RuntimeCorePersistenceError({ operation: "settings/read", cause }),
       ),
     );
-    const savedDevices = yield* persistence.listSavedDevices.pipe(
-      Effect.mapError(
-        (cause) => new RuntimeCorePersistenceError({ operation: "savedDevices/list", cause }),
-      ),
-    );
     const snapshots = yield* persistence
       .listSnapshots()
       .pipe(
@@ -757,7 +735,6 @@ function hydrateInitialStores(
         status: "ready",
         settings: settingsState.settings,
         settingsRecovery: settingsState.recovery,
-        savedDevices,
         warnings: [],
         logs: [],
       }),
@@ -888,15 +865,7 @@ function snapshotDraftFromCapture(options: {
   });
 }
 
-function appendWarning(
-  warnings: ReadonlyArray<{
-    readonly id: string;
-    readonly message: string;
-    readonly createdAt: string;
-  }>,
-  message: string,
-  now: string,
-) {
+function appendWarning(warnings: ReadonlyArray<RuntimeWarning>, message: string, now: string) {
   return [
     {
       id: `${now}:warning:${warnings.length}`,
@@ -907,15 +876,7 @@ function appendWarning(
   ].slice(0, MAX_WARNINGS);
 }
 
-function appendLog(
-  logs: ReadonlyArray<{
-    readonly id: string;
-    readonly message: string;
-    readonly createdAt: string;
-  }>,
-  message: string,
-  now: string,
-) {
+function appendLog(logs: ReadonlyArray<RuntimeLogEntry>, message: string, now: string) {
   return [
     {
       id: `${now}:log:${logs.length}`,

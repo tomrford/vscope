@@ -22,24 +22,6 @@ export const SingletonRow = Schema.Struct({
   recovery_pending: Schema.Number,
 });
 
-export const CreatedAtRow = Schema.Struct({
-  created_at: Schema.String,
-});
-
-export const SavedDeviceRow = Schema.Struct({
-  id: Schema.String,
-  port_path: Schema.NullOr(Schema.String),
-  display_name: Schema.NullOr(Schema.String),
-  vendor_id: Schema.NullOr(Schema.String),
-  product_id: Schema.NullOr(Schema.String),
-  serial_number: Schema.NullOr(Schema.String),
-  manufacturer: Schema.NullOr(Schema.String),
-  serial_config_json: Schema.String,
-  metadata_json: Schema.String,
-  created_at: Schema.String,
-  updated_at: Schema.String,
-});
-
 export const SnapshotRow = Schema.Struct({
   id: Schema.String,
   label: Schema.String,

@@ -34,6 +34,8 @@ Snapshot plots are browser routes backed by persisted daemon data. Live scope is
 
 Snapshot capture during a slow sample download is currently serialized only by the dispatch lock — there is no in-flight pending flag, so the `captureSnapshot` permission stays enabled while a download runs. If this proves a problem (e.g. confusing UI affordance or a need to early-return), add an explicit pending/in-flight signal then; not worth it pre-emptively.
 
+Re-scan the serial package surface after the UI is in place. Keep the runtime-owned paths that the UI actually exercises; trim test-only or unused device, manager, and transport helpers once the product surface is clear.
+
 ## Current Constraints
 
 - Keep the package publishable as `vscope`; the root CLI remains the only public command surface.

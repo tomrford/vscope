@@ -3,9 +3,6 @@ import { Context, Effect, Option } from "effect";
 import type { PersistenceError } from "./errors.ts";
 import type {
   PersistentId,
-  SavedDevice,
-  SavedDeviceDraft,
-  SavedDeviceIdentity,
   Settings,
   SettingsPatch,
   SettingsState,
@@ -27,17 +24,6 @@ export type PersistenceService = {
   readonly writeSettings: (settings: Settings) => Effect.Effect<SettingsState, PersistenceError>;
   readonly patchSettings: (patch: SettingsPatch) => Effect.Effect<SettingsState, PersistenceError>;
   readonly resetSettings: Effect.Effect<SettingsState, PersistenceError>;
-  readonly listSavedDevices: Effect.Effect<ReadonlyArray<SavedDevice>, PersistenceError>;
-  readonly getSavedDevice: (
-    id: PersistentId,
-  ) => Effect.Effect<Option.Option<SavedDevice>, PersistenceError>;
-  readonly findSavedDeviceByIdentity: (
-    identity: SavedDeviceIdentity,
-  ) => Effect.Effect<Option.Option<SavedDevice>, PersistenceError>;
-  readonly upsertSavedDevice: (
-    draft: SavedDeviceDraft,
-  ) => Effect.Effect<SavedDevice, PersistenceError>;
-  readonly forgetSavedDevice: (id: PersistentId) => Effect.Effect<void, PersistenceError>;
   readonly createSnapshot: (
     draft: SnapshotDraft,
     samples?: SnapshotSamplesWrite,

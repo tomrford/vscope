@@ -11,14 +11,11 @@ import {
   DEFAULT_SERIAL_CONFIG,
   DEFAULT_SETTINGS,
   Persistence,
-  SavedDeviceDraft,
-  SavedDeviceIdentity,
   SNAPSHOT_SAMPLE_FORMAT,
   SerialConfig,
   SnapshotDraft,
   SnapshotSamplesWrite,
   SnapshotTrigger,
-  UsbIdentity,
   initializePersistence,
   makePersistenceLayer,
 } from "./index.ts";
@@ -89,7 +86,7 @@ describe("@vscope/persistence", () => {
           path,
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
-            yield* sql`CREATE TABLE saved_devices_port_path_idx (id INTEGER PRIMARY KEY)`;
+            yield* sql`CREATE TABLE snapshots_created_at_idx (id INTEGER PRIMARY KEY)`;
           }),
         );
 
@@ -121,7 +118,6 @@ describe("@vscope/persistence", () => {
 
         expect(names).toEqual([
           "persistence_migrations",
-          "saved_devices",
           "settings",
           "snapshot_samples",
           "snapshots",
@@ -217,84 +213,6 @@ describe("@vscope/persistence", () => {
           expect(settings.settings.defaultSerialConfig.baudRate).toBe(57_600);
           expect(settings.settings.defaultSerialConfig.dtr).toBe(true);
           expect(settings.settings.defaultSerialConfig.rts).toBe(true);
-        }),
-      ),
-    ),
-  );
-
-  it.effect("saved devices round-trip through typed records", () =>
-    withTempPath((path) =>
-      runWithPersistence(
-        path,
-        Effect.gen(function* () {
-          const persistence = yield* Persistence;
-          const first = yield* persistence.upsertSavedDevice(
-            SavedDeviceDraft.make({
-              portPath: "/dev/tty.usbserial",
-              displayName: "Probe A",
-              usb: UsbIdentity.make({
-                vendorId: "303a",
-                productId: "1001",
-                serialNumber: "abc",
-                manufacturer: "vscope",
-              }),
-              serialConfig: DEFAULT_SERIAL_CONFIG,
-              metadata: {
-                role: "bench",
-              },
-            }),
-          );
-
-          expect(first.id.startsWith("device:")).toBe(true);
-          expect(yield* persistence.listSavedDevices).toEqual([first]);
-          const byId = yield* persistence.getSavedDevice(first.id);
-          if (Option.isNone(byId)) {
-            throw new Error("expected saved device by id");
-          }
-          expect(byId.value).toEqual(first);
-
-          const byUsb = yield* persistence.findSavedDeviceByIdentity(
-            SavedDeviceIdentity.make({
-              portPath: "/dev/tty.reenumerated",
-              usb: first.usb,
-            }),
-          );
-          if (Option.isNone(byUsb)) {
-            throw new Error("expected saved device by usb identity");
-          }
-          expect(byUsb.value).toEqual(first);
-
-          const byPort = yield* persistence.findSavedDeviceByIdentity(
-            SavedDeviceIdentity.make({
-              portPath: first.portPath,
-              usb: UsbIdentity.make({
-                vendorId: null,
-                productId: null,
-                serialNumber: null,
-                manufacturer: null,
-              }),
-            }),
-          );
-          if (Option.isNone(byPort)) {
-            throw new Error("expected saved device by port path");
-          }
-          expect(byPort.value).toEqual(first);
-
-          const updated = yield* persistence.upsertSavedDevice(
-            SavedDeviceDraft.make({
-              id: first.id,
-              portPath: first.portPath,
-              displayName: "Probe A1",
-              usb: first.usb,
-              serialConfig: first.serialConfig,
-              metadata: first.metadata,
-            }),
-          );
-          expect(updated.createdAt).toBe(first.createdAt);
-          expect(updated.displayName).toBe("Probe A1");
-
-          yield* persistence.forgetSavedDevice(first.id);
-          expect(yield* persistence.listSavedDevices).toEqual([]);
         }),
       ),
     ),

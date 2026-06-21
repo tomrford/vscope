@@ -125,38 +125,6 @@ export class SettingsState extends Schema.Class<SettingsState>("SettingsState")(
   recovery: RecoveryState,
 }) {}
 
-export class UsbIdentity extends Schema.Class<UsbIdentity>("UsbIdentity")({
-  vendorId: Schema.NullOr(Schema.String),
-  productId: Schema.NullOr(Schema.String),
-  serialNumber: Schema.NullOr(Schema.String),
-  manufacturer: Schema.NullOr(Schema.String),
-}) {}
-
-export class SavedDeviceDraft extends Schema.Class<SavedDeviceDraft>("SavedDeviceDraft")({
-  id: Schema.optionalKey(PersistentId),
-  portPath: Schema.NullOr(Schema.String),
-  displayName: Schema.NullOr(Schema.String),
-  usb: UsbIdentity,
-  serialConfig: SerialConfig,
-  metadata: JsonObject,
-}) {}
-
-export class SavedDevice extends Schema.Class<SavedDevice>("SavedDevice")({
-  id: PersistentId,
-  portPath: Schema.NullOr(Schema.String),
-  displayName: Schema.NullOr(Schema.String),
-  usb: UsbIdentity,
-  serialConfig: SerialConfig,
-  metadata: JsonObject,
-  createdAt: Timestamp,
-  updatedAt: Timestamp,
-}) {}
-
-export class SavedDeviceIdentity extends Schema.Class<SavedDeviceIdentity>("SavedDeviceIdentity")({
-  portPath: Schema.NullOr(Schema.String),
-  usb: UsbIdentity,
-}) {}
-
 export class SnapshotDeviceRef extends Schema.Class<SnapshotDeviceRef>("SnapshotDeviceRef")({
   name: Schema.String,
 }) {}

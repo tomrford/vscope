@@ -5,14 +5,12 @@ import type { RuntimeCoreError } from "./errors";
 import type {
   ActiveDeviceState,
   CoreCommand,
-  CoreQuery,
-  CoreQueryResult,
   DeviceConfigState,
   RuntimeAppState,
   RuntimeReadModel,
 } from "./model";
-import type { SnapshotRecord } from "@vscope/shared";
-import type { VScopeControlStatus } from "@vscope/serial";
+import type { PersistentId, SnapshotRecord, SnapshotSampleBlob } from "@vscope/shared";
+import type { SerialPortInfo, VScopeControlStatus } from "@vscope/serial";
 
 export interface RuntimeCoreService {
   readonly app: Effect.Effect<RuntimeAppState>;
@@ -27,7 +25,11 @@ export interface RuntimeCoreService {
   readonly deviceConfigChanges: Stream.Stream<DeviceConfigState | null>;
   readonly readModel: Effect.Effect<RuntimeReadModel>;
   readonly dispatch: (command: CoreCommand) => Effect.Effect<void, RuntimeCoreError>;
-  readonly query: (query: CoreQuery) => Effect.Effect<CoreQueryResult, RuntimeCoreError>;
+  readonly listPorts: Effect.Effect<ReadonlyArray<SerialPortInfo>, RuntimeCoreError>;
+  readonly listSnapshots: Effect.Effect<ReadonlyArray<SnapshotRecord>, RuntimeCoreError>;
+  readonly readSnapshotSamples: (
+    id: PersistentId,
+  ) => Effect.Effect<SnapshotSampleBlob | null, RuntimeCoreError>;
   readonly shutdown: Effect.Effect<void, RuntimeCoreError>;
   // Live frame plane, scoped to the current device session: the stream fails
   // with RuntimeDeviceLost when the device is lost and halts on clean disconnect.

@@ -69,6 +69,11 @@ export const VScopeMessageType = {
 
 export type VScopeMessageType = (typeof VScopeMessageType)[keyof typeof VScopeMessageType];
 
+const knownMessageTypes: ReadonlySet<number> = new Set(Object.values(VScopeMessageType));
+
+export const isVScopeMessageType = (value: number): value is VScopeMessageType =>
+  knownMessageTypes.has(value);
+
 export interface VScopeFrame {
   readonly type: VScopeMessageType;
   readonly payload: Uint8Array;
@@ -213,13 +218,21 @@ export class VScopeFrameParser {
       const expectedCrc = data[this.#expectedLength - 1];
       const actualCrc = vscopeCrc8(data.subarray(0, this.#expectedLength - 1));
 
-      if (expectedCrc === actualCrc) {
+      const type = data[0];
+      if (expectedCrc === actualCrc && type !== undefined && isVScopeMessageType(type)) {
         events.push({
           _tag: "Frame",
           frame: {
-            type: data[0] as VScopeMessageType,
+            type,
             payload: Uint8Array.from(data.subarray(1, this.#expectedLength - 1)),
           },
+        });
+      } else if (expectedCrc === actualCrc) {
+        events.push({
+          _tag: "InvalidFrame",
+          error: new VScopeFrameParseError({
+            reason: `Unknown message type ${String(type)}`,
+          }),
         });
       } else {
         events.push({

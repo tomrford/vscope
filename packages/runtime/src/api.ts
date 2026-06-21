@@ -1,4 +1,4 @@
-import { Effect, Schema, Stream } from "effect";
+import { Effect, Stream } from "effect";
 import {
   PersistentId,
   RuntimeActiveDevice,
@@ -11,7 +11,6 @@ import {
   RuntimePortInfo,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
-  RuntimeSnapshotRecord,
   RuntimeWarningDto,
   type RuntimeDeviceLost,
   type RuntimeSettingsPatchRequest,
@@ -54,12 +53,12 @@ export interface RuntimeRpcHandlers {
   ) => Effect.Effect<void, RuntimeCoreError>;
   readonly readFrame: Effect.Effect<RuntimeFramePayload | null>;
   readonly captureSnapshot: (label?: string | undefined) => Effect.Effect<void, RuntimeCoreError>;
-  readonly listSnapshots: Effect.Effect<ReadonlyArray<RuntimeSnapshotRecord>, RuntimeCoreError>;
+  readonly listSnapshots: Effect.Effect<ReadonlyArray<SnapshotRecord>, RuntimeCoreError>;
 }
 
 export interface RuntimeSubscriptions {
   readonly app: Stream.Stream<RuntimeAppDto>;
-  readonly snapshots: Stream.Stream<ReadonlyArray<RuntimeSnapshotRecord>>;
+  readonly snapshots: Stream.Stream<ReadonlyArray<SnapshotRecord>>;
   readonly activeDevice: Stream.Stream<RuntimeActiveDevice | null>;
   readonly status: Stream.Stream<RuntimeControlStatus | null>;
   readonly config: Stream.Stream<RuntimeDeviceConfigPayload | null>;
@@ -74,32 +73,20 @@ export interface RuntimeApi {
 
 export interface RuntimeSnapshotHandlers {
   readonly readSamples: (
-    id: RuntimeSnapshotRecord["id"],
-  ) => Effect.Effect<SnapshotSampleBlob | null, unknown>;
+    id: PersistentId,
+  ) => Effect.Effect<SnapshotSampleBlob | null, RuntimeCoreError>;
 }
 
 export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
   const dispatch = (command: Parameters<RuntimeCoreService["dispatch"]>[0]) =>
     core.dispatch(command);
   const readFrame = core.lastFrame.pipe(Effect.map(framePayload));
-  const listSnapshots = core
-    .query({ type: "snapshots/list" })
-    .pipe(
-      Effect.map((result) =>
-        result.type === "snapshots/list" ? result.snapshots.map(snapshotDto) : [],
-      ),
-    );
+  const listSnapshots = core.listSnapshots;
 
   const rpc: RuntimeRpcHandlers = {
     getApp: core.app.pipe(Effect.map(appDto)),
     patchSettings: (patch) => dispatch({ type: "settings/patch", patch }),
-    listPorts: core
-      .query({ type: "ports/list" })
-      .pipe(
-        Effect.map((result) =>
-          result.type === "ports/list" ? result.ports.map(runtimePortInfo) : [],
-        ),
-      ),
+    listPorts: core.listPorts.pipe(Effect.map((ports) => ports.map(runtimePortInfo))),
     getActiveDevice: core.activeDevice.pipe(Effect.map(activeDeviceDto)),
     connectDevice: (path) => dispatch({ type: "devices/connect", path }),
     disconnectDevice: dispatch({ type: "devices/disconnect" }),
@@ -120,7 +107,7 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
 
   const subscriptions: RuntimeSubscriptions = {
     app: core.appChanges.pipe(Stream.map(appDto)),
-    snapshots: core.snapshotChanges.pipe(Stream.map((snapshots) => snapshots.map(snapshotDto))),
+    snapshots: core.snapshotChanges,
     activeDevice: core.activeDeviceChanges.pipe(Stream.map(activeDeviceDto)),
     status: core.deviceStatusChanges.pipe(Stream.map(statusDto)),
     config: core.deviceConfigChanges.pipe(Stream.map(configDto)),
@@ -128,13 +115,7 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
   };
 
   const snapshots: RuntimeSnapshotHandlers = {
-    readSamples: (id) =>
-      Schema.decodeUnknownEffect(PersistentId)(id).pipe(
-        Effect.flatMap((persistentId) =>
-          core.query({ type: "snapshots/readSamples", id: persistentId }),
-        ),
-        Effect.map((result) => (result.type === "snapshots/readSamples" ? result.samples : null)),
-      ),
+    readSamples: (id) => core.readSnapshotSamples(id),
   };
 
   return { rpc, subscriptions, snapshots };
@@ -183,30 +164,7 @@ export function framePayload(values: ReadonlyArray<number> | null): RuntimeFrame
 }
 
 export function runtimePortInfo(port: SerialPortInfo): RuntimePortInfo {
-  const result: {
-    path: string;
-    manufacturer?: string;
-    serialNumber?: string;
-    pnpId?: string;
-    locationId?: string;
-    productId?: string;
-    vendorId?: string;
-  } = { path: port.path };
-
-  if (port.manufacturer !== undefined) result.manufacturer = port.manufacturer;
-  if (port.serialNumber !== undefined) result.serialNumber = port.serialNumber;
-  if (port.pnpId !== undefined) result.pnpId = port.pnpId;
-  if (port.locationId !== undefined) result.locationId = port.locationId;
-  if (port.productId !== undefined) result.productId = port.productId;
-  if (port.vendorId !== undefined) result.vendorId = port.vendorId;
-
-  return RuntimePortInfo.make(result);
-}
-
-export function snapshotDto(snapshot: SnapshotRecord): RuntimeSnapshotRecord {
-  return RuntimeSnapshotRecord.make({
-    ...snapshot,
-  });
+  return RuntimePortInfo.make(port);
 }
 
 function timingDto(timing: DeviceConfigState["timing"]): RuntimeSetTimingRequest | null {

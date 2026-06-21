@@ -26,6 +26,7 @@ import {
   VScopeTriggerMode,
   VScopeUnexpectedResponseError,
   makeVScopeSerialLayer,
+  vscopeCrc8,
   writeF32,
   writeFixedString,
   writeU16,
@@ -101,6 +102,20 @@ describe("@vscope/serial protocol", () => {
       }
     }),
   );
+
+  it("reports CRC-valid frames with unknown message types as parse events", () => {
+    const encoded = new Uint8Array([0xc8, 2, 0x06, 0]);
+    encoded[encoded.byteLength - 1] = vscopeCrc8(encoded.subarray(2, encoded.byteLength - 1));
+    const parser = new VScopeFrameParser();
+
+    const events = parser.pushEvents(encoded);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?._tag).toBe("InvalidFrame");
+    if (events[0]?._tag === "InvalidFrame") {
+      expect(events[0].error.reason).toBe("Unknown message type 6");
+    }
+  });
 });
 
 describe("@vscope/serial device", () => {

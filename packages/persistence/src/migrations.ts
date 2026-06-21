@@ -16,27 +16,6 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
     `;
 
     yield* sql`
-      CREATE TABLE IF NOT EXISTS saved_devices (
-        id TEXT PRIMARY KEY,
-        port_path TEXT,
-        display_name TEXT,
-        vendor_id TEXT,
-        product_id TEXT,
-        serial_number TEXT,
-        manufacturer TEXT,
-        serial_config_json TEXT NOT NULL,
-        metadata_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `;
-
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS saved_devices_port_path_idx
-        ON saved_devices(port_path)
-    `;
-
-    yield* sql`
       CREATE TABLE IF NOT EXISTS snapshots (
         id TEXT PRIMARY KEY,
         label TEXT NOT NULL,
