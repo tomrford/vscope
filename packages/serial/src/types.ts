@@ -62,11 +62,6 @@ export interface SnapshotBytesOptions {
   readonly samplesPerChunk?: number | undefined;
 }
 
-export interface StateWaitOptions {
-  readonly timeoutMillis?: number | undefined;
-  readonly pollIntervalMillis?: number | undefined;
-}
-
 export interface OpenVScopeDeviceOptions extends OpenSerialTransportOptions {
   readonly requestTimeoutMillis: number;
   readonly retryAttempts?: number | undefined;
@@ -87,12 +82,8 @@ export interface VScopeDevice {
     options?: VScopeRequestOptions,
   ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getState: Effect.Effect<VScopeStateValue, VScopeDeviceError>;
-  readonly start: (
-    options?: StateWaitOptions,
-  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
-  readonly stop: (
-    options?: StateWaitOptions,
-  ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
+  readonly start: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
+  readonly stop: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly trigger: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly getFrame: (
     options?: VScopeRequestOptions,

@@ -489,13 +489,13 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       case "devices/run":
         return withDevice(
           command,
-          (device) => device.start(),
+          (device) => device.start,
           (path, status) => publishStatus(path, status),
         );
       case "devices/stop":
         return withDevice(
           command,
-          (device) => device.stop(),
+          (device) => device.stop,
           (path, status) => publishStatus(path, status),
         );
       case "devices/trigger":

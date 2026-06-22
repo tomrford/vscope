@@ -201,7 +201,7 @@ describe("@vscope/serial device", () => {
         requestTimeoutMillis: 1000,
       });
 
-      yield* device.start();
+      yield* device.start;
       const status = yield* device.trigger;
 
       expect(status.state).toBe(VScopeState.Acquiring);

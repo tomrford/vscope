@@ -698,19 +698,17 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
         return status();
       }),
     getState: Effect.sync(() => state),
-    start: () =>
-      Effect.sync(() => {
-        requestedState = VScopeState.Running;
-        state = VScopeState.Running;
-        snapshotValid = false;
-        return status();
-      }),
-    stop: () =>
-      Effect.sync(() => {
-        requestedState = VScopeState.Halted;
-        state = VScopeState.Halted;
-        return status();
-      }),
+    start: Effect.sync(() => {
+      requestedState = VScopeState.Running;
+      state = VScopeState.Running;
+      snapshotValid = false;
+      return status();
+    }),
+    stop: Effect.sync(() => {
+      requestedState = VScopeState.Halted;
+      state = VScopeState.Halted;
+      return status();
+    }),
     trigger: Effect.gen(function* () {
       if (state !== VScopeState.Running) {
         return yield* new VScopeInvalidArgumentError({

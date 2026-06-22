@@ -37,7 +37,6 @@ import {
 import type {
   OpenVScopeDeviceOptions,
   SnapshotBytesOptions,
-  StateWaitOptions,
   VScopeControlStatus,
   VScopeDevice,
   VScopeDeviceInfo,
@@ -458,9 +457,6 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     return yield* readPayload(codec, path, VScopeMessageType.SetState, payload, decodeStatus);
   });
 
-  const waitForState = (state: VScopeStateValue, options?: StateWaitOptions) =>
-    pollStatus(path, getStatusEffect, state, options);
-
   const setChannelMap = Effect.fn("VScope.setChannelMap")(function* (
     channel: number,
     variable: number,
@@ -536,12 +532,8 @@ const makeDevice = (parts: DeviceParts): VScopeDevice => {
     setTiming: (timing) => setTiming(path, client, codec, info, timing),
     getStatus: (options) => getStatus(path, client, codec, options),
     getState: getStateEffect,
-    start: (options) =>
-      setState(VScopeState.Running).pipe(
-        Effect.andThen(waitForState(VScopeState.Running, options)),
-      ),
-    stop: (options) =>
-      setState(VScopeState.Halted).pipe(Effect.andThen(waitForState(VScopeState.Halted, options))),
+    start: setState(VScopeState.Running),
+    stop: setState(VScopeState.Halted),
     trigger: setState(VScopeState.Acquiring).pipe(Effect.map(markAcquisitionRequested)),
     getFrame: (options) => getFrame(path, client, codec, info, options),
     getSnapshotHeader: getSnapshotHeaderEffect,
@@ -828,40 +820,6 @@ const setTrigger = Effect.fn("VScope.setTrigger")(function* (
     request,
   );
   return yield* readPayload(codec, path, VScopeMessageType.SetTrigger, payload, decodeTrigger);
-});
-
-const pollStatus = Effect.fn("VScope.pollStatus")(function* (
-  path: string,
-  getStatusEffect: Effect.Effect<VScopeControlStatus, VScopeDeviceError>,
-  target: VScopeStateValue,
-  options: StateWaitOptions = {},
-) {
-  const timeoutMillis = options.timeoutMillis ?? 2000;
-  const pollIntervalMillis = options.pollIntervalMillis ?? 20;
-
-  const loop: Effect.Effect<VScopeControlStatus, VScopeDeviceError> = Effect.gen(function* () {
-    const status = yield* getStatusEffect;
-    if (status.state === target) {
-      return status;
-    }
-
-    yield* Effect.sleep(`${pollIntervalMillis} millis`);
-    return yield* loop;
-  });
-
-  return yield* loop.pipe(
-    Effect.timeoutOrElse({
-      duration: `${timeoutMillis} millis`,
-      orElse: () =>
-        Effect.fail(
-          new VScopeResponseTimeoutError({
-            path,
-            requestType: VScopeMessageType.GetStatus,
-            timeoutMillis,
-          }),
-        ),
-    }),
-  );
 });
 
 const decodeStatus = (reader: ByteReader): VScopeControlStatus => {
