@@ -53,3 +53,10 @@ Re-scan the serial package surface after the UI is in place. Keep the runtime-ow
 
 - Always use `nix develop -c` to run commands (pnpm version and node versions may differ).
 - Toolchain uses `pnpm` since vscope is a node-only app relying on native support for serial and sqlite.
+
+## Cursor Cloud specific instructions
+
+- `nix` is not available in the Cursor Cloud VM. The Nix dev shell is replaced here by Node 26 (via `nvm`) plus a globally installed `pnpm@11.5.1`, so run the documented commands directly without the `nix develop -c` prefix (e.g. `pnpm install`, `pnpm run check`, `pnpm run dev:ui`).
+- `/exec-daemon/node` (Node 22) precedes `nvm` on `PATH` and wins by default. Interactive shells get Node 26 via a `~/.bashrc` prepend; non-interactive scripts (like the startup update script) must prepend the nvm Node 26 bin themselves. Native deps (`better-sqlite3`, `@serialport/bindings-cpp`) are compiled against Node 26, so a Node ABI mismatch crashes the daemon — keep Node 26 active.
+- Running in dev needs two processes (no device hardware required; device ops just return typed errors): build the runtime once with `pnpm run build:runtime`, then start the daemon with `node bin/vscope.js` (HTTP/RPC/MCP/snapshots on `127.0.0.1:5174`), and run `pnpm run dev:ui` for the Vite UI on `127.0.0.1:5173` (proxies API paths to 5174). There is no runtime `dev` script with hot reload — re-run `build:runtime` after editing `runtime`/`serial`/`persistence`/`shared`. The UI has Vite HMR.
+- Both `5173` (`strictPort`) and the UI proxy target `5174` are hardcoded; if you override the daemon port with `--port`, the UI proxy breaks.
