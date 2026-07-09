@@ -2,7 +2,13 @@ import { describe, expect, layer } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { SerialPortInfo, VScopeTiming, VScopeTrigger } from "@vscope/serial";
-import { DEFAULT_SETTINGS, RuntimeRpcs, noRecovery, type SnapshotRecord } from "@vscope/shared";
+import {
+  DEFAULT_SETTINGS,
+  makeRuntimeRpcClient,
+  noRecovery,
+  runtimeRpcSocketUrl,
+  type SnapshotRecord,
+} from "@vscope/shared";
 import { Effect, Layer, Stream } from "effect";
 import {
   Headers,
@@ -11,8 +17,8 @@ import {
   HttpClientRequest,
   HttpClientResponse,
   HttpRouter,
+  HttpServer,
 } from "effect/unstable/http";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 
 import { makeRuntimeConfig } from "./config";
 import type {
@@ -32,15 +38,7 @@ describe("@vscope/runtime server", () => {
         const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
         const rpcState = yield* Effect.scoped(
           Effect.gen(function* () {
-            const rpc = yield* RpcClient.make(RuntimeRpcs).pipe(
-              Effect.provide(
-                RpcClient.layerProtocolHttp({
-                  url: "",
-                  transformClient: (client) =>
-                    HttpClient.mapRequest(client, HttpClientRequest.appendUrl("/rpc")),
-                }).pipe(Layer.provideMerge(RpcSerialization.layerNdjson)),
-              ),
-            );
+            const rpc = yield* makeRuntimeRpcClient(yield* testRuntimeRpcUrl);
             const app = yield* rpc["runtime.getApp"]();
             const activeDevice = yield* rpc["device.active.get"]();
             const config = yield* rpc["device.config.get"]();
@@ -331,6 +329,16 @@ function callMcpTool(sessionId: string, id: number, name: string, args: Record<s
 function readJson(response: HttpClientResponse.HttpClientResponse) {
   return response.json;
 }
+
+const testRuntimeRpcUrl = Effect.gen(function* () {
+  const server = yield* HttpServer.HttpServer;
+  const address = server.address;
+  if (address._tag === "UnixAddress") {
+    return yield* Effect.die(new Error("Runtime websocket tests require a TCP server address."));
+  }
+  const hostname = address.hostname === "0.0.0.0" ? "127.0.0.1" : address.hostname;
+  return runtimeRpcSocketUrl(`http://${hostname}:${address.port}`);
+});
 
 function testServerLayer() {
   currentCommands = [];

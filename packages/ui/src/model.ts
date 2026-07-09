@@ -8,7 +8,7 @@ import {
   TriggerMode,
   errorReason,
   makeRuntimeRpcClient,
-  runtimeRpcUrl,
+  runtimeRpcSocketUrl,
 } from "@vscope/shared";
 import { Cause, Effect, Match, Schema } from "effect";
 import * as Command from "foldkit/command";
@@ -165,7 +165,7 @@ export const init = (): readonly [Model, ReadonlyArray<Command.Command<Message>>
 
 type RuntimeRpc = Effect.Success<ReturnType<typeof makeRuntimeRpcClient>>;
 
-export const rpcUrl = Effect.sync(() => runtimeRpcUrl(globalThis.location.href));
+export const rpcUrl = Effect.sync(() => runtimeRpcSocketUrl(globalThis.location.href));
 
 // Every command follows the same shape: run the mutation (if any), re-read the
 // snapshot, and fold the outcome into a Message so the command fiber can never

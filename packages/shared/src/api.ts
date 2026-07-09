@@ -1,6 +1,6 @@
 import { Effect, Layer, Schema } from "effect";
 import { Rpc, RpcClient, RpcGroup, RpcSerialization, RpcSchema } from "effect/unstable/rpc";
-import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import * as Socket from "effect/unstable/socket/Socket";
 
 import {
   LiveViewSettings,
@@ -17,7 +17,7 @@ import { TriggerMode } from "./trigger.ts";
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
-// HTTP surface of the runtime daemon. Server routing and every client derive
+// Route surface of the runtime daemon. Server routing and every client derive
 // their paths from here.
 export const RuntimeEndpoint = {
   health: "/health",
@@ -29,11 +29,20 @@ export const RuntimeEndpoint = {
 export const runtimeRpcUrl = (base: string | URL): string =>
   new URL(RuntimeEndpoint.rpc, base).toString();
 
-// NDJSON, not JSON: the HTTP transport carries server-streaming RPCs
-// (device.status, device.frames) as a sequence of newline-framed messages.
-// JSON serialization expects one complete payload per decode and so never
-// delivers a stream that doesn't terminate. Server and client both provide
-// this layer so the two sides cannot desync.
+export const runtimeRpcSocketUrl = (base: string | URL): string => {
+  const url = new URL(RuntimeEndpoint.rpc, base);
+  if (url.protocol === "http:") {
+    url.protocol = "ws:";
+  } else if (url.protocol === "https:") {
+    url.protocol = "wss:";
+  }
+  return url.toString();
+};
+
+// NDJSON, not JSON: streaming RPCs are newline-framed messages. JSON
+// serialization expects one complete payload per decode and so never delivers a
+// stream that doesn't terminate. Server and client both provide this layer so
+// the two sides cannot desync.
 export const RuntimeRpcSerialization = RpcSerialization.layerNdjson;
 
 export class RuntimeConnectRequest extends Schema.Class<RuntimeConnectRequest>(
@@ -280,10 +289,13 @@ export class RuntimeRpcs extends RpcGroup.make(
 ) {}
 
 export const makeRuntimeRpcClient = (url: string) =>
-  RpcClient.make(RuntimeRpcs).pipe(
-    Effect.provide(
-      RpcClient.layerProtocolHttp({ url }).pipe(
-        Layer.provideMerge([FetchHttpClient.layer, RuntimeRpcSerialization]),
-      ),
-    ),
-  );
+  Effect.gen(function* () {
+    const scope = yield* Effect.scope;
+    const protocol = yield* RpcClient.layerProtocolSocket({ retryTransientErrors: true }).pipe(
+      Layer.provide(RuntimeRpcSerialization),
+      Layer.provide(Socket.layerWebSocket(url)),
+      Layer.provide(Socket.layerWebSocketConstructorGlobal),
+      Layer.buildWithScope(scope),
+    );
+    return yield* RpcClient.make(RuntimeRpcs).pipe(Effect.provide(protocol));
+  });

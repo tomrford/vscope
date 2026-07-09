@@ -196,7 +196,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
   const rpcRoutes = RpcServer.layerHttp({
     group: RuntimeRpcs,
     path: RuntimeEndpoint.rpc,
-    protocol: "http",
+    protocol: "websocket",
   }).pipe(Layer.provide(rpcHandlers), Layer.provide(RuntimeRpcSerialization));
 
   const mcpRoutes = McpServer.toolkit(RuntimeMcpToolkit).pipe(
