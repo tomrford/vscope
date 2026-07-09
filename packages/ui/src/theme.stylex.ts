@@ -7,9 +7,9 @@ export const colors = {
   panel: "#10141c",
   panelMuted: "#161b25",
   panelRaised: "#1d2430",
-  // the scope display itself
+  // the scope display itself (the graticule grid in styles.ts bakes its own
+  // literal so StyleX can statically resolve the gradient)
   screen: "#070a0f",
-  screenGrid: "#13202b",
   screenAxis: "#1d3340",
   // structure
   line: "#222a36",

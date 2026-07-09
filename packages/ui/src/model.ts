@@ -6,7 +6,9 @@ import {
   RuntimePortInfo,
   SnapshotRecord,
   TriggerMode,
+  errorReason,
   makeRuntimeRpcClient,
+  runtimeRpcUrl,
 } from "@vscope/shared";
 import { Effect, Match, Schema } from "effect";
 import * as Command from "foldkit/command";
@@ -163,27 +165,26 @@ export const init = (): readonly [Model, ReadonlyArray<Command.Command<Message>>
 
 type RuntimeRpc = Effect.Success<ReturnType<typeof makeRuntimeRpcClient>>;
 
-const runtimeCommand: (
-  run: (rpc: RuntimeRpc) => Effect.Effect<unknown, unknown, never>,
-) => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn("ui.runtimeCommand")(
-  function* (run) {
-    return yield* Effect.scoped(
-      Effect.gen(function* () {
-        const rpc = yield* makeRuntimeRpcClient(yield* runtimeRpcUrl);
-        yield* run(rpc);
-        return yield* readSnapshot(rpc);
-      }),
-    );
-  },
-);
+export const rpcUrl = Effect.sync(() => runtimeRpcUrl(globalThis.location.href));
 
-const loadRuntimeSnapshot: () => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn(
-  "ui.loadRuntimeSnapshot",
-)(function* () {
+// Every command follows the same shape: run the mutation (if any), re-read the
+// snapshot, and fold the outcome into a Message so failures always land as
+// RuntimeCommandFailed rather than escaping the command fiber.
+const runtimeCommand: (
+  run?: (rpc: RuntimeRpc) => Effect.Effect<unknown, unknown, never>,
+) => Effect.Effect<Message, never, never> = Effect.fn("ui.runtimeCommand")(function* (run) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      const rpc = yield* makeRuntimeRpcClient(yield* runtimeRpcUrl);
+      const rpc = yield* makeRuntimeRpcClient(yield* rpcUrl);
+      if (run !== undefined) {
+        yield* run(rpc);
+      }
       return yield* readSnapshot(rpc);
+    }),
+  ).pipe(
+    Effect.match({
+      onFailure: (cause) => RuntimeCommandFailed({ message: errorReason(cause) }),
+      onSuccess: (snapshot) => RuntimeLoaded({ snapshot }),
     }),
   );
 });
@@ -191,85 +192,47 @@ const loadRuntimeSnapshot: () => Effect.Effect<RuntimeSnapshot, unknown, never> 
 const readSnapshot: (rpc: RuntimeRpc) => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn(
   "ui.readSnapshot",
 )(function* (rpc) {
-  const app = yield* rpc["runtime.getApp"]();
-  const ports = yield* rpc["ports.list"]();
-  const activeDevice = yield* rpc["device.active.get"]();
-  const config = yield* rpc["device.config.get"]();
-  const snapshots = yield* rpc["snapshots.list"]();
-
-  return RuntimeSnapshot.make({
-    app,
-    ports,
-    activeDevice,
-    config,
-    snapshots,
-  });
+  return RuntimeSnapshot.make(
+    yield* Effect.all(
+      {
+        app: rpc["runtime.getApp"](),
+        ports: rpc["ports.list"](),
+        activeDevice: rpc["device.active.get"](),
+        config: rpc["device.config.get"](),
+        snapshots: rpc["snapshots.list"](),
+      },
+      { concurrency: "unbounded" },
+    ),
+  );
 });
 
-const runtimeRpcUrl = Effect.sync(() => new URL("/rpc", globalThis.location.href).toString());
-
-const commandFailed = (cause: unknown): Message =>
-  RuntimeCommandFailed({ message: errorMessage(cause) });
-
-const runtimeLoaded = (snapshot: RuntimeSnapshot): Message => RuntimeLoaded({ snapshot });
-
-const errorMessage = (cause: unknown): string => {
-  if (cause instanceof Error) {
-    return cause.message;
-  }
-  return String(cause);
-};
-
-const RefreshRuntime = Command.define(
-  "RefreshRuntime",
-  Message,
-)(loadRuntimeSnapshot().pipe(Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded })));
+const RefreshRuntime = Command.define("RefreshRuntime", Message)(runtimeCommand());
 
 const ConnectDevice = Command.define(
   "ConnectDevice",
   { path: Schema.String },
   Message,
-)(({ path }) =>
-  runtimeCommand((rpc) => rpc["device.connect"]({ path })).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)(({ path }) => runtimeCommand((rpc) => rpc["device.connect"]({ path })));
 
 const DisconnectDevice = Command.define(
   "DisconnectDevice",
   Message,
-)(
-  runtimeCommand((rpc) => rpc["device.disconnect"]()).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)(runtimeCommand((rpc) => rpc["device.disconnect"]()));
 
 const RunDevice = Command.define(
   "RunDevice",
   Message,
-)(
-  runtimeCommand((rpc) => rpc["device.run"]()).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)(runtimeCommand((rpc) => rpc["device.run"]()));
 
 const StopDevice = Command.define(
   "StopDevice",
   Message,
-)(
-  runtimeCommand((rpc) => rpc["device.stop"]()).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)(runtimeCommand((rpc) => rpc["device.stop"]()));
 
 const TriggerDevice = Command.define(
   "TriggerDevice",
   Message,
-)(
-  runtimeCommand((rpc) => rpc["device.trigger"]()).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)(runtimeCommand((rpc) => rpc["device.trigger"]()));
 
 const SaveSnapshot = Command.define(
   "SaveSnapshot",
@@ -279,7 +242,7 @@ const SaveSnapshot = Command.define(
   runtimeCommand((rpc) => {
     const snapshotLabel = label.trim();
     return rpc["snapshots.capture"](snapshotLabel ? { label: snapshotLabel } : {});
-  }).pipe(Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded })),
+  }),
 );
 
 const SetTiming = Command.define(
@@ -289,11 +252,7 @@ const SetTiming = Command.define(
     preTriggerSeconds: Schema.Finite,
   },
   Message,
-)((timing) =>
-  runtimeCommand((rpc) => rpc["device.setTiming"](timing)).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)((timing) => runtimeCommand((rpc) => rpc["device.setTiming"](timing)));
 
 const SetTrigger = Command.define(
   "SetTrigger",
@@ -303,11 +262,7 @@ const SetTrigger = Command.define(
     mode: TriggerMode,
   },
   Message,
-)((trigger) =>
-  runtimeCommand((rpc) => rpc["device.setTrigger"](trigger)).pipe(
-    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
-  ),
-);
+)((trigger) => runtimeCommand((rpc) => rpc["device.setTrigger"](trigger)));
 
 const modelWithSnapshot = (model: Model, snapshot: RuntimeSnapshot): Model => {
   const selectedPort = nextSelectedPort(model.selectedPort, snapshot);
@@ -334,7 +289,9 @@ const modelWithSnapshot = (model: Model, snapshot: RuntimeSnapshot): Model => {
 };
 
 const nextSelectedPort = (current: string, snapshot: RuntimeSnapshot): string => {
-  if (snapshot.activeDevice) {
+  // A disconnected activeDevice may reference a port that is no longer
+  // enumerated; only a live connection pins the selection to its path.
+  if (snapshot.activeDevice?.connected) {
     return snapshot.activeDevice.path;
   }
   if (snapshot.ports.some((port) => port.path === current)) {
@@ -343,14 +300,19 @@ const nextSelectedPort = (current: string, snapshot: RuntimeSnapshot): string =>
   return snapshot.ports[0]?.path ?? "";
 };
 
+// Number("") is 0, so blank drafts must be rejected before coercion.
 const parseFinite = (value: string): number | null => {
-  const parsed = Number(value);
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
 };
 
 const parseNonNegativeInteger = (value: string): number | null => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+  const parsed = parseFinite(value);
+  return parsed !== null && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 };
 
 const failLocal = (

@@ -2,9 +2,7 @@ import { makeRuntimeRpcClient } from "@vscope/shared";
 import { Effect, Schedule, Schema, Stream } from "effect";
 import * as Subscription from "foldkit/subscription";
 
-import { DeviceStatusReceived, type Message, type Model } from "./model.ts";
-
-const rpcUrl = Effect.sync(() => new URL("/rpc", globalThis.location.href).toString());
+import { DeviceStatusReceived, rpcUrl, type Message, type Model } from "./model.ts";
 
 // The runtime polls the connected device at its configured stateHz and pushes
 // every change onto the `device.status` stream. Subscribing here is what makes
@@ -29,8 +27,7 @@ const connectedDevicePath = (model: Model): string | null =>
   model.runtime.activeDevice?.connected === true ? model.runtime.activeDevice.path : null;
 
 // Device-scoped: the feed runs only while a device is connected and restarts
-// cleanly when the connected device changes. The frame plane will be the second
-// device-scoped subscription once liveplot is wired.
+// cleanly when the connected device changes.
 export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
   deviceStatus: entry(
     { devicePath: Schema.NullOr(Schema.String) },

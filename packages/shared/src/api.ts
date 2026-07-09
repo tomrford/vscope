@@ -17,6 +17,25 @@ import { TriggerMode } from "./trigger.ts";
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
+// HTTP surface of the runtime daemon. Server routing and every client derive
+// their paths from here.
+export const RuntimeEndpoint = {
+  health: "/health",
+  rpc: "/rpc",
+  mcp: "/mcp",
+  snapshots: "/snapshots",
+} as const;
+
+export const runtimeRpcUrl = (base: string | URL): string =>
+  new URL(RuntimeEndpoint.rpc, base).toString();
+
+// NDJSON, not JSON: the HTTP transport carries server-streaming RPCs
+// (device.status, device.frames) as a sequence of newline-framed messages.
+// JSON serialization expects one complete payload per decode and so never
+// delivers a stream that doesn't terminate. Server and client both provide
+// this layer so the two sides cannot desync.
+export const RuntimeRpcSerialization = RpcSerialization.layerNdjson;
+
 export class RuntimeConnectRequest extends Schema.Class<RuntimeConnectRequest>(
   "RuntimeConnectRequest",
 )({
@@ -264,11 +283,7 @@ export const makeRuntimeRpcClient = (url: string) =>
   RpcClient.make(RuntimeRpcs).pipe(
     Effect.provide(
       RpcClient.layerProtocolHttp({ url }).pipe(
-        // NDJSON, not JSON: the HTTP transport carries server-streaming RPCs
-        // (device.status, device.frames) as a sequence of newline-framed
-        // messages. JSON serialization expects one complete payload per decode
-        // and so never delivers a stream that doesn't terminate.
-        Layer.provideMerge([FetchHttpClient.layer, RpcSerialization.layerNdjson]),
+        Layer.provideMerge([FetchHttpClient.layer, RuntimeRpcSerialization]),
       ),
     ),
   );

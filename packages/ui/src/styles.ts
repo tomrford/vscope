@@ -45,7 +45,7 @@ const pulse = stylex.keyframes({
 });
 
 // Faint graticule grid + brighter centre axes, baked as literal hex so the
-// StyleX compiler can statically resolve the gradient (mirrors screenGrid).
+// StyleX compiler can statically resolve the gradient.
 const graticule =
   "linear-gradient(#13202b 1px, transparent 1px), linear-gradient(90deg, #13202b 1px, transparent 1px)";
 
@@ -425,15 +425,6 @@ export const appStyles = stylex.create({
     fontSize: 11,
     fontVariantNumeric: "tabular-nums",
   },
-  miniDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 999,
-    backgroundColor: colors.run,
-  },
-  miniDotMuted: { backgroundColor: colors.halt },
-  miniDotWarn: { backgroundColor: colors.acquire },
-
   // ---- buttons -----------------------------------------------------------
   btn: {
     display: "inline-flex",

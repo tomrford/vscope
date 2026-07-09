@@ -13,6 +13,7 @@ import {
   RuntimeDeviceInfo,
   RuntimeFramePayload,
   RuntimeRpcs,
+  RuntimeRpcSerialization,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
   RuntimeSnapshotCaptureRequest,
@@ -32,7 +33,7 @@ import {
   HttpServerResponse,
   HttpStaticServer,
 } from "effect/unstable/http";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcServer } from "effect/unstable/rpc";
 
 import {
   activeDeviceDto,
@@ -196,9 +197,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     group: RuntimeRpcs,
     path: RuntimeEndpoint.rpc,
     protocol: "http",
-    // NDJSON frames each streamed message so server-streaming RPCs deliver
-    // incrementally; must match the client serialization in @vscope/shared.
-  }).pipe(Layer.provide(rpcHandlers), Layer.provide(RpcSerialization.layerNdjson));
+  }).pipe(Layer.provide(rpcHandlers), Layer.provide(RuntimeRpcSerialization));
 
   const mcpRoutes = McpServer.toolkit(RuntimeMcpToolkit).pipe(
     Layer.provide(makeRuntimeMcpToolkitLayer),

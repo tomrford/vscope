@@ -3,15 +3,10 @@ import nodePath from "node:path";
 
 import { Schema } from "effect";
 
+export { RuntimeEndpoint } from "@vscope/shared";
+
 export const DEFAULT_RUNTIME_HOST = "127.0.0.1";
 export const DEFAULT_RUNTIME_PORT = 5174;
-
-export const RuntimeEndpoint = {
-  health: "/health",
-  rpc: "/rpc",
-  mcp: "/mcp",
-  snapshots: "/snapshots",
-} as const;
 
 export const RuntimeConfigSchema = Schema.Struct({
   host: Schema.String.check(Schema.isMinLength(1)),

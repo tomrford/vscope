@@ -1,5 +1,5 @@
-import type { RuntimeDeviceState, TriggerMode } from "@vscope/shared";
-import { Match } from "effect";
+import { TriggerMode, type RuntimeDeviceState } from "@vscope/shared";
+import { Match, Schema } from "effect";
 import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
 
@@ -35,7 +35,7 @@ export type { Message };
 type H = ReturnType<typeof html<Message>>;
 type ButtonVariant = "default" | "primary" | "run" | "stop" | "active";
 
-const triggerModes: ReadonlyArray<TriggerMode> = ["disabled", "rising", "falling", "both"];
+const triggerModes: ReadonlyArray<TriggerMode> = TriggerMode.literals;
 
 // ---- live device facts -----------------------------------------------------
 
@@ -266,10 +266,7 @@ const viewScreen = (model: Model, h: H): Html =>
         [...sx(h, appStyles.screenCenter)],
         [
           h.p([...sx(h, appStyles.centerTitle)], ["Live trace idle"]),
-          h.p(
-            [...sx(h, appStyles.centerHint)],
-            ["Frame streaming and liveplot are intentionally deferred in this pass."],
-          ),
+          h.p([...sx(h, appStyles.centerHint)], ["Frame streaming is not wired up yet."]),
         ],
       ),
       h.div(
@@ -305,8 +302,8 @@ const viewDock = (model: Model, h: H): Html =>
       h.div(
         [...sx(h, appStyles.dockGroup)],
         [
-          viewMenuButton(model, h, "timing", "Timebase ▾", viewTimingPopover(model, h)),
-          viewMenuButton(model, h, "trigger", "Trigger ▾", viewTriggerPopover(model, h)),
+          viewMenuButton(model, h, "timing", "Timebase ▾", viewTimingPopover),
+          viewMenuButton(model, h, "trigger", "Trigger ▾", viewTriggerPopover),
         ],
       ),
       h.div([...sx(h, appStyles.dockDivider)], []),
@@ -330,7 +327,13 @@ const viewDock = (model: Model, h: H): Html =>
     ],
   );
 
-const viewMenuButton = (model: Model, h: H, menu: MenuId, label: string, panel: Html): Html =>
+const viewMenuButton = (
+  model: Model,
+  h: H,
+  menu: MenuId,
+  label: string,
+  panel: (model: Model, h: H) => Html,
+): Html =>
   h.div(
     [...sx(h, appStyles.popoverAnchor)],
     [
@@ -338,7 +341,7 @@ const viewMenuButton = (model: Model, h: H, menu: MenuId, label: string, panel: 
         variant: model.openMenu === menu ? "active" : "default",
         disabled: !isConnected(model),
       }),
-      model.openMenu === menu ? panel : null,
+      model.openMenu === menu ? panel(model, h) : null,
     ],
   );
 
@@ -674,14 +677,10 @@ const formatNumber = (value: number): string =>
 const portLabel = (path: string, manufacturer: string | undefined): string =>
   manufacturer ? `${path} · ${manufacturer}` : path;
 
+const isTriggerMode = Schema.is(TriggerMode);
+
 const parseTriggerMode = (value: string): TriggerMode =>
-  Match.value(value).pipe(
-    Match.withReturnType<TriggerMode>(),
-    Match.when("rising", () => "rising"),
-    Match.when("falling", () => "falling"),
-    Match.when("both", () => "both"),
-    Match.orElse(() => "disabled"),
-  );
+  isTriggerMode(value) ? value : "disabled";
 
 const formatDate = (value: string): string => {
   const date = new Date(value);
