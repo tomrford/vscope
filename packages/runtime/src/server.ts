@@ -196,7 +196,9 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     group: RuntimeRpcs,
     path: RuntimeEndpoint.rpc,
     protocol: "http",
-  }).pipe(Layer.provide(rpcHandlers), Layer.provide(RpcSerialization.layerJson));
+    // NDJSON frames each streamed message so server-streaming RPCs deliver
+    // incrementally; must match the client serialization in @vscope/shared.
+  }).pipe(Layer.provide(rpcHandlers), Layer.provide(RpcSerialization.layerNdjson));
 
   const mcpRoutes = McpServer.toolkit(RuntimeMcpToolkit).pipe(
     Layer.provide(makeRuntimeMcpToolkitLayer),

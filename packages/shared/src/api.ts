@@ -264,7 +264,11 @@ export const makeRuntimeRpcClient = (url: string) =>
   RpcClient.make(RuntimeRpcs).pipe(
     Effect.provide(
       RpcClient.layerProtocolHttp({ url }).pipe(
-        Layer.provideMerge([FetchHttpClient.layer, RpcSerialization.layerJson]),
+        // NDJSON, not JSON: the HTTP transport carries server-streaming RPCs
+        // (device.status, device.frames) as a sequence of newline-framed
+        // messages. JSON serialization expects one complete payload per decode
+        // and so never delivers a stream that doesn't terminate.
+        Layer.provideMerge([FetchHttpClient.layer, RpcSerialization.layerNdjson]),
       ),
     ),
   );

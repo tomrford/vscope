@@ -1,441 +1,593 @@
+import type { RuntimeDeviceState, TriggerMode } from "@vscope/shared";
 import { Match } from "effect";
 import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
 
 import {
+  ConnectRequested,
+  DisconnectRequested,
+  MenuClosed,
+  MenuToggled,
   Model,
-  RuntimeStateLoaded,
-  SelectedPanel,
-  SelectedSignal,
-  ToggledRun,
+  RefreshRequested,
+  RunRequested,
+  SaveSnapshotRequested,
+  SelectedPortChanged,
+  SetTimingRequested,
+  SetTriggerRequested,
+  SnapshotLabelChanged,
+  StopRequested,
+  TimingPreTriggerChanged,
+  TimingTotalChanged,
+  TriggerChannelChanged,
+  TriggerModeChanged,
+  TriggerRequested,
+  TriggerThresholdChanged,
   init,
   update,
 } from "./model.ts";
-import type { Channel, Message, PanelTab } from "./model.ts";
-import { appStyles, colors, sx } from "./styles.ts";
+import type { MenuId, Message } from "./model.ts";
+import { appStyles, chartColors, sx } from "./styles.ts";
 
 export { Model, init, update };
 export type { Message };
 
+type H = ReturnType<typeof html<Message>>;
+type ButtonVariant = "default" | "primary" | "run" | "stop" | "active";
+
+const triggerModes: ReadonlyArray<TriggerMode> = ["disabled", "rising", "falling", "both"];
+
+// ---- live device facts -----------------------------------------------------
+
+const isConnected = (model: Model): boolean => model.runtime.activeDevice?.connected === true;
+const isBusy = (model: Model): boolean => model.busy !== null;
+const deviceState = (model: Model): RuntimeDeviceState | null => model.status?.state ?? null;
+
+// Affordances mirror the runtime's control policy so the UI offers exactly the
+// commands the device will accept in its current state.
+const canRun = (model: Model): boolean =>
+  isConnected(model) && deviceState(model) === "halted" && !isBusy(model);
+const canStop = (model: Model): boolean => {
+  const state = deviceState(model);
+  return isConnected(model) && (state === "running" || state === "acquiring") && !isBusy(model);
+};
+const canTrigger = (model: Model): boolean =>
+  isConnected(model) && deviceState(model) === "running" && !isBusy(model);
+const canConfigure = (model: Model): boolean =>
+  isConnected(model) && deviceState(model) === "halted" && !isBusy(model);
+const canSnapshot = (model: Model): boolean =>
+  isConnected(model) && model.status?.snapshotValid === true && !isBusy(model);
+
+// ---- primitives ------------------------------------------------------------
+
 const viewButton = (
-  h: ReturnType<typeof html<Message>>,
+  h: H,
   label: string,
   onClick: Message,
-  tone: "primary" | "default" | "danger" = "default",
+  options: {
+    readonly variant?: ButtonVariant;
+    readonly disabled?: boolean;
+    readonly small?: boolean;
+    readonly title?: string;
+  } = {},
 ): Html =>
   h.button(
     [
       h.Type("button"),
       h.OnClick(onClick),
+      h.Disabled(options.disabled ?? false),
+      ...(options.title ? [h.Title(options.title)] : []),
       ...sx(
         h,
-        appStyles.button,
-        tone === "primary" && appStyles.primaryButton,
-        tone === "danger" && appStyles.dangerButton,
+        appStyles.btn,
+        options.small && appStyles.btnSmall,
+        options.variant === "primary" && appStyles.btnPrimary,
+        options.variant === "run" && appStyles.btnRun,
+        options.variant === "stop" && appStyles.btnStop,
+        options.variant === "active" && appStyles.btnActive,
       ),
     ],
     [label],
   );
 
-const viewStatusPill = (h: ReturnType<typeof html<Message>>, label: string): Html =>
-  h.span([...sx(h, appStyles.statusPill)], [h.span([...sx(h, appStyles.dot)], []), label]);
-
 const viewField = (
-  h: ReturnType<typeof html<Message>>,
+  h: H,
   label: string,
   value: string,
-  suffix = "",
+  onInput: (value: string) => Message,
+  options: { readonly placeholder?: string; readonly disabled?: boolean } = {},
 ): Html =>
   h.label(
     [...sx(h, appStyles.field)],
     [
-      h.span([...sx(h, appStyles.label)], [suffix ? `${label} (${suffix})` : label]),
-      h.input([...sx(h, appStyles.input), h.Value(value)]),
+      h.span([...sx(h, appStyles.fieldLabel)], [label]),
+      h.input([
+        ...sx(h, appStyles.input),
+        h.Value(value),
+        h.OnInput(onInput),
+        h.Disabled(options.disabled ?? false),
+        h.Placeholder(options.placeholder ?? ""),
+      ]),
     ],
   );
 
-const viewTabs = (model: Model, h: ReturnType<typeof html<Message>>): Html => {
-  const tabs: ReadonlyArray<PanelTab> = ["Controls", "Snapshots", "Device"];
+// ---- header ----------------------------------------------------------------
+
+const viewHeader = (model: Model, h: H): Html =>
+  h.header(
+    [...sx(h, appStyles.header)],
+    [
+      h.div(
+        [...sx(h, appStyles.brand)],
+        [
+          h.div([...sx(h, appStyles.brandMark)], []),
+          h.div(
+            [],
+            [
+              h.h1([...sx(h, appStyles.brandName)], [model.appName]),
+              h.p([...sx(h, appStyles.brandSub)], [appReadiness(model)]),
+            ],
+          ),
+        ],
+      ),
+      h.div([...sx(h, appStyles.spacer)], []),
+      viewConnection(model, h),
+      h.div([...sx(h, appStyles.dockDivider)], []),
+      viewStateBadge(model, h),
+    ],
+  );
+
+const appReadiness = (model: Model): string => {
+  const status = model.runtime.app?.status;
+  const stamp = model.busy
+    ? `· ${model.busy}…`
+    : model.lastUpdatedAt
+      ? `· ${model.lastUpdatedAt}`
+      : "";
+  return `${status ?? "loading"} ${stamp}`.trim();
+};
+
+const viewConnection = (model: Model, h: H): Html => {
+  const active = model.runtime.activeDevice;
+
+  if (isConnected(model) && active) {
+    return h.div(
+      [...sx(h, appStyles.cluster)],
+      [
+        h.span([...sx(h, appStyles.miniStatus)], [`${active.deviceName} · ${active.path}`]),
+        viewButton(h, "Disconnect", DisconnectRequested(), {
+          small: true,
+          disabled: isBusy(model),
+        }),
+        viewButton(h, "Refresh", RefreshRequested(), { small: true, disabled: isBusy(model) }),
+      ],
+    );
+  }
 
   return h.div(
-    [...sx(h, appStyles.tabs)],
-    tabs.map((tab) =>
-      h.button(
+    [...sx(h, appStyles.cluster)],
+    [
+      h.select(
         [
-          h.Type("button"),
-          h.OnClick(SelectedPanel({ panel: tab })),
-          ...sx(h, appStyles.tabButton, model.activePanel === tab && appStyles.tabButtonActive),
+          ...sx(h, appStyles.select, appStyles.portSelect),
+          h.Attribute("value", model.selectedPort),
+          h.OnChange((path) => SelectedPortChanged({ path })),
+          h.Disabled(isBusy(model)),
         ],
-        [tab],
+        [
+          h.option(
+            [h.Attribute("value", ""), h.Selected(model.selectedPort === "")],
+            ["Select port"],
+          ),
+          ...model.runtime.ports.map((port) =>
+            h.option(
+              [
+                h.Key(port.path),
+                h.Attribute("value", port.path),
+                h.Selected(port.path === model.selectedPort),
+              ],
+              [portLabel(port.path, port.manufacturer)],
+            ),
+          ),
+        ],
       ),
-    ),
+      viewButton(h, "Connect", ConnectRequested(), {
+        variant: "primary",
+        small: true,
+        disabled: isBusy(model) || model.selectedPort === "",
+      }),
+      viewButton(h, "Refresh", RefreshRequested(), { small: true, disabled: isBusy(model) }),
+    ],
   );
 };
 
-const viewControlsPanel = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
+const viewStateBadge = (model: Model, h: H): Html => {
+  const descriptor = stateDescriptor(model);
+  const animated = descriptor.tone === "run" || descriptor.tone === "acquire";
+
+  return h.span(
+    [...sx(h, appStyles.stateBadge, toneBadgeStyle(descriptor.tone))],
+    [h.span([...sx(h, appStyles.dot, animated && appStyles.dotPulse)], []), descriptor.label],
+  );
+};
+
+type Tone = "run" | "acquire" | "halt" | "fault" | "idle";
+
+const stateDescriptor = (model: Model): { readonly label: string; readonly tone: Tone } => {
+  if (!isConnected(model)) return { label: "No link", tone: "idle" };
+  const state = deviceState(model);
+  if (state === null) return { label: "Linking", tone: "idle" };
+  return Match.value(state).pipe(
+    Match.withReturnType<{ readonly label: string; readonly tone: Tone }>(),
+    Match.when("running", () => ({ label: "Running", tone: "run" })),
+    Match.when("acquiring", () => ({ label: "Acquiring", tone: "acquire" })),
+    Match.when("halted", () => ({ label: "Halted", tone: "halt" })),
+    Match.when("misconfigured", () => ({ label: "Misconfigured", tone: "fault" })),
+    Match.exhaustive,
+  );
+};
+
+const toneBadgeStyle = (tone: Tone) =>
+  tone === "run"
+    ? appStyles.stateRun
+    : tone === "acquire"
+      ? appStyles.stateAcquire
+      : tone === "fault"
+        ? appStyles.stateFault
+        : appStyles.stateHalt;
+
+// ---- scope display ---------------------------------------------------------
+
+const viewScreen = (model: Model, h: H): Html =>
   h.div(
-    [...sx(h, appStyles.panelBody)],
+    [...sx(h, appStyles.screen)],
     [
-      h.section(
-        [...sx(h, appStyles.section)],
+      h.div(
+        [...sx(h, appStyles.osd, appStyles.osdTopLeft)],
         [
+          h.div([...sx(h, appStyles.osdLine)], [connectionLabel(model)]),
           h.div(
-            [...sx(h, appStyles.sectionHeader)],
-            [
-              h.h2([...sx(h, appStyles.sectionTitle)], ["Acquisition"]),
-              viewStatusPill(h, model.isRunning ? "Streaming" : "Stopped"),
-            ],
+            [...sx(h, appStyles.osdLine)],
+            [`STATE  ${stateDescriptor(model).label.toUpperCase()}`],
           ),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.osd, appStyles.osdTopRight)],
+        [
+          h.div([...sx(h, appStyles.osdLine)], [triggerSummary(model)]),
+          h.div(
+            [...sx(h, appStyles.osdLine)],
+            [model.status?.snapshotValid ? "SNAPSHOT READY" : "SNAPSHOT —"],
+          ),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.screenCenter)],
+        [
+          h.p([...sx(h, appStyles.centerTitle)], ["Live trace idle"]),
           h.p(
-            [...sx(h, appStyles.helperText)],
-            [
-              "Always-used controls stay above the plots. This panel is for values that are still close to the live workflow but do not need permanent graph space.",
-            ],
+            [...sx(h, appStyles.centerHint)],
+            ["Frame streaming and liveplot are intentionally deferred in this pass."],
           ),
         ],
       ),
-      h.section(
-        [...sx(h, appStyles.section)],
+      h.div(
+        [...sx(h, appStyles.osd, appStyles.osdBottom)],
         [
           h.div(
-            [...sx(h, appStyles.sectionHeader)],
-            [
-              h.h2([...sx(h, appStyles.sectionTitle)], ["RT buffers"]),
-              h.span([...sx(h, appStyles.rowMeta)], ["5 writable"]),
-            ],
-          ),
-          h.div(
-            [...sx(h, appStyles.fieldGrid)],
-            [
-              viewField(h, "Buffer 0", "128", "samples"),
-              viewField(h, "Buffer 1", "512", "samples"),
-              viewField(h, "Pre-trigger", "35", "%"),
-              viewField(h, "Decimation", "4", "x"),
-            ],
-          ),
-        ],
-      ),
-      h.section(
-        [...sx(h, appStyles.section)],
-        [
-          h.div(
-            [...sx(h, appStyles.sectionHeader)],
-            [
-              h.h2([...sx(h, appStyles.sectionTitle)], ["Trigger"]),
-              h.span([...sx(h, appStyles.rowMeta)], ["armed"]),
-            ],
-          ),
-          h.div(
-            [...sx(h, appStyles.fieldGrid)],
-            [
-              viewField(h, "Mode", "Rising edge"),
-              viewField(h, "Source", "Motor current"),
-              viewField(h, "Level", "8.4", "A"),
-              viewField(h, "Holdoff", "12", "ms"),
-            ],
+            [...sx(h, appStyles.osdScale)],
+            [h.span([], [timebaseSummary(model)]), h.span([], [sampleSummary(model)])],
           ),
         ],
       ),
     ],
   );
 
-const viewSnapshotsPanel = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
+// ---- command dock ----------------------------------------------------------
+
+const viewDock = (model: Model, h: H): Html =>
   h.div(
-    [...sx(h, appStyles.panelBody)],
+    [...sx(h, appStyles.dock)],
     [
-      h.section(
-        [...sx(h, appStyles.section)],
+      h.div(
+        [...sx(h, appStyles.dockGroup)],
         [
-          h.div(
-            [...sx(h, appStyles.sectionHeader)],
-            [
-              h.h2([...sx(h, appStyles.sectionTitle)], ["Snapshots"]),
-              h.span([...sx(h, appStyles.rowMeta)], [`${model.snapshots.length} captures`]),
-            ],
+          viewButton(h, "Run", RunRequested(), { variant: "run", disabled: !canRun(model) }),
+          viewButton(h, "Stop", StopRequested(), { variant: "stop", disabled: !canStop(model) }),
+          viewButton(h, "Trigger", TriggerRequested(), {
+            disabled: !canTrigger(model),
+            title: "Force a trigger while running",
+          }),
+        ],
+      ),
+      h.div([...sx(h, appStyles.dockDivider)], []),
+      h.div(
+        [...sx(h, appStyles.dockGroup)],
+        [
+          viewMenuButton(model, h, "timing", "Timebase ▾", viewTimingPopover(model, h)),
+          viewMenuButton(model, h, "trigger", "Trigger ▾", viewTriggerPopover(model, h)),
+        ],
+      ),
+      h.div([...sx(h, appStyles.dockDivider)], []),
+      h.div(
+        [...sx(h, appStyles.dockGroup)],
+        [
+          h.input([
+            ...sx(h, appStyles.input),
+            h.Value(model.snapshotLabelDraft),
+            h.OnInput((value) => SnapshotLabelChanged({ value })),
+            h.Placeholder("snapshot label"),
+            h.Disabled(!isConnected(model)),
+          ]),
+          viewButton(h, "Save snapshot", SaveSnapshotRequested(), {
+            variant: "primary",
+            disabled: !canSnapshot(model),
+            title: "Available when the device holds a ready snapshot",
+          }),
+        ],
+      ),
+    ],
+  );
+
+const viewMenuButton = (model: Model, h: H, menu: MenuId, label: string, panel: Html): Html =>
+  h.div(
+    [...sx(h, appStyles.popoverAnchor)],
+    [
+      viewButton(h, label, MenuToggled({ menu }), {
+        variant: model.openMenu === menu ? "active" : "default",
+        disabled: !isConnected(model),
+      }),
+      model.openMenu === menu ? panel : null,
+    ],
+  );
+
+const viewTimingPopover = (model: Model, h: H): Html =>
+  h.div(
+    [...sx(h, appStyles.popoverPanel)],
+    [
+      h.div(
+        [...sx(h, appStyles.popoverHeader)],
+        [
+          h.span([...sx(h, appStyles.cardTitle)], ["Timebase"]),
+          h.span([...sx(h, appStyles.cardMeta)], ["seconds"]),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.popoverRow)],
+        [
+          viewField(h, "Total", model.timingTotalSecondsDraft, (value) =>
+            TimingTotalChanged({ value }),
           ),
-          h.p(
-            [...sx(h, appStyles.helperText)],
-            [
-              "This wants to become the metadata table: capture time, device, trigger, channel map, notes, and comparison state.",
-            ],
+          viewField(h, "Pre-trigger", model.timingPreTriggerSecondsDraft, (value) =>
+            TimingPreTriggerChanged({ value }),
           ),
-          h.div(
-            [],
-            model.snapshots.map((snapshot) =>
-              h.div(
-                [h.Key(snapshot.id), ...sx(h, appStyles.snapshotRow)],
+        ],
+      ),
+      viewButton(h, "Apply timebase", SetTimingRequested(), {
+        variant: "primary",
+        disabled: !canConfigure(model),
+        title: "Editable while halted",
+      }),
+    ],
+  );
+
+const viewTriggerPopover = (model: Model, h: H): Html =>
+  h.div(
+    [...sx(h, appStyles.popoverPanel)],
+    [
+      h.div(
+        [...sx(h, appStyles.popoverHeader)],
+        [
+          h.span([...sx(h, appStyles.cardTitle)], ["Trigger"]),
+          h.span([...sx(h, appStyles.cardMeta)], [model.triggerModeDraft]),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.popoverRow)],
+        [
+          viewField(h, "Channel", model.triggerChannelDraft, (value) =>
+            TriggerChannelChanged({ value }),
+          ),
+          viewField(h, "Threshold", model.triggerThresholdDraft, (value) =>
+            TriggerThresholdChanged({ value }),
+          ),
+        ],
+      ),
+      h.label(
+        [...sx(h, appStyles.field)],
+        [
+          h.span([...sx(h, appStyles.fieldLabel)], ["Mode"]),
+          h.select(
+            [
+              ...sx(h, appStyles.select),
+              h.Attribute("value", model.triggerModeDraft),
+              h.OnChange((mode) => TriggerModeChanged({ mode: parseTriggerMode(mode) })),
+            ],
+            triggerModes.map((mode) =>
+              h.option(
                 [
-                  h.div(
-                    [],
-                    [
-                      h.div([...sx(h, appStyles.rowTitle)], [snapshot.label]),
-                      h.div(
-                        [...sx(h, appStyles.rowMeta)],
-                        [
-                          `${snapshot.capturedAt} · ${snapshot.channels} channels · ${snapshot.size}`,
-                        ],
-                      ),
-                    ],
-                  ),
-                  viewButton(h, "Open", RuntimeStateLoaded({ status: `Loaded ${snapshot.label}` })),
+                  h.Key(mode),
+                  h.Attribute("value", mode),
+                  h.Selected(mode === model.triggerModeDraft),
                 ],
+                [mode],
               ),
             ),
           ),
         ],
       ),
+      viewButton(h, "Apply trigger", SetTriggerRequested(), {
+        variant: "primary",
+        disabled: !canConfigure(model),
+        title: "Editable while halted",
+      }),
     ],
   );
 
-const viewDevicePanel = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
-  h.div(
-    [...sx(h, appStyles.panelBody)],
-    [
-      h.section(
-        [...sx(h, appStyles.section)],
-        [
-          h.div(
-            [...sx(h, appStyles.sectionHeader)],
-            [
-              h.h2([...sx(h, appStyles.sectionTitle)], ["Connection"]),
-              viewStatusPill(h, "USB serial"),
-            ],
-          ),
-          h.div(
-            [...sx(h, appStyles.fieldGrid)],
-            [
-              viewField(h, "Port", "/dev/tty.usbmodem101"),
-              viewField(h, "Baud", "115200"),
-              viewField(h, "Device", "vscope-devkit"),
-              viewField(h, "Firmware", "0.4.7"),
-            ],
-          ),
-          h.div(
-            [...sx(h, appStyles.buttonRow)],
-            [
-              viewButton(h, "Reconnect", RuntimeStateLoaded({ status: "Reconnect requested" })),
-              viewButton(h, "Forget device", RuntimeStateLoaded({ status: "Forget requested" })),
-            ],
-          ),
-        ],
-      ),
-      h.section(
-        [...sx(h, appStyles.section)],
-        [
-          h.h2([...sx(h, appStyles.sectionTitle)], ["Persistence"]),
-          h.div(
-            [...sx(h, appStyles.fieldGrid)],
-            [
-              viewField(h, "Snapshot folder", "~/.local/share/vscope"),
-              viewField(h, "Retention", "Unlimited"),
-            ],
-          ),
-        ],
-      ),
-    ],
-  );
+// ---- instrument rail -------------------------------------------------------
 
-const viewPanelContent = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
-  Match.value(model.activePanel).pipe(
-    Match.withReturnType<Html>(),
-    Match.when("Controls", () => viewControlsPanel(model, h)),
-    Match.when("Snapshots", () => viewSnapshotsPanel(model, h)),
-    Match.when("Device", () => viewDevicePanel(model, h)),
-    Match.exhaustive,
-  );
-
-const viewLeftPanel = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
+const viewRail = (model: Model, h: H): Html =>
   h.aside(
-    [...sx(h, appStyles.leftPanel)],
+    [...sx(h, appStyles.rail)],
     [
-      h.div(
-        [...sx(h, appStyles.brandBar)],
-        [
-          h.div(
-            [...sx(h, appStyles.brandRow)],
-            [
-              h.div(
-                [],
-                [
-                  h.h1([...sx(h, appStyles.brandTitle)], [model.appName]),
-                  h.p([...sx(h, appStyles.brandMeta)], [model.status]),
-                ],
-              ),
-              viewStatusPill(h, "Ready"),
-            ],
-          ),
-          viewTabs(model, h),
-        ],
-      ),
-      viewPanelContent(model, h),
+      viewChannelsCard(model, h),
+      viewRtCard(model, h),
+      viewSnapshotsCard(model, h),
+      viewDeviceCard(model, h),
     ],
   );
 
-const channelForLane = (model: Model, lane: number): Channel =>
-  model.channels.find((channel) => channel.id === model.selectedSignals[lane]) ?? model.channels[0];
-
-const buildPlotPath = (lane: number): string => {
-  const points = Array.from({ length: 72 }, (_, index) => {
-    const x = (index / 71) * 1000;
-    const wave = Math.sin(index * 0.32 + lane * 0.8) * 34;
-    const ripple = Math.sin(index * 0.91 + lane) * 9;
-    const trend = ((index % 18) / 18) * 10;
-    const y = 90 - (wave + ripple + trend + 46);
-    return `${x.toFixed(1)},${Math.max(8, Math.min(92, y)).toFixed(1)}`;
-  });
-
-  return `M ${points.join(" L ")}`;
-};
-
-const viewSignalSelect = (model: Model, h: ReturnType<typeof html<Message>>, lane: number): Html =>
-  h.select(
-    [
-      ...sx(h, appStyles.select),
-      h.Attribute("value", model.selectedSignals[lane] ?? model.channels[0].id),
-      h.OnChange((signalId) => SelectedSignal({ lane, signalId })),
-    ],
-    model.channels.map((channel) =>
-      h.option(
-        [
-          h.Key(channel.id),
-          h.Attribute("value", channel.id),
-          ...(channel.id === model.selectedSignals[lane] ? [h.Attribute("selected", "")] : []),
-        ],
-        [channel.label],
-      ),
-    ),
-  );
-
-const viewPlotLane = (model: Model, h: ReturnType<typeof html<Message>>, lane: number): Html => {
-  const channel = channelForLane(model, lane);
+const viewChannelsCard = (model: Model, h: H): Html => {
+  const channelMap = model.runtime.config?.channelMap ?? [];
+  const variables = model.runtime.activeDevice?.variables ?? [];
 
   return h.section(
-    [h.Key(`lane-${lane}`), ...sx(h, appStyles.plotLane)],
+    [...sx(h, appStyles.card)],
     [
       h.div(
-        [...sx(h, appStyles.plotControl)],
+        [...sx(h, appStyles.cardHeader)],
         [
-          h.div(
-            [],
-            [
-              h.p(
-                [...sx(h, appStyles.signalName), h.Style({ color: channel.color })],
-                [channel.label],
+          h.h2([...sx(h, appStyles.cardTitle)], ["Channels"]),
+          h.span([...sx(h, appStyles.cardMeta)], [`${channelMap.length}`]),
+        ],
+      ),
+      channelMap.length === 0
+        ? h.p([...sx(h, appStyles.helperText)], ["No channel map loaded."])
+        : h.div(
+            [...sx(h, appStyles.field)],
+            channelMap.map((variableIndex, channel) =>
+              h.div(
+                [h.Key(String(channel)), ...sx(h, appStyles.channelRow)],
+                [
+                  h.span(
+                    [
+                      ...sx(h, appStyles.swatch),
+                      h.Style({ backgroundColor: channelColor(channel) }),
+                    ],
+                    [],
+                  ),
+                  h.span([...sx(h, appStyles.channelTag)], [`CH${channel}`]),
+                  h.span(
+                    [...sx(h, appStyles.channelVar)],
+                    [variables[variableIndex] ?? `var ${variableIndex}`],
+                  ),
+                ],
               ),
-              h.p(
-                [...sx(h, appStyles.signalMeta)],
-                [`${channel.min} to ${channel.max} ${channel.unit} · ${channel.frequencyHz} Hz`],
-              ),
-            ],
+            ),
           ),
-          viewSignalSelect(model, h, lane),
+    ],
+  );
+};
+
+const viewRtCard = (model: Model, h: H): Html => {
+  const rtValues = model.runtime.config?.rtValues ?? [];
+  const rtLabels = model.runtime.activeDevice?.rtLabels ?? [];
+
+  return h.section(
+    [...sx(h, appStyles.card)],
+    [
+      h.div(
+        [...sx(h, appStyles.cardHeader)],
+        [
+          h.h2([...sx(h, appStyles.cardTitle)], ["RT buffers"]),
+          h.span([...sx(h, appStyles.cardMeta)], [`${rtValues.length}`]),
+        ],
+      ),
+      rtValues.length === 0
+        ? h.p([...sx(h, appStyles.helperText)], ["No RT buffer values."])
+        : h.div(
+            [...sx(h, appStyles.kvGrid)],
+            rtValues.map(([index, value]) =>
+              viewKv(h, String(index), rtLabels[index] ?? `RT ${index}`, formatNumber(value)),
+            ),
+          ),
+    ],
+  );
+};
+
+const viewSnapshotsCard = (model: Model, h: H): Html =>
+  h.section(
+    [...sx(h, appStyles.card)],
+    [
+      h.div(
+        [...sx(h, appStyles.cardHeader)],
+        [
+          h.h2([...sx(h, appStyles.cardTitle)], ["Snapshots"]),
+          h.span([...sx(h, appStyles.cardMeta)], [`${model.runtime.snapshots.length}`]),
+        ],
+      ),
+      model.runtime.snapshots.length === 0
+        ? h.p([...sx(h, appStyles.helperText)], ["No saved snapshots."])
+        : h.div(
+            [],
+            model.runtime.snapshots.map((snapshot) =>
+              h.div(
+                [h.Key(snapshot.id), ...sx(h, appStyles.snapRow)],
+                [
+                  h.div(
+                    [],
+                    [
+                      h.div([...sx(h, appStyles.snapTitle)], [snapshot.label]),
+                      h.div(
+                        [...sx(h, appStyles.snapMeta)],
+                        [
+                          `${formatDate(snapshot.createdAt)} · ${snapshot.sample.channelCount}ch · ${snapshot.sample.sampleCount} smpl`,
+                        ],
+                      ),
+                    ],
+                  ),
+                  h.div(
+                    [...sx(h, appStyles.snapMeta)],
+                    [`${formatNumber(snapshot.totalDurationSeconds)}s`],
+                  ),
+                ],
+              ),
+            ),
+          ),
+    ],
+  );
+
+const viewDeviceCard = (model: Model, h: H): Html => {
+  const active = model.runtime.activeDevice;
+  const info = active?.info;
+  const serial = model.runtime.app?.settings.defaultSerialConfig;
+
+  return h.section(
+    [...sx(h, appStyles.card)],
+    [
+      h.div(
+        [...sx(h, appStyles.cardHeader)],
+        [
+          h.h2([...sx(h, appStyles.cardTitle)], ["Device"]),
+          h.span([...sx(h, appStyles.cardMeta)], [active ? active.deviceName : "offline"]),
         ],
       ),
       h.div(
-        [...sx(h, appStyles.plotArea)],
+        [...sx(h, appStyles.kvGrid)],
         [
-          h.svg(
-            [
-              ...sx(h, appStyles.svg),
-              h.ViewBox("0 0 1000 100"),
-              h.Attribute("preserveAspectRatio", "none"),
-              h.Role("img"),
-              h.AriaLabel(`${channel.label} live plot`),
-            ],
-            [
-              h.rect(
-                [h.X("0"), h.Y("0"), h.Width("1000"), h.Height("100"), h.Fill(colors.plotBg)],
-                [],
-              ),
-              ...[1, 2, 3, 4].map((tick) =>
-                h.line(
-                  [
-                    h.Key(`h-${tick}`),
-                    h.X1("0"),
-                    h.X2("1000"),
-                    h.Y1(String(tick * 20)),
-                    h.Y2(String(tick * 20)),
-                    h.Stroke(colors.plotGrid),
-                    h.StrokeWidth("1"),
-                  ],
-                  [],
-                ),
-              ),
-              ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((tick) =>
-                h.line(
-                  [
-                    h.Key(`v-${tick}`),
-                    h.X1(String(tick * 100)),
-                    h.X2(String(tick * 100)),
-                    h.Y1("0"),
-                    h.Y2("100"),
-                    h.Stroke(colors.plotGrid),
-                    h.StrokeWidth("1"),
-                  ],
-                  [],
-                ),
-              ),
-              h.path(
-                [
-                  h.D(buildPlotPath(lane)),
-                  h.Fill("none"),
-                  h.Stroke(channel.color),
-                  h.StrokeWidth("2.4"),
-                  h.Attribute("vector-effect", "non-scaling-stroke"),
-                ],
-                [],
-              ),
-            ],
-          ),
+          viewKv(h, "ch", "Channels", info ? String(info.channelCount) : "—"),
+          viewKv(h, "buf", "Buffer", info ? String(info.bufferSize) : "—"),
+          viewKv(h, "isr", "ISR kHz", info ? String(info.isrKHz) : "—"),
+          viewKv(h, "rt", "RT count", info ? String(info.rtCount) : "—"),
+          viewKv(h, "baud", "Baud", serial ? String(serial.baudRate) : "—"),
+          viewKv(h, "var", "Variables", info ? String(info.variableCount) : "—"),
         ],
       ),
     ],
   );
 };
 
-const viewGraphPane = (model: Model, h: ReturnType<typeof html<Message>>): Html =>
-  h.main(
-    [...sx(h, appStyles.graphPane)],
+const viewKv = (h: H, key: string, label: string, value: string): Html =>
+  h.div(
+    [h.Key(key), ...sx(h, appStyles.kv)],
     [
-      h.div(
-        [...sx(h, appStyles.commandBar)],
-        [
-          h.div(
-            [...sx(h, appStyles.commandGroup)],
-            [
-              viewButton(
-                h,
-                model.isRunning ? "Stop" : "Run",
-                ToggledRun(),
-                model.isRunning ? "danger" : "primary",
-              ),
-              viewButton(
-                h,
-                "Manual trigger",
-                RuntimeStateLoaded({ status: "Manual trigger fired" }),
-              ),
-              viewButton(
-                h,
-                "Save snapshot",
-                RuntimeStateLoaded({ status: "Snapshot saved locally" }),
-              ),
-            ],
-          ),
-          h.div(
-            [...sx(h, appStyles.commandGroup)],
-            [
-              viewStatusPill(h, model.isRunning ? "Streaming 5 plots" : "Stopped"),
-              viewStatusPill(h, "Downloadable"),
-            ],
-          ),
-        ],
-      ),
-      h.div(
-        [...sx(h, appStyles.graphStack)],
-        [0, 1, 2, 3, 4].map((lane) => viewPlotLane(model, h, lane)),
-      ),
+      h.span([...sx(h, appStyles.kvLabel)], [label]),
+      h.span([...sx(h, appStyles.kvValue)], [value]),
     ],
   );
+
+// ---- root ------------------------------------------------------------------
 
 export const view = (model: Model): Document => {
   const h = html<Message>();
@@ -444,7 +596,94 @@ export const view = (model: Model): Document => {
     title: model.appName,
     body: h.div(
       [...sx(h, appStyles.root)],
-      [h.div([...sx(h, appStyles.layout)], [viewLeftPanel(model, h), viewGraphPane(model, h)])],
+      [
+        h.div(
+          [...sx(h, appStyles.shell)],
+          [
+            viewHeader(model, h),
+            h.div(
+              [...sx(h, appStyles.body)],
+              [
+                h.div(
+                  [...sx(h, appStyles.displayCol)],
+                  [
+                    viewScreen(model, h),
+                    model.error
+                      ? h.div(
+                          [...sx(h, appStyles.errorWrap)],
+                          [h.div([...sx(h, appStyles.errorBanner)], [model.error])],
+                        )
+                      : null,
+                    viewDock(model, h),
+                  ],
+                ),
+                viewRail(model, h),
+              ],
+            ),
+          ],
+        ),
+        model.openMenu
+          ? h.button(
+              [
+                h.Type("button"),
+                h.OnClick(MenuClosed()),
+                h.AriaLabel("Close menu"),
+                ...sx(h, appStyles.backdrop),
+              ],
+              [],
+            )
+          : null,
+      ],
     ),
   };
+};
+
+// ---- formatting ------------------------------------------------------------
+
+const channelColor = (channel: number): string =>
+  chartColors[channel % chartColors.length] ?? chartColors[0];
+
+const connectionLabel = (model: Model): string => {
+  const active = model.runtime.activeDevice;
+  if (!active) return "NO DEVICE";
+  if (!active.connected) return `${active.deviceName} OFFLINE`;
+  return active.deviceName;
+};
+
+const triggerSummary = (model: Model): string => {
+  const trigger = model.runtime.config?.trigger;
+  if (!trigger) return "TRIG  —";
+  return `TRIG  ${trigger.mode.toUpperCase()} CH${trigger.channel} @ ${formatNumber(trigger.threshold)}`;
+};
+
+const timebaseSummary = (model: Model): string => {
+  const timing = model.runtime.config?.timing;
+  if (!timing) return "—";
+  return `${formatNumber(timing.totalDurationSeconds)}s window · ${formatNumber(timing.preTriggerSeconds)}s pre`;
+};
+
+const sampleSummary = (model: Model): string => {
+  const info = model.runtime.activeDevice?.info;
+  if (!info) return "";
+  return `${info.channelCount} ch · ${info.isrKHz} kHz · ${info.bufferSize} smpl`;
+};
+
+const formatNumber = (value: number): string =>
+  Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(6)));
+
+const portLabel = (path: string, manufacturer: string | undefined): string =>
+  manufacturer ? `${path} · ${manufacturer}` : path;
+
+const parseTriggerMode = (value: string): TriggerMode =>
+  Match.value(value).pipe(
+    Match.withReturnType<TriggerMode>(),
+    Match.when("rising", () => "rising"),
+    Match.when("falling", () => "falling"),
+    Match.when("both", () => "both"),
+    Match.orElse(() => "disabled"),
+  );
+
+const formatDate = (value: string): string => {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 };

@@ -1,160 +1,365 @@
-import { Match, Schema } from "effect";
-import type * as Command from "foldkit/command";
+import {
+  RuntimeActiveDevice,
+  RuntimeAppDto,
+  RuntimeControlStatus,
+  RuntimeDeviceConfigPayload,
+  RuntimePortInfo,
+  SnapshotRecord,
+  TriggerMode,
+  makeRuntimeRpcClient,
+} from "@vscope/shared";
+import { Effect, Match, Schema } from "effect";
+import * as Command from "foldkit/command";
 import { m } from "foldkit/message";
 
-import { chartColors } from "./theme.stylex.ts";
+// Which grouped-settings popover is open. Ephemeral view state, but kept in the
+// Model so open/close is explicit, testable, and survives a render.
+export const MenuId = Schema.Literals(["timing", "trigger"]);
+export type MenuId = Schema.Schema.Type<typeof MenuId>;
 
-export const PanelTab = Schema.Literals(["Controls", "Snapshots", "Device"]);
-export type PanelTab = Schema.Schema.Type<typeof PanelTab>;
-
-export const Channel = Schema.Struct({
-  id: Schema.String,
-  label: Schema.String,
-  unit: Schema.String,
-  color: Schema.String,
-  min: Schema.Number,
-  max: Schema.Number,
-  frequencyHz: Schema.Number,
+// Request/response view of the runtime read-model. Device status is deliberately
+// absent here: it is the one value that changes autonomously on the device, so
+// it rides the live `device.status` subscription instead (see subscriptions.ts).
+export const RuntimeSnapshot = Schema.Struct({
+  app: Schema.NullOr(RuntimeAppDto),
+  ports: Schema.Array(RuntimePortInfo),
+  activeDevice: Schema.NullOr(RuntimeActiveDevice),
+  config: Schema.NullOr(RuntimeDeviceConfigPayload),
+  snapshots: Schema.Array(SnapshotRecord),
 });
-export type Channel = Schema.Schema.Type<typeof Channel>;
+export type RuntimeSnapshot = Schema.Schema.Type<typeof RuntimeSnapshot>;
 
-export const Snapshot = Schema.Struct({
-  id: Schema.String,
-  label: Schema.String,
-  capturedAt: Schema.String,
-  channels: Schema.Number,
-  size: Schema.String,
-});
-export type Snapshot = Schema.Schema.Type<typeof Snapshot>;
+export const ControlAction = Schema.Literals([
+  "refresh",
+  "connect",
+  "disconnect",
+  "run",
+  "stop",
+  "trigger",
+  "saveSnapshot",
+  "setTiming",
+  "setTrigger",
+]);
+export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
+
+const BusyState = Schema.NullOr(ControlAction);
 
 export const Model = Schema.Struct({
   appName: Schema.String,
-  status: Schema.String,
-  isRunning: Schema.Boolean,
-  activePanel: PanelTab,
-  selectedSignals: Schema.Array(Schema.String),
-  channels: Schema.Array(Channel),
-  snapshots: Schema.Array(Snapshot),
+  runtime: RuntimeSnapshot,
+  // Live device state, owned by the `device.status` subscription.
+  status: Schema.NullOr(RuntimeControlStatus),
+  selectedPort: Schema.String,
+  timingTotalSecondsDraft: Schema.String,
+  timingPreTriggerSecondsDraft: Schema.String,
+  triggerChannelDraft: Schema.String,
+  triggerThresholdDraft: Schema.String,
+  triggerModeDraft: TriggerMode,
+  snapshotLabelDraft: Schema.String,
+  openMenu: Schema.NullOr(MenuId),
+  busy: BusyState,
+  error: Schema.NullOr(Schema.String),
+  lastUpdatedAt: Schema.NullOr(Schema.String),
 });
 
 export type Model = Schema.Schema.Type<typeof Model>;
 
-export const RuntimeStateLoaded = m("RuntimeStateLoaded", {
-  status: Schema.String,
+export const RuntimeLoaded = m("RuntimeLoaded", {
+  snapshot: RuntimeSnapshot,
 });
-export const SelectedPanel = m("SelectedPanel", {
-  panel: PanelTab,
+export const RuntimeCommandFailed = m("RuntimeCommandFailed", {
+  message: Schema.String,
 });
-export const ToggledRun = m("ToggledRun");
-export const SelectedSignal = m("SelectedSignal", {
-  lane: Schema.Number,
-  signalId: Schema.String,
+export const DeviceStatusReceived = m("DeviceStatusReceived", {
+  status: Schema.NullOr(RuntimeControlStatus),
 });
+export const MenuToggled = m("MenuToggled", {
+  menu: MenuId,
+});
+export const MenuClosed = m("MenuClosed");
+export const SelectedPortChanged = m("SelectedPortChanged", {
+  path: Schema.String,
+});
+export const TimingTotalChanged = m("TimingTotalChanged", {
+  value: Schema.String,
+});
+export const TimingPreTriggerChanged = m("TimingPreTriggerChanged", {
+  value: Schema.String,
+});
+export const TriggerChannelChanged = m("TriggerChannelChanged", {
+  value: Schema.String,
+});
+export const TriggerThresholdChanged = m("TriggerThresholdChanged", {
+  value: Schema.String,
+});
+export const TriggerModeChanged = m("TriggerModeChanged", {
+  mode: TriggerMode,
+});
+export const SnapshotLabelChanged = m("SnapshotLabelChanged", {
+  value: Schema.String,
+});
+export const RefreshRequested = m("RefreshRequested");
+export const ConnectRequested = m("ConnectRequested");
+export const DisconnectRequested = m("DisconnectRequested");
+export const RunRequested = m("RunRequested");
+export const StopRequested = m("StopRequested");
+export const TriggerRequested = m("TriggerRequested");
+export const SaveSnapshotRequested = m("SaveSnapshotRequested");
+export const SetTimingRequested = m("SetTimingRequested");
+export const SetTriggerRequested = m("SetTriggerRequested");
 
 export const Message = Schema.Union([
-  RuntimeStateLoaded,
-  SelectedPanel,
-  ToggledRun,
-  SelectedSignal,
+  RuntimeLoaded,
+  RuntimeCommandFailed,
+  DeviceStatusReceived,
+  MenuToggled,
+  MenuClosed,
+  SelectedPortChanged,
+  TimingTotalChanged,
+  TimingPreTriggerChanged,
+  TriggerChannelChanged,
+  TriggerThresholdChanged,
+  TriggerModeChanged,
+  SnapshotLabelChanged,
+  RefreshRequested,
+  ConnectRequested,
+  DisconnectRequested,
+  RunRequested,
+  StopRequested,
+  TriggerRequested,
+  SaveSnapshotRequested,
+  SetTimingRequested,
+  SetTriggerRequested,
 ]);
 export type Message = Schema.Schema.Type<typeof Message>;
 
-const demoChannels: ReadonlyArray<Channel> = [
-  {
-    id: "motor.current",
-    label: "Motor current",
-    unit: "A",
-    color: chartColors[0],
-    min: -2.4,
-    max: 18.2,
-    frequencyHz: 72,
-  },
-  {
-    id: "bus.voltage",
-    label: "Bus voltage",
-    unit: "V",
-    color: chartColors[1],
-    min: 21.8,
-    max: 24.7,
-    frequencyHz: 48,
-  },
-  {
-    id: "control.error",
-    label: "Control error",
-    unit: "deg",
-    color: chartColors[2],
-    min: -4.8,
-    max: 5.2,
-    frequencyHz: 38,
-  },
-  {
-    id: "temperature.fet",
-    label: "FET temperature",
-    unit: "C",
-    color: chartColors[3],
-    min: 37.1,
-    max: 61.6,
-    frequencyHz: 16,
-  },
-  {
-    id: "pwm.duty",
-    label: "PWM duty",
-    unit: "%",
-    color: chartColors[4],
-    min: 0,
-    max: 93.4,
-    frequencyHz: 91,
-  },
-  {
-    id: "encoder.velocity",
-    label: "Encoder velocity",
-    unit: "rpm",
-    color: "#0d9488",
-    min: -120,
-    max: 1840,
-    frequencyHz: 64,
-  },
-];
-
-const demoSnapshots: ReadonlyArray<Snapshot> = [
-  {
-    id: "snap-105",
-    label: "Startup overshoot",
-    capturedAt: "Today 14:06:18",
-    channels: 5,
-    size: "2.8 MB",
-  },
-  {
-    id: "snap-104",
-    label: "Thermal ramp",
-    capturedAt: "Today 13:42:09",
-    channels: 4,
-    size: "1.9 MB",
-  },
-  {
-    id: "snap-099",
-    label: "Manual trigger capture",
-    capturedAt: "Yesterday 18:21:44",
-    channels: 5,
-    size: "3.1 MB",
-  },
-];
+const emptyRuntimeSnapshot: RuntimeSnapshot = RuntimeSnapshot.make({
+  app: null,
+  ports: [],
+  activeDevice: null,
+  config: null,
+  snapshots: [],
+});
 
 export const init = (): readonly [Model, ReadonlyArray<Command.Command<Message>>] => [
   {
     appName: "vscope",
-    status: "Connected to vscope-devkit",
-    isRunning: true,
-    activePanel: "Controls",
-    selectedSignals: demoChannels.slice(0, 5).map((channel) => channel.id),
-    channels: [...demoChannels],
-    snapshots: [...demoSnapshots],
+    runtime: emptyRuntimeSnapshot,
+    status: null,
+    selectedPort: "",
+    timingTotalSecondsDraft: "",
+    timingPreTriggerSecondsDraft: "",
+    triggerChannelDraft: "",
+    triggerThresholdDraft: "",
+    triggerModeDraft: "disabled",
+    snapshotLabelDraft: "",
+    openMenu: null,
+    busy: "refresh",
+    error: null,
+    lastUpdatedAt: null,
   },
-  [],
+  [RefreshRuntime()],
 ];
 
-const replaceAt = <A>(values: ReadonlyArray<A>, index: number, value: A): ReadonlyArray<A> =>
-  values.map((entry, entryIndex) => (entryIndex === index ? value : entry));
+type RuntimeRpc = Effect.Success<ReturnType<typeof makeRuntimeRpcClient>>;
+
+const runtimeCommand: (
+  run: (rpc: RuntimeRpc) => Effect.Effect<unknown, unknown, never>,
+) => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn("ui.runtimeCommand")(
+  function* (run) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const rpc = yield* makeRuntimeRpcClient(yield* runtimeRpcUrl);
+        yield* run(rpc);
+        return yield* readSnapshot(rpc);
+      }),
+    );
+  },
+);
+
+const loadRuntimeSnapshot: () => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn(
+  "ui.loadRuntimeSnapshot",
+)(function* () {
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const rpc = yield* makeRuntimeRpcClient(yield* runtimeRpcUrl);
+      return yield* readSnapshot(rpc);
+    }),
+  );
+});
+
+const readSnapshot: (rpc: RuntimeRpc) => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn(
+  "ui.readSnapshot",
+)(function* (rpc) {
+  const app = yield* rpc["runtime.getApp"]();
+  const ports = yield* rpc["ports.list"]();
+  const activeDevice = yield* rpc["device.active.get"]();
+  const config = yield* rpc["device.config.get"]();
+  const snapshots = yield* rpc["snapshots.list"]();
+
+  return RuntimeSnapshot.make({
+    app,
+    ports,
+    activeDevice,
+    config,
+    snapshots,
+  });
+});
+
+const runtimeRpcUrl = Effect.sync(() => new URL("/rpc", globalThis.location.href).toString());
+
+const commandFailed = (cause: unknown): Message =>
+  RuntimeCommandFailed({ message: errorMessage(cause) });
+
+const runtimeLoaded = (snapshot: RuntimeSnapshot): Message => RuntimeLoaded({ snapshot });
+
+const errorMessage = (cause: unknown): string => {
+  if (cause instanceof Error) {
+    return cause.message;
+  }
+  return String(cause);
+};
+
+const RefreshRuntime = Command.define(
+  "RefreshRuntime",
+  Message,
+)(loadRuntimeSnapshot().pipe(Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded })));
+
+const ConnectDevice = Command.define(
+  "ConnectDevice",
+  { path: Schema.String },
+  Message,
+)(({ path }) =>
+  runtimeCommand((rpc) => rpc["device.connect"]({ path })).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const DisconnectDevice = Command.define(
+  "DisconnectDevice",
+  Message,
+)(
+  runtimeCommand((rpc) => rpc["device.disconnect"]()).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const RunDevice = Command.define(
+  "RunDevice",
+  Message,
+)(
+  runtimeCommand((rpc) => rpc["device.run"]()).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const StopDevice = Command.define(
+  "StopDevice",
+  Message,
+)(
+  runtimeCommand((rpc) => rpc["device.stop"]()).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const TriggerDevice = Command.define(
+  "TriggerDevice",
+  Message,
+)(
+  runtimeCommand((rpc) => rpc["device.trigger"]()).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const SaveSnapshot = Command.define(
+  "SaveSnapshot",
+  { label: Schema.String },
+  Message,
+)(({ label }) =>
+  runtimeCommand((rpc) => {
+    const snapshotLabel = label.trim();
+    return rpc["snapshots.capture"](snapshotLabel ? { label: snapshotLabel } : {});
+  }).pipe(Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded })),
+);
+
+const SetTiming = Command.define(
+  "SetTiming",
+  {
+    totalDurationSeconds: Schema.Finite,
+    preTriggerSeconds: Schema.Finite,
+  },
+  Message,
+)((timing) =>
+  runtimeCommand((rpc) => rpc["device.setTiming"](timing)).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const SetTrigger = Command.define(
+  "SetTrigger",
+  {
+    channel: Schema.Int,
+    threshold: Schema.Finite,
+    mode: TriggerMode,
+  },
+  Message,
+)((trigger) =>
+  runtimeCommand((rpc) => rpc["device.setTrigger"](trigger)).pipe(
+    Effect.match({ onFailure: commandFailed, onSuccess: runtimeLoaded }),
+  ),
+);
+
+const modelWithSnapshot = (model: Model, snapshot: RuntimeSnapshot): Model => {
+  const selectedPort = nextSelectedPort(model.selectedPort, snapshot);
+  const connected = snapshot.activeDevice?.connected === true;
+  const timing = snapshot.config?.timing;
+  const trigger = snapshot.config?.trigger;
+
+  return {
+    ...model,
+    runtime: snapshot,
+    // The subscription owns live status; clear it when nothing is connected so a
+    // disconnect can never leave a stale "running" badge on screen.
+    status: connected ? model.status : null,
+    selectedPort,
+    timingTotalSecondsDraft: timing ? String(timing.totalDurationSeconds) : "",
+    timingPreTriggerSecondsDraft: timing ? String(timing.preTriggerSeconds) : "",
+    triggerChannelDraft: trigger ? String(trigger.channel) : "",
+    triggerThresholdDraft: trigger ? String(trigger.threshold) : "",
+    triggerModeDraft: trigger?.mode ?? "disabled",
+    busy: null,
+    error: null,
+    lastUpdatedAt: new Date().toLocaleTimeString(),
+  };
+};
+
+const nextSelectedPort = (current: string, snapshot: RuntimeSnapshot): string => {
+  if (snapshot.activeDevice) {
+    return snapshot.activeDevice.path;
+  }
+  if (snapshot.ports.some((port) => port.path === current)) {
+    return current;
+  }
+  return snapshot.ports[0]?.path ?? "";
+};
+
+const parseFinite = (value: string): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseNonNegativeInteger = (value: string): number | null => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const failLocal = (
+  model: Model,
+  message: string,
+): readonly [Model, ReadonlyArray<Command.Command<Message>>] => [
+  { ...model, busy: null, error: message },
+  [],
+];
 
 export const update = (
   model: Model,
@@ -163,15 +368,70 @@ export const update = (
   Match.value(message).pipe(
     Match.withReturnType<readonly [Model, ReadonlyArray<Command.Command<Message>>]>(),
     Match.tagsExhaustive({
-      RuntimeStateLoaded: ({ status }) => [{ ...model, status }, []],
-      SelectedPanel: ({ panel }) => [{ ...model, activePanel: panel }, []],
-      ToggledRun: () => [{ ...model, isRunning: !model.isRunning }, []],
-      SelectedSignal: ({ lane, signalId }) => [
-        {
-          ...model,
-          selectedSignals: replaceAt(model.selectedSignals, lane, signalId),
-        },
+      RuntimeLoaded: ({ snapshot }) => [modelWithSnapshot(model, snapshot), []],
+      RuntimeCommandFailed: ({ message }) => [{ ...model, busy: null, error: message }, []],
+      DeviceStatusReceived: ({ status }) => [{ ...model, status }, []],
+      MenuToggled: ({ menu }) => [
+        { ...model, openMenu: model.openMenu === menu ? null : menu },
         [],
       ],
+      MenuClosed: () => [{ ...model, openMenu: null }, []],
+      SelectedPortChanged: ({ path }) => [{ ...model, selectedPort: path }, []],
+      TimingTotalChanged: ({ value }) => [{ ...model, timingTotalSecondsDraft: value }, []],
+      TimingPreTriggerChanged: ({ value }) => [
+        { ...model, timingPreTriggerSecondsDraft: value },
+        [],
+      ],
+      TriggerChannelChanged: ({ value }) => [{ ...model, triggerChannelDraft: value }, []],
+      TriggerThresholdChanged: ({ value }) => [{ ...model, triggerThresholdDraft: value }, []],
+      TriggerModeChanged: ({ mode }) => [{ ...model, triggerModeDraft: mode }, []],
+      SnapshotLabelChanged: ({ value }) => [{ ...model, snapshotLabelDraft: value }, []],
+      RefreshRequested: () => [{ ...model, busy: "refresh", error: null }, [RefreshRuntime()]],
+      ConnectRequested: () =>
+        model.selectedPort
+          ? [
+              { ...model, busy: "connect", error: null },
+              [ConnectDevice({ path: model.selectedPort })],
+            ]
+          : failLocal(model, "Select a serial port before connecting."),
+      DisconnectRequested: () => [
+        { ...model, busy: "disconnect", error: null },
+        [DisconnectDevice()],
+      ],
+      RunRequested: () => [{ ...model, busy: "run", error: null }, [RunDevice()]],
+      StopRequested: () => [{ ...model, busy: "stop", error: null }, [StopDevice()]],
+      TriggerRequested: () => [{ ...model, busy: "trigger", error: null }, [TriggerDevice()]],
+      SaveSnapshotRequested: () => [
+        { ...model, busy: "saveSnapshot", error: null },
+        [SaveSnapshot({ label: model.snapshotLabelDraft })],
+      ],
+      SetTimingRequested: () => {
+        const totalDurationSeconds = parseFinite(model.timingTotalSecondsDraft);
+        const preTriggerSeconds = parseFinite(model.timingPreTriggerSecondsDraft);
+        if (totalDurationSeconds === null || totalDurationSeconds <= 0) {
+          return failLocal(model, "Total duration must be a positive number.");
+        }
+        if (preTriggerSeconds === null || preTriggerSeconds < 0) {
+          return failLocal(model, "Pre-trigger must be zero or greater.");
+        }
+        return [
+          { ...model, openMenu: null, busy: "setTiming", error: null },
+          [SetTiming({ totalDurationSeconds, preTriggerSeconds })],
+        ];
+      },
+      SetTriggerRequested: () => {
+        const channel = parseNonNegativeInteger(model.triggerChannelDraft);
+        const threshold = parseFinite(model.triggerThresholdDraft);
+        if (channel === null) {
+          return failLocal(model, "Trigger channel must be a non-negative integer.");
+        }
+        if (threshold === null) {
+          return failLocal(model, "Trigger threshold must be a number.");
+        }
+        return [
+          { ...model, openMenu: null, busy: "setTrigger", error: null },
+          [SetTrigger({ channel, threshold, mode: model.triggerModeDraft })],
+        ];
+      },
     }),
   );

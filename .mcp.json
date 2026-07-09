@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "foldkit": {
-      "type": "http",
-      "url": "http://127.0.0.1:9988/mcp"
+      "command": "pnpm",
+      "args": ["exec", "foldkit-devtools-mcp"],
+      "env": {
+        "FOLDKIT_DEVTOOLS_MCP_HOST": "localhost",
+        "FOLDKIT_DEVTOOLS_MCP_PORT": "9988"
+      }
     }
   }
 }

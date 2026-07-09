@@ -1,19 +1,37 @@
+// Instrument console palette. Dark, high-contrast, oscilloscope-inspired:
+// a near-black chassis, a darker phosphor screen, and saturated signal accents
+// that double as device-state semantics (run/acquire/halt/fault).
 export const colors = {
-  bg: "#f6f7f8",
-  panel: "#ffffff",
-  panelMuted: "#f0f2f4",
-  text: "#111318",
-  textMuted: "#626a76",
-  textSoft: "#87909c",
-  line: "#d9dde3",
-  lineStrong: "#c3c9d1",
-  accent: "#1769e0",
-  accentSoft: "#e8f1ff",
-  green: "#11845b",
-  amber: "#b06a00",
-  red: "#c8362b",
-  plotGrid: "#e7eaee",
-  plotBg: "#fbfcfd",
+  // chassis surfaces, back-to-front
+  bg: "#0a0d13",
+  panel: "#10141c",
+  panelMuted: "#161b25",
+  panelRaised: "#1d2430",
+  // the scope display itself
+  screen: "#070a0f",
+  screenGrid: "#13202b",
+  screenAxis: "#1d3340",
+  // structure
+  line: "#222a36",
+  lineStrong: "#323c4c",
+  // text, brightest-to-dimmest
+  text: "#e8ecf3",
+  textMuted: "#97a2b2",
+  textSoft: "#616b7a",
+  // actions
+  accent: "#38bdf8",
+  accentStrong: "#0ea5e9",
+  accentSoft: "#0c2c3d",
+  // device-state semantics
+  run: "#4ade80",
+  runSoft: "#0f2c1d",
+  acquire: "#fbbf24",
+  acquireSoft: "#2c2410",
+  halt: "#8b95a5",
+  haltSoft: "#1a212c",
+  danger: "#f87171",
+  dangerSoft: "#2c1416",
 } as const;
 
-export const chartColors = ["#1769e0", "#c8362b", "#11845b", "#8a5cf6", "#d97706"] as const;
+// Per-channel trace colours, indexed by scope channel.
+export const chartColors = ["#38bdf8", "#f472b6", "#4ade80", "#fbbf24", "#a78bfa"] as const;

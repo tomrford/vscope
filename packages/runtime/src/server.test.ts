@@ -27,7 +27,7 @@ import { makeRuntimeHttpLayer } from "./server";
 
 describe("@vscope/runtime server", () => {
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
-    it.effect("serves health, JSON RPC, and MCP tool listing", () =>
+    it.effect("serves health, NDJSON RPC, and MCP tool listing", () =>
       Effect.gen(function* () {
         const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
         const rpcState = yield* Effect.scoped(
@@ -38,7 +38,7 @@ describe("@vscope/runtime server", () => {
                   url: "",
                   transformClient: (client) =>
                     HttpClient.mapRequest(client, HttpClientRequest.appendUrl("/rpc")),
-                }).pipe(Layer.provideMerge(RpcSerialization.layerJson)),
+                }).pipe(Layer.provideMerge(RpcSerialization.layerNdjson)),
               ),
             );
             const app = yield* rpc["runtime.getApp"]();
