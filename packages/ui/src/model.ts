@@ -10,7 +10,7 @@ import {
   makeRuntimeRpcClient,
   runtimeRpcUrl,
 } from "@vscope/shared";
-import { Effect, Match, Schema } from "effect";
+import { Cause, Effect, Match, Schema } from "effect";
 import * as Command from "foldkit/command";
 import { m } from "foldkit/message";
 
@@ -168,8 +168,9 @@ type RuntimeRpc = Effect.Success<ReturnType<typeof makeRuntimeRpcClient>>;
 export const rpcUrl = Effect.sync(() => runtimeRpcUrl(globalThis.location.href));
 
 // Every command follows the same shape: run the mutation (if any), re-read the
-// snapshot, and fold the outcome into a Message so failures always land as
-// RuntimeCommandFailed rather than escaping the command fiber.
+// snapshot, and fold the outcome into a Message so the command fiber can never
+// leave `busy` set: timeouts and defects land as RuntimeCommandFailed too,
+// since foldkit drops a dead command fiber without dispatching anything.
 const runtimeCommand: (
   run?: (rpc: RuntimeRpc) => Effect.Effect<unknown, unknown, never>,
 ) => Effect.Effect<Message, never, never> = Effect.fn("ui.runtimeCommand")(function* (run) {
@@ -182,8 +183,9 @@ const runtimeCommand: (
       return yield* readSnapshot(rpc);
     }),
   ).pipe(
-    Effect.match({
-      onFailure: (cause) => RuntimeCommandFailed({ message: errorReason(cause) }),
+    Effect.timeout("15 seconds"),
+    Effect.matchCause({
+      onFailure: (cause) => RuntimeCommandFailed({ message: errorReason(Cause.squash(cause)) }),
       onSuccess: (snapshot) => RuntimeLoaded({ snapshot }),
     }),
   );
