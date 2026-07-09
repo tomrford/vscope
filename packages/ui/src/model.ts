@@ -7,29 +7,17 @@ import {
   SnapshotRecord,
   TriggerMode,
   errorReason,
-  makeRuntimeRpcClient,
-  runtimeRpcSocketUrl,
 } from "@vscope/shared";
 import { Cause, Effect, Match, Schema } from "effect";
 import * as Command from "foldkit/command";
 import { m } from "foldkit/message";
 
+import { RuntimeClient, type RuntimeRpc } from "./client.ts";
+
 // Which grouped-settings popover is open. Ephemeral view state, but kept in the
 // Model so open/close is explicit, testable, and survives a render.
 export const MenuId = Schema.Literals(["timing", "trigger"]);
 export type MenuId = Schema.Schema.Type<typeof MenuId>;
-
-// Request/response view of the runtime read-model. Device status is deliberately
-// absent here: it is the one value that changes autonomously on the device, so
-// it rides the live `device.status` subscription instead (see subscriptions.ts).
-export const RuntimeSnapshot = Schema.Struct({
-  app: Schema.NullOr(RuntimeAppDto),
-  ports: Schema.Array(RuntimePortInfo),
-  activeDevice: Schema.NullOr(RuntimeActiveDevice),
-  config: Schema.NullOr(RuntimeDeviceConfigPayload),
-  snapshots: Schema.Array(SnapshotRecord),
-});
-export type RuntimeSnapshot = Schema.Schema.Type<typeof RuntimeSnapshot>;
 
 export const ControlAction = Schema.Literals([
   "refresh",
@@ -47,10 +35,13 @@ export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
 const BusyState = Schema.NullOr(ControlAction);
 
 export const Model = Schema.Struct({
-  appName: Schema.String,
-  runtime: RuntimeSnapshot,
-  // Live device state, owned by the `device.status` subscription.
+  app: Schema.NullOr(RuntimeAppDto),
+  ports: Schema.Array(RuntimePortInfo),
+  activeDevice: Schema.NullOr(RuntimeActiveDevice),
+  config: Schema.NullOr(RuntimeDeviceConfigPayload),
+  snapshots: Schema.Array(SnapshotRecord),
   status: Schema.NullOr(RuntimeControlStatus),
+  linkUp: Schema.Boolean,
   selectedPort: Schema.String,
   timingTotalSecondsDraft: Schema.String,
   timingPreTriggerSecondsDraft: Schema.String,
@@ -61,19 +52,41 @@ export const Model = Schema.Struct({
   openMenu: Schema.NullOr(MenuId),
   busy: BusyState,
   error: Schema.NullOr(Schema.String),
-  lastUpdatedAt: Schema.NullOr(Schema.String),
 });
 
 export type Model = Schema.Schema.Type<typeof Model>;
 
-export const RuntimeLoaded = m("RuntimeLoaded", {
-  snapshot: RuntimeSnapshot,
+export const AppChanged = m("AppChanged", {
+  app: RuntimeAppDto,
 });
-export const RuntimeCommandFailed = m("RuntimeCommandFailed", {
-  message: Schema.String,
+export const PortsLoaded = m("PortsLoaded", {
+  ports: Schema.Array(RuntimePortInfo),
+});
+export const PortsRescanned = m("PortsRescanned", {
+  ports: Schema.Array(RuntimePortInfo),
+});
+export const ActiveDeviceChanged = m("ActiveDeviceChanged", {
+  device: Schema.NullOr(RuntimeActiveDevice),
+});
+export const DeviceConfigChanged = m("DeviceConfigChanged", {
+  config: Schema.NullOr(RuntimeDeviceConfigPayload),
+});
+export const SnapshotsChanged = m("SnapshotsChanged", {
+  snapshots: Schema.Array(SnapshotRecord),
 });
 export const DeviceStatusReceived = m("DeviceStatusReceived", {
   status: Schema.NullOr(RuntimeControlStatus),
+});
+export const RuntimeLinkDown = m("RuntimeLinkDown");
+export const CommandSettled = m("CommandSettled");
+export const RefreshPortsFailed = m("RefreshPortsFailed", {
+  message: Schema.String,
+});
+export const PortsRescanFailed = m("PortsRescanFailed", {
+  message: Schema.String,
+});
+export const RuntimeCommandFailed = m("RuntimeCommandFailed", {
+  message: Schema.String,
 });
 export const MenuToggled = m("MenuToggled", {
   menu: MenuId,
@@ -100,7 +113,7 @@ export const TriggerModeChanged = m("TriggerModeChanged", {
 export const SnapshotLabelChanged = m("SnapshotLabelChanged", {
   value: Schema.String,
 });
-export const RefreshRequested = m("RefreshRequested");
+export const RefreshPortsRequested = m("RefreshPortsRequested");
 export const ConnectRequested = m("ConnectRequested");
 export const DisconnectRequested = m("DisconnectRequested");
 export const RunRequested = m("RunRequested");
@@ -111,9 +124,18 @@ export const SetTimingRequested = m("SetTimingRequested");
 export const SetTriggerRequested = m("SetTriggerRequested");
 
 export const Message = Schema.Union([
-  RuntimeLoaded,
-  RuntimeCommandFailed,
+  AppChanged,
+  PortsLoaded,
+  PortsRescanned,
+  ActiveDeviceChanged,
+  DeviceConfigChanged,
+  SnapshotsChanged,
   DeviceStatusReceived,
+  RuntimeLinkDown,
+  CommandSettled,
+  RefreshPortsFailed,
+  PortsRescanFailed,
+  RuntimeCommandFailed,
   MenuToggled,
   MenuClosed,
   SelectedPortChanged,
@@ -123,7 +145,7 @@ export const Message = Schema.Union([
   TriggerThresholdChanged,
   TriggerModeChanged,
   SnapshotLabelChanged,
-  RefreshRequested,
+  RefreshPortsRequested,
   ConnectRequested,
   DisconnectRequested,
   RunRequested,
@@ -135,113 +157,80 @@ export const Message = Schema.Union([
 ]);
 export type Message = Schema.Schema.Type<typeof Message>;
 
-const emptyRuntimeSnapshot: RuntimeSnapshot = RuntimeSnapshot.make({
-  app: null,
-  ports: [],
-  activeDevice: null,
-  config: null,
-  snapshots: [],
-});
+type RuntimeOperation<A> = (rpc: RuntimeRpc) => Effect.Effect<A, unknown, never>;
+type UiCommand = Command.Command<Message, never, RuntimeClient>;
+type UpdateResult = readonly [Model, ReadonlyArray<UiCommand>];
 
-export const init = (): readonly [Model, ReadonlyArray<Command.Command<Message>>] => [
-  {
-    appName: "vscope",
-    runtime: emptyRuntimeSnapshot,
-    status: null,
-    selectedPort: "",
-    timingTotalSecondsDraft: "",
-    timingPreTriggerSecondsDraft: "",
-    triggerChannelDraft: "",
-    triggerThresholdDraft: "",
-    triggerModeDraft: "disabled",
-    snapshotLabelDraft: "",
-    openMenu: null,
-    busy: "refresh",
-    error: null,
-    lastUpdatedAt: null,
-  },
-  [RefreshRuntime()],
-];
-
-type RuntimeRpc = Effect.Success<ReturnType<typeof makeRuntimeRpcClient>>;
-
-export const rpcUrl = Effect.sync(() => runtimeRpcSocketUrl(globalThis.location.href));
-
-// Every command follows the same shape: run the mutation (if any), re-read the
-// snapshot, and fold the outcome into a Message so the command fiber can never
-// leave `busy` set: timeouts and defects land as RuntimeCommandFailed too,
-// since foldkit drops a dead command fiber without dispatching anything.
-const runtimeCommand: (
-  run?: (rpc: RuntimeRpc) => Effect.Effect<unknown, unknown, never>,
-) => Effect.Effect<Message, never, never> = Effect.fn("ui.runtimeCommand")(function* (run) {
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
-      const rpc = yield* makeRuntimeRpcClient(yield* rpcUrl);
-      if (run !== undefined) {
-        yield* run(rpc);
-      }
-      return yield* readSnapshot(rpc);
-    }),
-  ).pipe(
+const runtimeCommand: <A>(
+  run: RuntimeOperation<A>,
+  onSuccess: (value: A) => Message,
+  onFailure: (message: string) => Message,
+) => Effect.Effect<Message, never, RuntimeClient> = Effect.fn("ui.runtimeCommand")(function* <A>(
+  run: RuntimeOperation<A>,
+  onSuccess: (value: A) => Message,
+  onFailure: (message: string) => Message,
+) {
+  const rpc = yield* RuntimeClient;
+  return yield* run(rpc).pipe(
     Effect.timeout("15 seconds"),
     Effect.matchCause({
-      onFailure: (cause) => RuntimeCommandFailed({ message: errorReason(Cause.squash(cause)) }),
-      onSuccess: (snapshot) => RuntimeLoaded({ snapshot }),
+      onFailure: (cause) => onFailure(errorReason(Cause.squash(cause))),
+      onSuccess,
     }),
   );
 });
 
-const readSnapshot: (rpc: RuntimeRpc) => Effect.Effect<RuntimeSnapshot, unknown, never> = Effect.fn(
-  "ui.readSnapshot",
-)(function* (rpc) {
-  return RuntimeSnapshot.make(
-    yield* Effect.all(
-      {
-        app: rpc["runtime.getApp"](),
-        ports: rpc["ports.list"](),
-        activeDevice: rpc["device.active.get"](),
-        config: rpc["device.config.get"](),
-        snapshots: rpc["snapshots.list"](),
-      },
-      { concurrency: "unbounded" },
-    ),
+const settledCommand = (run: RuntimeOperation<unknown>) =>
+  runtimeCommand(
+    run,
+    () => CommandSettled(),
+    (message) => RuntimeCommandFailed({ message }),
   );
-});
 
-const RefreshRuntime = Command.define("RefreshRuntime", Message)(runtimeCommand());
+const RefreshPorts = Command.define(
+  "RefreshPorts",
+  { foreground: Schema.Boolean },
+  Message,
+)(({ foreground }) =>
+  runtimeCommand(
+    (rpc) => rpc["ports.list"](),
+    (ports) => (foreground ? PortsLoaded({ ports }) : PortsRescanned({ ports })),
+    (message) => (foreground ? RefreshPortsFailed({ message }) : PortsRescanFailed({ message })),
+  ),
+);
 
 const ConnectDevice = Command.define(
   "ConnectDevice",
   { path: Schema.String },
   Message,
-)(({ path }) => runtimeCommand((rpc) => rpc["device.connect"]({ path })));
+)(({ path }) => settledCommand((rpc) => rpc["device.connect"]({ path })));
 
 const DisconnectDevice = Command.define(
   "DisconnectDevice",
   Message,
-)(runtimeCommand((rpc) => rpc["device.disconnect"]()));
+)(settledCommand((rpc) => rpc["device.disconnect"]()));
 
 const RunDevice = Command.define(
   "RunDevice",
   Message,
-)(runtimeCommand((rpc) => rpc["device.run"]()));
+)(settledCommand((rpc) => rpc["device.run"]()));
 
 const StopDevice = Command.define(
   "StopDevice",
   Message,
-)(runtimeCommand((rpc) => rpc["device.stop"]()));
+)(settledCommand((rpc) => rpc["device.stop"]()));
 
 const TriggerDevice = Command.define(
   "TriggerDevice",
   Message,
-)(runtimeCommand((rpc) => rpc["device.trigger"]()));
+)(settledCommand((rpc) => rpc["device.trigger"]()));
 
 const SaveSnapshot = Command.define(
   "SaveSnapshot",
   { label: Schema.String },
   Message,
 )(({ label }) =>
-  runtimeCommand((rpc) => {
+  settledCommand((rpc) => {
     const snapshotLabel = label.trim();
     return rpc["snapshots.capture"](snapshotLabel ? { label: snapshotLabel } : {});
   }),
@@ -254,7 +243,7 @@ const SetTiming = Command.define(
     preTriggerSeconds: Schema.Finite,
   },
   Message,
-)((timing) => runtimeCommand((rpc) => rpc["device.setTiming"](timing)));
+)((timing) => settledCommand((rpc) => rpc["device.setTiming"](timing)));
 
 const SetTrigger = Command.define(
   "SetTrigger",
@@ -264,42 +253,59 @@ const SetTrigger = Command.define(
     mode: TriggerMode,
   },
   Message,
-)((trigger) => runtimeCommand((rpc) => rpc["device.setTrigger"](trigger)));
+)((trigger) => settledCommand((rpc) => rpc["device.setTrigger"](trigger)));
 
-const modelWithSnapshot = (model: Model, snapshot: RuntimeSnapshot): Model => {
-  const selectedPort = nextSelectedPort(model.selectedPort, snapshot);
-  const connected = snapshot.activeDevice?.connected === true;
-  const timing = snapshot.config?.timing;
-  const trigger = snapshot.config?.trigger;
+export const init = (): UpdateResult => [
+  {
+    app: null,
+    ports: [],
+    activeDevice: null,
+    config: null,
+    snapshots: [],
+    status: null,
+    linkUp: false,
+    selectedPort: "",
+    timingTotalSecondsDraft: "",
+    timingPreTriggerSecondsDraft: "",
+    triggerChannelDraft: "",
+    triggerThresholdDraft: "",
+    triggerModeDraft: "disabled",
+    snapshotLabelDraft: "",
+    openMenu: null,
+    busy: null,
+    error: null,
+  },
+  [RefreshPorts({ foreground: false })],
+];
+
+const nextSelectedPort = (
+  current: string,
+  ports: ReadonlyArray<RuntimePortInfo>,
+  activeDevice: RuntimeActiveDevice | null,
+): string => {
+  if (activeDevice?.connected) {
+    return activeDevice.path;
+  }
+  if (ports.some((port) => port.path === current)) {
+    return current;
+  }
+  return ports[0]?.path ?? "";
+};
+
+const modelWithConfig = (model: Model, config: RuntimeDeviceConfigPayload | null): Model => {
+  const timing = config?.timing;
+  const trigger = config?.trigger;
 
   return {
     ...model,
-    runtime: snapshot,
-    // The subscription owns live status; clear it when nothing is connected so a
-    // disconnect can never leave a stale "running" badge on screen.
-    status: connected ? model.status : null,
-    selectedPort,
+    config,
+    linkUp: true,
     timingTotalSecondsDraft: timing ? String(timing.totalDurationSeconds) : "",
     timingPreTriggerSecondsDraft: timing ? String(timing.preTriggerSeconds) : "",
     triggerChannelDraft: trigger ? String(trigger.channel) : "",
     triggerThresholdDraft: trigger ? String(trigger.threshold) : "",
     triggerModeDraft: trigger?.mode ?? "disabled",
-    busy: null,
-    error: null,
-    lastUpdatedAt: new Date().toLocaleTimeString(),
   };
-};
-
-const nextSelectedPort = (current: string, snapshot: RuntimeSnapshot): string => {
-  // A disconnected activeDevice may reference a port that is no longer
-  // enumerated; only a live connection pins the selection to its path.
-  if (snapshot.activeDevice?.connected) {
-    return snapshot.activeDevice.path;
-  }
-  if (snapshot.ports.some((port) => port.path === current)) {
-    return current;
-  }
-  return snapshot.ports[0]?.path ?? "";
 };
 
 // Number("") is 0, so blank drafts must be rejected before coercion.
@@ -317,24 +323,62 @@ const parseNonNegativeInteger = (value: string): number | null => {
   return parsed !== null && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 };
 
-const failLocal = (
-  model: Model,
-  message: string,
-): readonly [Model, ReadonlyArray<Command.Command<Message>>] => [
+const failLocal = (model: Model, message: string): UpdateResult => [
   { ...model, busy: null, error: message },
   [],
 ];
 
-export const update = (
-  model: Model,
-  message: Message,
-): readonly [Model, ReadonlyArray<Command.Command<Message>>] =>
+export const update = (model: Model, message: Message): UpdateResult =>
   Match.value(message).pipe(
-    Match.withReturnType<readonly [Model, ReadonlyArray<Command.Command<Message>>]>(),
+    Match.withReturnType<UpdateResult>(),
     Match.tagsExhaustive({
-      RuntimeLoaded: ({ snapshot }) => [modelWithSnapshot(model, snapshot), []],
+      AppChanged: ({ app }) => [{ ...model, app, linkUp: true }, []],
+      PortsLoaded: ({ ports }) => {
+        const refreshSettled = model.busy === "refresh";
+        return [
+          {
+            ...model,
+            ports,
+            selectedPort: nextSelectedPort(model.selectedPort, ports, model.activeDevice),
+            linkUp: true,
+            busy: refreshSettled ? null : model.busy,
+            error: refreshSettled ? null : model.error,
+          },
+          [],
+        ];
+      },
+      PortsRescanned: ({ ports }) => [
+        {
+          ...model,
+          ports,
+          selectedPort: nextSelectedPort(model.selectedPort, ports, model.activeDevice),
+          linkUp: true,
+        },
+        [],
+      ],
+      ActiveDeviceChanged: ({ device }) => {
+        const connectionLost = model.activeDevice?.connected === true && device?.connected !== true;
+        const nextModel = {
+          ...model,
+          activeDevice: device,
+          selectedPort: device?.connected ? device.path : model.selectedPort,
+          status: connectionLost ? null : model.status,
+          linkUp: true,
+        };
+        return connectionLost
+          ? [nextModel, [RefreshPorts({ foreground: false })]]
+          : [nextModel, []];
+      },
+      DeviceConfigChanged: ({ config }) => [modelWithConfig(model, config), []],
+      SnapshotsChanged: ({ snapshots }) => [{ ...model, snapshots, linkUp: true }, []],
+      DeviceStatusReceived: ({ status }) => [{ ...model, status, linkUp: true }, []],
+      RuntimeLinkDown: () => [{ ...model, linkUp: false }, []],
+      CommandSettled: () => [{ ...model, busy: null, error: null }, []],
+      RefreshPortsFailed: ({ message }) =>
+        model.busy === "refresh" ? [{ ...model, busy: null, error: message }, []] : [model, []],
+      PortsRescanFailed: ({ message }) =>
+        model.busy === null ? [{ ...model, error: message }, []] : [model, []],
       RuntimeCommandFailed: ({ message }) => [{ ...model, busy: null, error: message }, []],
-      DeviceStatusReceived: ({ status }) => [{ ...model, status }, []],
       MenuToggled: ({ menu }) => [
         { ...model, openMenu: model.openMenu === menu ? null : menu },
         [],
@@ -350,7 +394,10 @@ export const update = (
       TriggerThresholdChanged: ({ value }) => [{ ...model, triggerThresholdDraft: value }, []],
       TriggerModeChanged: ({ mode }) => [{ ...model, triggerModeDraft: mode }, []],
       SnapshotLabelChanged: ({ value }) => [{ ...model, snapshotLabelDraft: value }, []],
-      RefreshRequested: () => [{ ...model, busy: "refresh", error: null }, [RefreshRuntime()]],
+      RefreshPortsRequested: () => [
+        { ...model, busy: "refresh", error: null },
+        [RefreshPorts({ foreground: true })],
+      ],
       ConnectRequested: () =>
         model.selectedPort
           ? [

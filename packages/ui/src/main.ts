@@ -9,7 +9,7 @@ import {
   MenuClosed,
   MenuToggled,
   Model,
-  RefreshRequested,
+  RefreshPortsRequested,
   RunRequested,
   SaveSnapshotRequested,
   SelectedPortChanged,
@@ -39,7 +39,8 @@ const triggerModes: ReadonlyArray<TriggerMode> = TriggerMode.literals;
 
 // ---- live device facts -----------------------------------------------------
 
-const isConnected = (model: Model): boolean => model.runtime.activeDevice?.connected === true;
+const isConnected = (model: Model): boolean =>
+  model.linkUp && model.activeDevice?.connected === true;
 const isBusy = (model: Model): boolean => model.busy !== null;
 const deviceState = (model: Model): RuntimeDeviceState | null => model.status?.state ?? null;
 
@@ -124,7 +125,7 @@ const viewHeader = (model: Model, h: H): Html =>
           h.div(
             [],
             [
-              h.h1([...sx(h, appStyles.brandName)], [model.appName]),
+              h.h1([...sx(h, appStyles.brandName)], ["vscope"]),
               h.p([...sx(h, appStyles.brandSub)], [appReadiness(model)]),
             ],
           ),
@@ -138,17 +139,12 @@ const viewHeader = (model: Model, h: H): Html =>
   );
 
 const appReadiness = (model: Model): string => {
-  const status = model.runtime.app?.status;
-  const stamp = model.busy
-    ? `· ${model.busy}…`
-    : model.lastUpdatedAt
-      ? `· ${model.lastUpdatedAt}`
-      : "";
-  return `${status ?? "loading"} ${stamp}`.trim();
+  const busy = model.busy ? ` · ${model.busy}…` : "";
+  return `${model.app?.status ?? "connecting"}${busy}`;
 };
 
 const viewConnection = (model: Model, h: H): Html => {
-  const active = model.runtime.activeDevice;
+  const active = model.activeDevice;
 
   if (isConnected(model) && active) {
     return h.div(
@@ -159,7 +155,6 @@ const viewConnection = (model: Model, h: H): Html => {
           small: true,
           disabled: isBusy(model),
         }),
-        viewButton(h, "Refresh", RefreshRequested(), { small: true, disabled: isBusy(model) }),
       ],
     );
   }
@@ -179,7 +174,7 @@ const viewConnection = (model: Model, h: H): Html => {
             [h.Attribute("value", ""), h.Selected(model.selectedPort === "")],
             ["Select port"],
           ),
-          ...model.runtime.ports.map((port) =>
+          ...model.ports.map((port) =>
             h.option(
               [
                 h.Key(port.path),
@@ -194,9 +189,9 @@ const viewConnection = (model: Model, h: H): Html => {
       viewButton(h, "Connect", ConnectRequested(), {
         variant: "primary",
         small: true,
-        disabled: isBusy(model) || model.selectedPort === "",
+        disabled: !model.linkUp || isBusy(model) || model.selectedPort === "",
       }),
-      viewButton(h, "Refresh", RefreshRequested(), { small: true, disabled: isBusy(model) }),
+      viewButton(h, "Refresh", RefreshPortsRequested(), { small: true, disabled: isBusy(model) }),
     ],
   );
 };
@@ -214,6 +209,7 @@ const viewStateBadge = (model: Model, h: H): Html => {
 type Tone = "run" | "acquire" | "halt" | "fault" | "idle";
 
 const stateDescriptor = (model: Model): { readonly label: string; readonly tone: Tone } => {
+  if (!model.linkUp) return { label: "Runtime offline", tone: "fault" };
   if (!isConnected(model)) return { label: "No link", tone: "idle" };
   const state = deviceState(model);
   if (state === null) return { label: "Linking", tone: "idle" };
@@ -442,8 +438,8 @@ const viewRail = (model: Model, h: H): Html =>
   );
 
 const viewChannelsCard = (model: Model, h: H): Html => {
-  const channelMap = model.runtime.config?.channelMap ?? [];
-  const variables = model.runtime.activeDevice?.variables ?? [];
+  const channelMap = model.config?.channelMap ?? [];
+  const variables = model.activeDevice?.variables ?? [];
 
   return h.section(
     [...sx(h, appStyles.card)],
@@ -484,8 +480,8 @@ const viewChannelsCard = (model: Model, h: H): Html => {
 };
 
 const viewRtCard = (model: Model, h: H): Html => {
-  const rtValues = model.runtime.config?.rtValues ?? [];
-  const rtLabels = model.runtime.activeDevice?.rtLabels ?? [];
+  const rtValues = model.config?.rtValues ?? [];
+  const rtLabels = model.activeDevice?.rtLabels ?? [];
 
   return h.section(
     [...sx(h, appStyles.card)],
@@ -517,14 +513,14 @@ const viewSnapshotsCard = (model: Model, h: H): Html =>
         [...sx(h, appStyles.cardHeader)],
         [
           h.h2([...sx(h, appStyles.cardTitle)], ["Snapshots"]),
-          h.span([...sx(h, appStyles.cardMeta)], [`${model.runtime.snapshots.length}`]),
+          h.span([...sx(h, appStyles.cardMeta)], [`${model.snapshots.length}`]),
         ],
       ),
-      model.runtime.snapshots.length === 0
+      model.snapshots.length === 0
         ? h.p([...sx(h, appStyles.helperText)], ["No saved snapshots."])
         : h.div(
             [],
-            model.runtime.snapshots.map((snapshot) =>
+            model.snapshots.map((snapshot) =>
               h.div(
                 [h.Key(snapshot.id), ...sx(h, appStyles.snapRow)],
                 [
@@ -552,9 +548,9 @@ const viewSnapshotsCard = (model: Model, h: H): Html =>
   );
 
 const viewDeviceCard = (model: Model, h: H): Html => {
-  const active = model.runtime.activeDevice;
+  const active = model.activeDevice;
   const info = active?.info;
-  const serial = model.runtime.app?.settings.defaultSerialConfig;
+  const serial = model.app?.settings.defaultSerialConfig;
 
   return h.section(
     [...sx(h, appStyles.card)],
@@ -596,7 +592,7 @@ export const view = (model: Model): Document => {
   const h = html<Message>();
 
   return {
-    title: model.appName,
+    title: "vscope",
     body: h.div(
       [...sx(h, appStyles.root)],
       [
@@ -647,26 +643,26 @@ const channelColor = (channel: number): string =>
   chartColors[channel % chartColors.length] ?? chartColors[0];
 
 const connectionLabel = (model: Model): string => {
-  const active = model.runtime.activeDevice;
+  const active = model.activeDevice;
   if (!active) return "NO DEVICE";
   if (!active.connected) return `${active.deviceName} OFFLINE`;
   return active.deviceName;
 };
 
 const triggerSummary = (model: Model): string => {
-  const trigger = model.runtime.config?.trigger;
+  const trigger = model.config?.trigger;
   if (!trigger) return "TRIG  —";
   return `TRIG  ${trigger.mode.toUpperCase()} CH${trigger.channel} @ ${formatNumber(trigger.threshold)}`;
 };
 
 const timebaseSummary = (model: Model): string => {
-  const timing = model.runtime.config?.timing;
+  const timing = model.config?.timing;
   if (!timing) return "—";
   return `${formatNumber(timing.totalDurationSeconds)}s window · ${formatNumber(timing.preTriggerSeconds)}s pre`;
 };
 
 const sampleSummary = (model: Model): string => {
-  const info = model.runtime.activeDevice?.info;
+  const info = model.activeDevice?.info;
   if (!info) return "";
   return `${info.channelCount} ch · ${info.isrKHz} kHz · ${info.bufferSize} smpl`;
 };
