@@ -1,0 +1,10 @@
+/* Chassis baseline under the StyleX-managed tree. Also the CSS asset the
+   StyleX build output is appended to — without one, the aggregated styles
+   land in an orphaned file no HTML references. */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+}

@@ -11,7 +11,8 @@ export default defineConfig({
     proxy: {
       "/health": "http://127.0.0.1:5174",
       "/mcp": "http://127.0.0.1:5174",
-      "/rpc": "http://127.0.0.1:5174",
+      // The RPC route is a websocket upgrade, not plain HTTP.
+      "/rpc": { target: "http://127.0.0.1:5174", ws: true },
       "/snapshots": "http://127.0.0.1:5174",
     },
   },
