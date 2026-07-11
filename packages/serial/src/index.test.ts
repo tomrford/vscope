@@ -276,6 +276,50 @@ describe("@vscope/serial device", () => {
     }),
   );
 
+  it.live("dispatches queued frame reads before the next snapshot chunk", () =>
+    Effect.gen(function* () {
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-snapshot-fifo",
+        deviceName: "scope-snapshot-fifo",
+        snapshotResponseDelayMillis: 30,
+      });
+      const device = yield* openVScopeDevice({
+        path: firmware.path,
+        baudRate: 115200,
+        driver: fakeDriver([firmware]),
+        requestTimeoutMillis: 1000,
+      });
+      const header = yield* device.getSnapshotHeader;
+      const baseline = firmware.requestTypes.length;
+      const snapshotFiber = yield* device
+        .snapshotBytes({ header })
+        .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+
+      for (let attempts = 0; attempts < 100; attempts += 1) {
+        if (firmware.requestCount(VScopeMessageType.GetSnapshotData) > 0) break;
+        yield* Effect.sleep("1 millis");
+      }
+      expect(firmware.requestCount(VScopeMessageType.GetSnapshotData)).toBe(1);
+
+      const frameFiber = yield* device.getFrame().pipe(Effect.forkChild);
+      yield* Fiber.join(frameFiber);
+      yield* Fiber.join(snapshotFiber);
+
+      expect(
+        firmware.requestTypes
+          .slice(baseline)
+          .filter(
+            (type) =>
+              type === VScopeMessageType.GetSnapshotData || type === VScopeMessageType.GetFrame,
+          ),
+      ).toEqual([
+        VScopeMessageType.GetSnapshotData,
+        VScopeMessageType.GetFrame,
+        VScopeMessageType.GetSnapshotData,
+      ]);
+    }),
+  );
+
   it.live("surfaces firmware errors as typed failures", () =>
     Effect.gen(function* () {
       const driver = fakeDriver([
@@ -766,6 +810,7 @@ interface FakeFirmwareOptions {
   readonly closeAfterOpenMillis?: number | undefined;
   readonly errorAfterOpenMillis?: number | undefined;
   readonly frameResponseDelayMillis?: number | undefined;
+  readonly snapshotResponseDelayMillis?: number | undefined;
   readonly wrongResponseFor?: VScopeMessageType | undefined;
   readonly corruptFirstResponsesFor?: ReadonlyArray<VScopeMessageType> | undefined;
   readonly acquisitionStatusReads?: number | undefined;
@@ -919,6 +964,7 @@ class FakeFirmware {
   readonly closeAfterOpenMillis: number | undefined;
   readonly errorAfterOpenMillis: number | undefined;
   readonly frameResponseDelayMillis: number;
+  readonly snapshotResponseDelayMillis: number;
   readonly wrongResponseFor: VScopeMessageType | undefined;
   readonly corruptFirstResponsesFor: ReadonlySet<VScopeMessageType>;
   readonly acquisitionStatusReads: number;
@@ -938,6 +984,7 @@ class FakeFirmware {
   };
   rtValues: number[];
   readonly #requestCounts = new Map<VScopeMessageType, number>();
+  readonly requestTypes: Array<VScopeMessageType> = [];
 
   constructor(options: FakeFirmwareOptions) {
     this.path = options.path;
@@ -952,6 +999,7 @@ class FakeFirmware {
     this.closeAfterOpenMillis = options.closeAfterOpenMillis;
     this.errorAfterOpenMillis = options.errorAfterOpenMillis;
     this.frameResponseDelayMillis = options.frameResponseDelayMillis ?? 0;
+    this.snapshotResponseDelayMillis = options.snapshotResponseDelayMillis ?? 0;
     this.wrongResponseFor = options.wrongResponseFor;
     this.corruptFirstResponsesFor = new Set(options.corruptFirstResponsesFor ?? []);
     this.acquisitionStatusReads = options.acquisitionStatusReads ?? 1;
@@ -980,6 +1028,7 @@ class FakeFirmware {
   private handle(type: VScopeMessageType, payload: Uint8Array): FakeFirmwareResponse {
     const requestCount = this.requestCount(type) + 1;
     this.#requestCounts.set(type, requestCount);
+    this.requestTypes.push(type);
 
     if (type === this.wrongResponseFor) {
       return this.response(VScopeMessageType.GetStatus, this.statusPayload());
@@ -1182,6 +1231,7 @@ class FakeFirmware {
     return this.response(
       VScopeMessageType.GetSnapshotData,
       this.floatsPayload(this.snapshot.subarray(start, end)),
+      this.snapshotResponseDelayMillis,
     );
   }
 

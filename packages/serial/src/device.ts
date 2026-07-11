@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Exit, Queue, Ref, Schedule, Semaphore, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Queue, Ref, Schedule, Stream } from "effect";
 import type { TriggerMode } from "@vscope/shared";
 
 import {
@@ -194,7 +194,9 @@ const makeVScopeClient = Effect.fn("VScopeClient.make")(function* (
   },
 ) {
   const events = yield* Queue.unbounded<VScopeFrameParseEvent, VScopeDeviceError | Cause.Done>();
-  const requestLock = yield* Semaphore.make(1);
+  // Admission is explicitly FIFO: a cyclic poll queued during one snapshot
+  // page runs before the snapshot stream can enqueue its following page.
+  const requests = yield* Queue.unbounded<Effect.Effect<void>>();
   const closed = yield* Deferred.make<void, VScopeDeviceError>();
   const closedState = yield* Ref.make<ClientClosedState>({ _tag: "Open" });
   const parser = new VScopeFrameParser();
@@ -257,50 +259,80 @@ const makeVScopeClient = Effect.fn("VScopeClient.make")(function* (
       ];
     }).pipe(Effect.flatMap((completion) => completeSession(completion)));
 
+  const dispatch = <A, E>(operation: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<A, E>();
+      const run = Deferred.isDone(result).pipe(
+        Effect.flatMap((done) =>
+          done
+            ? Effect.void
+            : operation.pipe(
+                Effect.exit,
+                Effect.flatMap((exit) => Deferred.done(result, exit)),
+                Effect.asVoid,
+              ),
+        ),
+      );
+
+      yield* Queue.offer(requests, run);
+      return yield* Deferred.await(result).pipe(
+        Effect.onInterrupt(() => Deferred.interrupt(result).pipe(Effect.asVoid)),
+      );
+    });
+
+  yield* Effect.forever(Queue.take(requests).pipe(Effect.flatten)).pipe(Effect.forkScoped);
+
+  const dispatchClose = <E>(closeTransport: Effect.Effect<void, E>): Effect.Effect<void, E> =>
+    dispatch(
+      Effect.gen(function* () {
+        const closeStart = yield* Ref.modify(
+          closedState,
+          (state): readonly [CloseStart, ClientClosedState] =>
+            state._tag === "Closed"
+              ? [{ _tag: "AlreadyClosed" }, state]
+              : [{ _tag: "StartClose" }, { _tag: "Closing", pendingError: undefined }],
+        );
+        if (closeStart._tag === "AlreadyClosed") {
+          yield* closeTransport;
+          return;
+        }
+
+        const closeExit = yield* Effect.exit(closeTransport);
+        if (Exit.isFailure(closeExit)) {
+          const pendingError = yield* Ref.modify(
+            closedState,
+            (state): readonly [VScopeDeviceError | undefined, ClientClosedState] => {
+              if (state._tag !== "Closing") {
+                return [undefined, state];
+              }
+
+              return state.pendingError
+                ? [
+                    state.pendingError,
+                    {
+                      _tag: "Closed",
+                      reason: sessionCloseReason(state.pendingError),
+                    },
+                  ]
+                : [undefined, { _tag: "Open" }];
+            },
+          );
+          if (pendingError) {
+            yield* completeSession({ _tag: "Failure", error: pendingError });
+          }
+          return yield* Effect.failCause(closeExit.cause);
+        }
+
+        yield* succeedSession();
+      }),
+    );
+
   const close = <E>(closeTransport: Effect.Effect<void, E>): Effect.Effect<void, E> =>
     Effect.uninterruptible(
-      requestLock.withPermit(
-        Effect.gen(function* () {
-          const closeStart = yield* Ref.modify(
-            closedState,
-            (state): readonly [CloseStart, ClientClosedState] =>
-              state._tag === "Closed"
-                ? [{ _tag: "AlreadyClosed" }, state]
-                : [{ _tag: "StartClose" }, { _tag: "Closing", pendingError: undefined }],
-          );
-          if (closeStart._tag === "AlreadyClosed") {
-            yield* closeTransport;
-            return;
-          }
-
-          const closeExit = yield* Effect.exit(closeTransport);
-          if (Exit.isFailure(closeExit)) {
-            const pendingError = yield* Ref.modify(
-              closedState,
-              (state): readonly [VScopeDeviceError | undefined, ClientClosedState] => {
-                if (state._tag !== "Closing") {
-                  return [undefined, state];
-                }
-
-                return state.pendingError
-                  ? [
-                      state.pendingError,
-                      {
-                        _tag: "Closed",
-                        reason: sessionCloseReason(state.pendingError),
-                      },
-                    ]
-                  : [undefined, { _tag: "Open" }];
-              },
-            );
-            if (pendingError) {
-              yield* completeSession({ _tag: "Failure", error: pendingError });
-            }
-            return yield* Effect.failCause(closeExit.cause);
-          }
-
-          yield* succeedSession();
-        }),
+      Ref.get(closedState).pipe(
+        Effect.flatMap((state) =>
+          state._tag === "Closed" ? closeTransport : dispatchClose(closeTransport),
+        ),
       ),
     );
   yield* Effect.gen(function* () {
@@ -323,56 +355,57 @@ const makeVScopeClient = Effect.fn("VScopeClient.make")(function* (
     responseType: VScopeMessageType,
     payload = new Uint8Array(),
     requestOptions = {},
-  ) =>
-    requestLock.withPermit(
-      Effect.gen(function* () {
-        yield* ensureOpen(requestType);
-        const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
-        const retryAttempts = requestOptions.retryAttempts ?? defaultRetryAttempts;
+  ) => {
+    const operation = Effect.gen(function* () {
+      yield* ensureOpen(requestType);
+      const encoded = yield* encodeVScopeFrame({ type: requestType, payload });
+      const retryAttempts = requestOptions.retryAttempts ?? defaultRetryAttempts;
 
-        // One write/drain/read exchange. A response timeout is fatal: without
-        // sequence IDs a late reply would poison the next request, so we tear
-        // the session down rather than recover.
-        const exchange = Effect.gen(function* () {
-          yield* transport
-            .write(encoded)
-            .pipe(
-              Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
-            );
-          yield* transport.drain.pipe(
+      // One write/drain/read exchange. A response timeout is fatal: without
+      // sequence IDs a late reply would poison the next request, so we tear
+      // the session down rather than recover.
+      const exchange = Effect.gen(function* () {
+        yield* transport
+          .write(encoded)
+          .pipe(
             Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
           );
-
-          return yield* takeResponse(transport.path, events, requestType, responseType);
-        }).pipe(
-          Effect.timeoutOrElse({
-            duration: `${timeoutMillis} millis`,
-            orElse: () => {
-              const error = new VScopeResponseTimeoutError({
-                path: transport.path,
-                requestType,
-                timeoutMillis,
-              });
-
-              return failSession(error).pipe(
-                Effect.andThen(transport.close.pipe(Effect.ignore)),
-                Effect.andThen(Effect.fail(error)),
-              );
-            },
-          }),
+        yield* transport.drain.pipe(
+          Effect.mapError((cause) => new VScopeTransportError({ path: transport.path, cause })),
         );
 
-        // A CRC-corrupted response is a complete frame fully consumed by the
-        // parser, so the queue stays aligned and re-sending the same request is
-        // safe. Only those failures retry; everything else fails through.
-        return yield* exchange.pipe(
-          Effect.retry({
-            schedule: Schedule.recurs(retryAttempts),
-            while: (error) => error instanceof VScopeFrameParseError,
-          }),
-        );
-      }),
-    );
+        return yield* takeResponse(transport.path, events, requestType, responseType);
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: `${timeoutMillis} millis`,
+          orElse: () => {
+            const error = new VScopeResponseTimeoutError({
+              path: transport.path,
+              requestType,
+              timeoutMillis,
+            });
+
+            return failSession(error).pipe(
+              Effect.andThen(transport.close.pipe(Effect.ignore)),
+              Effect.andThen(Effect.fail(error)),
+            );
+          },
+        }),
+      );
+
+      // A CRC-corrupted response is a complete frame fully consumed by the
+      // parser, so the queue stays aligned and re-sending the same request is
+      // safe. Only those failures retry; everything else fails through.
+      return yield* exchange.pipe(
+        Effect.retry({
+          schedule: Schedule.recurs(retryAttempts),
+          while: (error) => error instanceof VScopeFrameParseError,
+        }),
+      );
+    });
+
+    return ensureOpen(requestType).pipe(Effect.andThen(dispatch(operation)));
+  };
 
   return {
     request,

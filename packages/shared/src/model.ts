@@ -33,7 +33,7 @@ export class SerialConfig extends Schema.Class<SerialConfig>("SerialConfig")({
 }) {}
 
 export const DEFAULT_SERIAL_CONFIG = SerialConfig.make({
-  baudRate: 115200,
+  baudRate: 312500,
   dataBits: 8,
   stopBits: 1,
   parity: "none",

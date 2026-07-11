@@ -1,37 +1,29 @@
-// Instrument console palette. Dark, high-contrast, oscilloscope-inspired:
-// a near-black chassis, a darker phosphor screen, and saturated signal accents
-// that double as device-state semantics (run/acquire/halt/fault).
+// Neutral light application surfaces with colour reserved for live signals and
+// device state.
 export const colors = {
-  // chassis surfaces, back-to-front
-  bg: "#0a0d13",
-  panel: "#10141c",
-  panelMuted: "#161b25",
-  panelRaised: "#1d2430",
-  // the scope display itself (the graticule grid in styles.ts bakes its own
-  // literal so StyleX can statically resolve the gradient)
-  screen: "#070a0f",
-  screenAxis: "#1d3340",
-  // structure
-  line: "#222a36",
-  lineStrong: "#323c4c",
-  // text, brightest-to-dimmest
-  text: "#e8ecf3",
-  textMuted: "#97a2b2",
-  textSoft: "#616b7a",
-  // actions
-  accent: "#38bdf8",
-  accentStrong: "#0ea5e9",
-  accentSoft: "#0c2c3d",
-  // device-state semantics
-  run: "#4ade80",
-  runSoft: "#0f2c1d",
-  acquire: "#fbbf24",
-  acquireSoft: "#2c2410",
-  halt: "#8b95a5",
-  haltSoft: "#1a212c",
-  danger: "#f87171",
-  dangerSoft: "#2c1416",
+  bg: "#f7f7f8",
+  panel: "#ffffff",
+  panelMuted: "#fafafa",
+  panelRaised: "#f4f4f5",
+  screen: "#ffffff",
+  screenAxis: "#e4e4e7",
+  line: "#e4e4e7",
+  lineStrong: "#d4d4d8",
+  text: "#18181b",
+  textMuted: "#52525b",
+  textSoft: "#71717a",
+  accent: "#2563eb",
+  accentStrong: "#1d4ed8",
+  accentSoft: "#eff6ff",
+  run: "#15803d",
+  runSoft: "#f0fdf4",
+  acquire: "#a16207",
+  acquireSoft: "#fffbeb",
+  halt: "#52525b",
+  haltSoft: "#f4f4f5",
+  danger: "#b91c1c",
+  dangerSoft: "#fef2f2",
 } as const;
 
 // Per-channel trace colours, indexed by scope channel.
-export const chartColors = ["#38bdf8", "#f472b6", "#4ade80", "#fbbf24", "#a78bfa"] as const;
+export const chartColors = ["#2563eb", "#c026d3", "#059669", "#d97706", "#7c3aed"] as const;

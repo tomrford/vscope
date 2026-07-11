@@ -99,6 +99,16 @@ describe("@vscope/runtime server", () => {
   });
 
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
+    it.effect("reads the latest polled frame through MCP", () =>
+      Effect.gen(function* () {
+        const sessionId = yield* initializeMcp();
+
+        const result = yield* callMcpTool(sessionId, 2, "vscope_read_frame", {});
+
+        expect(JSON.stringify(result)).toContain('"values":[10,20]');
+      }),
+    );
+
     it.effect("applies MCP config patches through core commands", () =>
       Effect.gen(function* () {
         const commands = activeCommands();

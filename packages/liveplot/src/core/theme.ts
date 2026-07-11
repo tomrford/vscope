@@ -23,15 +23,15 @@ export const resolvePalette = (theme: LiveChartTheme): LiveChartPalette => {
   }
 
   return {
-    axis: "rgba(255,255,255,0.35)",
-    axisText: "rgba(255,255,255,0.55)",
-    gridLine: "rgba(255,255,255,0.10)",
-    crosshair: "rgba(255,255,255,0.45)",
-    tooltipBg: "rgba(17,24,39,0.94)",
-    tooltipBorder: "rgba(255,255,255,0.14)",
-    tooltipText: "rgba(255,255,255,0.88)",
-    loadingLine: "rgba(255,255,255,0.22)",
-    noDataLine: "rgba(255,255,255,0.20)",
-    font: "12px system-ui, -apple-system, sans-serif",
+    axis: "rgba(161,161,170,0.45)",
+    axisText: "rgba(161,161,170,0.72)",
+    gridLine: "rgba(63,63,70,0.52)",
+    crosshair: "rgba(228,228,231,0.52)",
+    tooltipBg: "rgba(24,24,27,0.96)",
+    tooltipBorder: "rgba(63,63,70,0.92)",
+    tooltipText: "rgba(250,250,250,0.94)",
+    loadingLine: "rgba(113,113,122,0.35)",
+    noDataLine: "rgba(113,113,122,0.32)",
+    font: "11px ui-monospace, SFMono-Regular, Menlo, monospace",
   };
 };

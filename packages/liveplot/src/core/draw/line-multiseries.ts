@@ -4,7 +4,6 @@
  * Local changes: multiseries rendering, no pulse/momentum/badge line.
  */
 
-import { drawSpline } from "../math/spline";
 import type { ChartLayout, LivePoint } from "../types";
 import {
   LOADING_AMPLITUDE_RATIO,
@@ -41,12 +40,18 @@ const drawSeriesCurve = (
   showFill: boolean,
 ): void => {
   const { padding, height } = layout;
+  const drawLinear = () => {
+    for (let index = 1; index < points.length; index += 1) {
+      const point = points[index];
+      if (point) ctx.lineTo(point[0], point[1]);
+    }
+  };
 
   if (showFill) {
     ctx.beginPath();
     ctx.moveTo(points[0][0], height - padding.bottom);
     ctx.lineTo(points[0][0], points[0][1]);
-    drawSpline(ctx, points);
+    drawLinear();
     ctx.lineTo(points[points.length - 1][0], height - padding.bottom);
     ctx.closePath();
     const grad = ctx.createLinearGradient(0, padding.top, 0, height - padding.bottom);
@@ -58,7 +63,7 @@ const drawSeriesCurve = (
 
   ctx.beginPath();
   ctx.moveTo(points[0][0], points[0][1]);
-  drawSpline(ctx, points);
+  drawLinear();
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.globalAlpha = alpha;

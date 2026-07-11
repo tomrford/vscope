@@ -232,6 +232,23 @@ describe("@vscope/runtime core", () => {
     );
   });
 
+  layer(coreTestLayer())((it) => {
+    it.effect("writes RT values while the device is running", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({ type: "devices/connect", path: fakePort.path });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({ type: "devices/setRtValue", index: 0, value: 2.5 });
+
+        const status = yield* core.deviceStatus;
+        const config = yield* core.deviceConfig;
+
+        expect(status?.state).toBe(VScopeState.Running);
+        expect(config?.rtValues.get(0)).toBe(2.5);
+      }),
+    );
+  });
+
   layer(coreTestLayer(fakeSerialLayer([fakePort], { device: { corruptFramesAfter: 1 } })))((it) => {
     it.effect(
       "keeps the device connected and holds the last frame when a frame poll is corrupt",

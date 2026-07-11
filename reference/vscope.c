@@ -933,15 +933,13 @@ static void vscope_check_trigger(void) {
         return;
     }
 
-    if ((current_delta * last_delta) < 0.0f) {
-        if (current_delta > 0.0f) {
-            if (vscope_trigger_mode != VSCOPE_TRG_FALLING) {
-                vscopeTrigger();
-            }
-        } else {
-            if (vscope_trigger_mode != VSCOPE_TRG_RISING) {
-                vscopeTrigger();
-            }
+    if (current_delta > 0.0f && last_delta <= 0.0f) {
+        if (vscope_trigger_mode != VSCOPE_TRG_FALLING) {
+            vscopeTrigger();
+        }
+    } else if (current_delta < 0.0f && last_delta >= 0.0f) {
+        if (vscope_trigger_mode != VSCOPE_TRG_RISING) {
+            vscopeTrigger();
         }
     }
 

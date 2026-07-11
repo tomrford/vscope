@@ -2,6 +2,7 @@ import {
   RuntimeActiveDevice,
   RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
+  RuntimeFramePayload,
   RuntimePortInfo,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
@@ -12,15 +13,21 @@ import {
   ActiveDeviceChanged,
   DeviceConfigChanged,
   DeviceStatusReceived,
+  FrameReceived,
+  ChannelMapChanged,
   PortsLoaded,
   PortsRescanned,
   PortsRescanFailed,
   RefreshPortsRequested,
   RuntimeLinkDown,
   SaveSnapshotRequested,
+  SnapshotLabelChanged,
   SetTimingRequested,
   SetTriggerRequested,
+  SetChannelMapRequested,
+  SetRtValuesRequested,
   TimingTotalChanged,
+  RtValueChanged,
   TriggerChannelChanged,
   TriggerThresholdChanged,
   init,
@@ -33,7 +40,7 @@ const activeDevice = (connected: boolean) =>
     deviceName: "test-device",
     connected,
     info: null,
-    variables: [],
+    variables: ["a", "b", "c"],
     rtLabels: [],
     error: null,
   });
@@ -85,7 +92,8 @@ describe("@vscope/ui model", () => {
         status: RuntimeControlStatus.make({ state: "running", snapshotValid: false }),
       }),
     );
-    const [capturing] = update(running, SaveSnapshotRequested());
+    const [named] = update(running, SnapshotLabelChanged({ value: "capture" }));
+    const [capturing] = update(named, SaveSnapshotRequested());
     const [disconnected, commands] = update(
       capturing,
       ActiveDeviceChanged({ device: activeDevice(false) }),
@@ -115,7 +123,10 @@ describe("@vscope/ui model", () => {
         mode: "rising",
       }),
       channelMap: [0, 2],
-      rtValues: [],
+      rtValues: [
+        [0, 1],
+        [1, 2],
+      ],
     });
     const [configured] = update(editing, DeviceConfigChanged({ config }));
 
@@ -124,6 +135,42 @@ describe("@vscope/ui model", () => {
     expect(configured.triggerChannelDraft).toBe("3");
     expect(configured.triggerThresholdDraft).toBe("1.25");
     expect(configured.triggerModeDraft).toBe("rising");
+    expect(configured.channelMapDraft).toEqual(["0", "2"]);
+    expect(configured.rtValueDrafts).toEqual(["1", "2"]);
+  });
+
+  it("creates batched commands for changed RT values and channel mappings", () => {
+    const [model] = init();
+    const [connected] = update(model, ActiveDeviceChanged({ device: activeDevice(true) }));
+    const config = RuntimeDeviceConfigPayload.make({
+      timing: null,
+      trigger: null,
+      channelMap: [0, 1],
+      rtValues: [
+        [0, 1],
+        [1, 2],
+      ],
+    });
+    const [configured] = update(connected, DeviceConfigChanged({ config }));
+    const [rtEdited] = update(configured, RtValueChanged({ index: 1, value: "2.5" }));
+    const [rtSaving, rtCommands] = update(rtEdited, SetRtValuesRequested());
+    const [mapEdited] = update(configured, ChannelMapChanged({ channel: 1, value: "2" }));
+    const [mapSaving, mapCommands] = update(mapEdited, SetChannelMapRequested());
+
+    expect(rtSaving.busy).toBe("setRtValues");
+    expect(rtCommands.map((command) => command.name)).toEqual(["SetRtValues"]);
+    expect(mapSaving.busy).toBe("setChannelMap");
+    expect(mapCommands.map((command) => command.name)).toEqual(["SetChannelMap"]);
+  });
+
+  it("retains the latest throttled live frame for channel readouts", () => {
+    const [model] = init();
+    const frame = RuntimeFramePayload.make({ values: [1.25, -0.5] });
+    const [withFrame, commands] = update(model, FrameReceived({ frame }));
+
+    expect(withFrame.frame).toEqual(frame);
+    expect(withFrame.linkUp).toBe(false);
+    expect(commands).toHaveLength(0);
   });
 
   it("rejects blank numeric drafts before creating runtime commands", () => {
@@ -137,5 +184,17 @@ describe("@vscope/ui model", () => {
     expect(timingCommands).toHaveLength(0);
     expect(invalidTrigger.error).toBe("Trigger threshold must be a number.");
     expect(triggerCommands).toHaveLength(0);
+  });
+
+  it("requires a snapshot name before starting a save", () => {
+    const [model] = init();
+    const [blank, blankCommands] = update(model, SaveSnapshotRequested());
+    const [named] = update(model, SnapshotLabelChanged({ value: "capture" }));
+    const [saving, saveCommands] = update(named, SaveSnapshotRequested());
+
+    expect(blank.error).toBe("Enter a snapshot name.");
+    expect(blankCommands).toHaveLength(0);
+    expect(saving.busy).toBe("saveSnapshot");
+    expect(saveCommands.map((command) => command.name)).toEqual(["SaveSnapshot"]);
   });
 });

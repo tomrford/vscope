@@ -1,10 +1,18 @@
-/* Chassis baseline under the StyleX-managed tree. Also the CSS asset the
-   StyleX build output is appended to — without one, the aggregated styles
-   land in an orphaned file no HTML references. */
+/* Baseline under the StyleX-managed tree. This also keeps the aggregated
+   StyleX output attached to an imported CSS asset. */
 :root {
-  color-scheme: dark;
+  color-scheme: light;
+  font-synthesis: none;
 }
 
 body {
   margin: 0;
+  min-width: 360px;
+  background: #f7f7f8;
+}
+
+button,
+input,
+select {
+  font: inherit;
 }

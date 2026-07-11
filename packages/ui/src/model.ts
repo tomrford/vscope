@@ -3,6 +3,7 @@ import {
   RuntimeAppDto,
   RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
+  RuntimeFramePayload,
   RuntimePortInfo,
   SnapshotRecord,
   TriggerMode,
@@ -16,7 +17,14 @@ import { RuntimeClient, type RuntimeRpc } from "./client.ts";
 
 // Which grouped-settings popover is open. Ephemeral view state, but kept in the
 // Model so open/close is explicit, testable, and survives a render.
-export const MenuId = Schema.Literals(["timing", "trigger"]);
+export const MenuId = Schema.Literals([
+  "timing",
+  "trigger",
+  "channels",
+  "rt",
+  "snapshots",
+  "saveSnapshot",
+]);
 export type MenuId = Schema.Schema.Type<typeof MenuId>;
 
 export const ControlAction = Schema.Literals([
@@ -29,6 +37,8 @@ export const ControlAction = Schema.Literals([
   "saveSnapshot",
   "setTiming",
   "setTrigger",
+  "setRtValues",
+  "setChannelMap",
 ]);
 export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
 
@@ -41,6 +51,7 @@ export const Model = Schema.Struct({
   config: Schema.NullOr(RuntimeDeviceConfigPayload),
   snapshots: Schema.Array(SnapshotRecord),
   status: Schema.NullOr(RuntimeControlStatus),
+  frame: Schema.NullOr(RuntimeFramePayload),
   linkUp: Schema.Boolean,
   selectedPort: Schema.String,
   timingTotalSecondsDraft: Schema.String,
@@ -48,6 +59,8 @@ export const Model = Schema.Struct({
   triggerChannelDraft: Schema.String,
   triggerThresholdDraft: Schema.String,
   triggerModeDraft: TriggerMode,
+  rtValueDrafts: Schema.Array(Schema.String),
+  channelMapDraft: Schema.Array(Schema.String),
   snapshotLabelDraft: Schema.String,
   openMenu: Schema.NullOr(MenuId),
   busy: BusyState,
@@ -77,6 +90,10 @@ export const SnapshotsChanged = m("SnapshotsChanged", {
 export const DeviceStatusReceived = m("DeviceStatusReceived", {
   status: Schema.NullOr(RuntimeControlStatus),
 });
+export const FrameReceived = m("FrameReceived", {
+  frame: Schema.NullOr(RuntimeFramePayload),
+});
+export const LivePlotMounted = m("LivePlotMounted");
 export const RuntimeLinkDown = m("RuntimeLinkDown");
 export const CommandSettled = m("CommandSettled");
 export const RefreshPortsFailed = m("RefreshPortsFailed", {
@@ -110,6 +127,14 @@ export const TriggerThresholdChanged = m("TriggerThresholdChanged", {
 export const TriggerModeChanged = m("TriggerModeChanged", {
   mode: TriggerMode,
 });
+export const RtValueChanged = m("RtValueChanged", {
+  index: Schema.Int,
+  value: Schema.String,
+});
+export const ChannelMapChanged = m("ChannelMapChanged", {
+  channel: Schema.Int,
+  value: Schema.String,
+});
 export const SnapshotLabelChanged = m("SnapshotLabelChanged", {
   value: Schema.String,
 });
@@ -122,6 +147,8 @@ export const TriggerRequested = m("TriggerRequested");
 export const SaveSnapshotRequested = m("SaveSnapshotRequested");
 export const SetTimingRequested = m("SetTimingRequested");
 export const SetTriggerRequested = m("SetTriggerRequested");
+export const SetRtValuesRequested = m("SetRtValuesRequested");
+export const SetChannelMapRequested = m("SetChannelMapRequested");
 
 export const Message = Schema.Union([
   AppChanged,
@@ -131,6 +158,8 @@ export const Message = Schema.Union([
   DeviceConfigChanged,
   SnapshotsChanged,
   DeviceStatusReceived,
+  FrameReceived,
+  LivePlotMounted,
   RuntimeLinkDown,
   CommandSettled,
   RefreshPortsFailed,
@@ -144,6 +173,8 @@ export const Message = Schema.Union([
   TriggerChannelChanged,
   TriggerThresholdChanged,
   TriggerModeChanged,
+  RtValueChanged,
+  ChannelMapChanged,
   SnapshotLabelChanged,
   RefreshPortsRequested,
   ConnectRequested,
@@ -154,6 +185,8 @@ export const Message = Schema.Union([
   SaveSnapshotRequested,
   SetTimingRequested,
   SetTriggerRequested,
+  SetRtValuesRequested,
+  SetChannelMapRequested,
 ]);
 export type Message = Schema.Schema.Type<typeof Message>;
 
@@ -255,6 +288,42 @@ const SetTrigger = Command.define(
   Message,
 )((trigger) => settledCommand((rpc) => rpc["device.setTrigger"](trigger)));
 
+const RtValueWrite = Schema.Struct({
+  index: Schema.Int,
+  value: Schema.Finite,
+});
+
+const SetRtValues = Command.define(
+  "SetRtValues",
+  { writes: Schema.Array(RtValueWrite) },
+  Message,
+)(({ writes }) =>
+  settledCommand((rpc) =>
+    Effect.forEach(writes, ({ index, value }) => rpc["device.setRtValue"]({ index, value }), {
+      discard: true,
+    }),
+  ),
+);
+
+const ChannelMapWrite = Schema.Struct({
+  channel: Schema.Int,
+  variable: Schema.Int,
+});
+
+const SetChannelMap = Command.define(
+  "SetChannelMap",
+  { writes: Schema.Array(ChannelMapWrite) },
+  Message,
+)(({ writes }) =>
+  settledCommand((rpc) =>
+    Effect.forEach(
+      writes,
+      ({ channel, variable }) => rpc["device.setChannelMap"]({ channel, variable }),
+      { discard: true },
+    ),
+  ),
+);
+
 export const init = (): UpdateResult => [
   {
     app: null,
@@ -263,6 +332,7 @@ export const init = (): UpdateResult => [
     config: null,
     snapshots: [],
     status: null,
+    frame: null,
     linkUp: false,
     selectedPort: "",
     timingTotalSecondsDraft: "",
@@ -270,6 +340,8 @@ export const init = (): UpdateResult => [
     triggerChannelDraft: "",
     triggerThresholdDraft: "",
     triggerModeDraft: "disabled",
+    rtValueDrafts: [],
+    channelMapDraft: [],
     snapshotLabelDraft: "",
     openMenu: null,
     busy: null,
@@ -305,6 +377,18 @@ const modelWithConfig = (model: Model, config: RuntimeDeviceConfigPayload | null
     triggerChannelDraft: trigger ? String(trigger.channel) : "",
     triggerThresholdDraft: trigger ? String(trigger.threshold) : "",
     triggerModeDraft: trigger?.mode ?? "disabled",
+    rtValueDrafts: config
+      ? Array.from(
+          {
+            length: Math.max(
+              model.activeDevice?.info?.rtCount ?? 0,
+              ...config.rtValues.map(([index]) => index + 1),
+            ),
+          },
+          (_, index) => String(config.rtValues.find(([entry]) => entry === index)?.[1] ?? ""),
+        )
+      : [],
+    channelMapDraft: config?.channelMap.map(String) ?? [],
   };
 };
 
@@ -327,6 +411,43 @@ const failLocal = (model: Model, message: string): UpdateResult => [
   { ...model, busy: null, error: message },
   [],
 ];
+
+const changedRtValues = (
+  model: Model,
+):
+  | { readonly writes: ReadonlyArray<{ readonly index: number; readonly value: number }> }
+  | {
+      readonly error: string;
+    } => {
+  const current = new Map(model.config?.rtValues ?? []);
+  const writes: Array<{ readonly index: number; readonly value: number }> = [];
+  for (const [index, draft] of model.rtValueDrafts.entries()) {
+    const value = parseFinite(draft);
+    if (value === null) return { error: `RT ${index + 1} must be a number.` };
+    if (current.get(index) !== value) writes.push({ index, value });
+  }
+  return { writes };
+};
+
+const changedChannelMap = (
+  model: Model,
+):
+  | { readonly writes: ReadonlyArray<{ readonly channel: number; readonly variable: number }> }
+  | {
+      readonly error: string;
+    } => {
+  const current = model.config?.channelMap ?? [];
+  const variableCount = model.activeDevice?.variables.length ?? 0;
+  const writes: Array<{ readonly channel: number; readonly variable: number }> = [];
+  for (const [channel, draft] of model.channelMapDraft.entries()) {
+    const variable = parseNonNegativeInteger(draft);
+    if (variable === null || variable >= variableCount) {
+      return { error: `Channel ${channel + 1} must select a valid variable.` };
+    }
+    if (current[channel] !== variable) writes.push({ channel, variable });
+  }
+  return { writes };
+};
 
 export const update = (model: Model, message: Message): UpdateResult =>
   Match.value(message).pipe(
@@ -363,6 +484,7 @@ export const update = (model: Model, message: Message): UpdateResult =>
           activeDevice: device,
           selectedPort: device?.connected ? device.path : model.selectedPort,
           status: connectionLost ? null : model.status,
+          frame: connectionLost ? null : model.frame,
           linkUp: true,
         };
         return connectionLost
@@ -372,6 +494,8 @@ export const update = (model: Model, message: Message): UpdateResult =>
       DeviceConfigChanged: ({ config }) => [modelWithConfig(model, config), []],
       SnapshotsChanged: ({ snapshots }) => [{ ...model, snapshots, linkUp: true }, []],
       DeviceStatusReceived: ({ status }) => [{ ...model, status, linkUp: true }, []],
+      FrameReceived: ({ frame }) => [{ ...model, frame }, []],
+      LivePlotMounted: () => [model, []],
       RuntimeLinkDown: () => [{ ...model, linkUp: false }, []],
       CommandSettled: () => [{ ...model, busy: null, error: null }, []],
       RefreshPortsFailed: ({ message }) =>
@@ -379,10 +503,17 @@ export const update = (model: Model, message: Message): UpdateResult =>
       PortsRescanFailed: ({ message }) =>
         model.busy === null ? [{ ...model, error: message }, []] : [model, []],
       RuntimeCommandFailed: ({ message }) => [{ ...model, busy: null, error: message }, []],
-      MenuToggled: ({ menu }) => [
-        { ...model, openMenu: model.openMenu === menu ? null : menu },
-        [],
-      ],
+      MenuToggled: ({ menu }) => {
+        const opening = model.openMenu !== menu;
+        return [
+          {
+            ...model,
+            openMenu: opening ? menu : null,
+            snapshotLabelDraft: opening && menu === "saveSnapshot" ? "" : model.snapshotLabelDraft,
+          },
+          [],
+        ];
+      },
       MenuClosed: () => [{ ...model, openMenu: null }, []],
       SelectedPortChanged: ({ path }) => [{ ...model, selectedPort: path }, []],
       TimingTotalChanged: ({ value }) => [{ ...model, timingTotalSecondsDraft: value }, []],
@@ -393,6 +524,24 @@ export const update = (model: Model, message: Message): UpdateResult =>
       TriggerChannelChanged: ({ value }) => [{ ...model, triggerChannelDraft: value }, []],
       TriggerThresholdChanged: ({ value }) => [{ ...model, triggerThresholdDraft: value }, []],
       TriggerModeChanged: ({ mode }) => [{ ...model, triggerModeDraft: mode }, []],
+      RtValueChanged: ({ index, value }) => [
+        {
+          ...model,
+          rtValueDrafts: model.rtValueDrafts.map((draft, entry) =>
+            entry === index ? value : draft,
+          ),
+        },
+        [],
+      ],
+      ChannelMapChanged: ({ channel, value }) => [
+        {
+          ...model,
+          channelMapDraft: model.channelMapDraft.map((draft, entry) =>
+            entry === channel ? value : draft,
+          ),
+        },
+        [],
+      ],
       SnapshotLabelChanged: ({ value }) => [{ ...model, snapshotLabelDraft: value }, []],
       RefreshPortsRequested: () => [
         { ...model, busy: "refresh", error: null },
@@ -412,10 +561,19 @@ export const update = (model: Model, message: Message): UpdateResult =>
       RunRequested: () => [{ ...model, busy: "run", error: null }, [RunDevice()]],
       StopRequested: () => [{ ...model, busy: "stop", error: null }, [StopDevice()]],
       TriggerRequested: () => [{ ...model, busy: "trigger", error: null }, [TriggerDevice()]],
-      SaveSnapshotRequested: () => [
-        { ...model, busy: "saveSnapshot", error: null },
-        [SaveSnapshot({ label: model.snapshotLabelDraft })],
-      ],
+      SaveSnapshotRequested: () =>
+        model.snapshotLabelDraft.trim() === ""
+          ? failLocal(model, "Enter a snapshot name.")
+          : [
+              {
+                ...model,
+                openMenu: null,
+                snapshotLabelDraft: "",
+                busy: "saveSnapshot",
+                error: null,
+              },
+              [SaveSnapshot({ label: model.snapshotLabelDraft })],
+            ],
       SetTimingRequested: () => {
         const totalDurationSeconds = parseFinite(model.timingTotalSecondsDraft);
         const preTriggerSeconds = parseFinite(model.timingPreTriggerSecondsDraft);
@@ -442,6 +600,24 @@ export const update = (model: Model, message: Message): UpdateResult =>
         return [
           { ...model, openMenu: null, busy: "setTrigger", error: null },
           [SetTrigger({ channel, threshold, mode: model.triggerModeDraft })],
+        ];
+      },
+      SetRtValuesRequested: () => {
+        const result = changedRtValues(model);
+        if ("error" in result) return failLocal(model, result.error);
+        if (result.writes.length === 0) return [{ ...model, openMenu: null, error: null }, []];
+        return [
+          { ...model, openMenu: null, busy: "setRtValues", error: null },
+          [SetRtValues({ writes: result.writes })],
+        ];
+      },
+      SetChannelMapRequested: () => {
+        const result = changedChannelMap(model);
+        if ("error" in result) return failLocal(model, result.error);
+        if (result.writes.length === 0) return [{ ...model, openMenu: null, error: null }, []];
+        return [
+          { ...model, openMenu: null, busy: "setChannelMap", error: null },
+          [SetChannelMap({ writes: result.writes })],
         ];
       },
     }),

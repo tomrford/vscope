@@ -68,8 +68,6 @@ const toVisibleSeries = (
   seriesList: LiveSeries[],
   leftEdge: number,
   rightEdge: number,
-  smoothValueMap: Map<string, number>,
-  dtMs: number,
 ): VisibleSeries[] => {
   const visible: VisibleSeries[] = [];
   for (const series of seriesList) {
@@ -78,23 +76,13 @@ const toVisibleSeries = (
     );
 
     if (points.length === 0) {
-      smoothValueMap.delete(series.id);
       continue;
     }
-
-    const last = points[points.length - 1];
-    const prevSmooth = smoothValueMap.get(series.id);
-    const nextSmooth =
-      prevSmooth === undefined ? last.value : lerp(prevSmooth, last.value, 0.18, dtMs);
-    smoothValueMap.set(series.id, nextSmooth);
-
-    const copy = [...points];
-    copy[copy.length - 1] = { ...last, value: nextSmooth };
 
     visible.push({
       id: series.id,
       color: series.color,
-      points: copy,
+      points,
     });
   }
 
@@ -154,7 +142,6 @@ export const createLivePlotEngine = (
   }
   let config = initialConfig;
   let destroyed = false;
-  const smoothValueMap = new Map<string, number>();
 
   const state: InternalState = {
     width: 0,
@@ -284,13 +271,7 @@ export const createLivePlotEngine = (
     );
 
     const leftEdge = state.displayNowSec - state.displayWindowSecs;
-    const visibleSeries = toVisibleSeries(
-      config.series,
-      leftEdge,
-      state.displayNowSec,
-      smoothValueMap,
-      dtMs,
-    );
+    const visibleSeries = toVisibleSeries(config.series, leftEdge, state.displayNowSec);
 
     const hasData = visibleSeries.some((entry) => entry.points.length >= MIN_VISIBLE_POINTS);
 
@@ -440,7 +421,7 @@ export const createLivePlotEngine = (
   return {
     setConfig(next) {
       config = next;
-      state.scrubOverrideTime = next.scrubTime ?? state.scrubOverrideTime;
+      state.scrubOverrideTime = next.scrubTime ?? null;
       if (!next.scrubEnabled) {
         state.localScrubX = null;
         state.scrubOverrideTime = null;

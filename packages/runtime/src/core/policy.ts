@@ -40,11 +40,12 @@ export function decideDeviceControl(
         : deny("Trigger is available only while the connected device is running.");
     case "devices/setTiming":
     case "devices/setTrigger":
-    case "devices/setRtValue":
     case "devices/setChannelMap":
       return status.state === VScopeState.Halted
         ? allow(device)
         : deny("Device configuration commands are available only while the device is halted.");
+    case "devices/setRtValue":
+      return allow(device);
   }
 }
 
