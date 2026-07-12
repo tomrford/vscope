@@ -72,7 +72,14 @@ export class Settings extends Schema.Class<Settings>("Settings")({
   network: NetworkSettings,
 }) {}
 
-export type SettingsPatch = Partial<Settings>;
+export type SettingsPatch = {
+  readonly theme?: Theme;
+  readonly defaultSerialConfig?: Partial<SerialConfig>;
+  readonly polling?: Partial<PollingSettings>;
+  readonly snapshots?: Partial<SnapshotSettings>;
+  readonly liveView?: Partial<LiveViewSettings>;
+  readonly network?: Partial<NetworkSettings>;
+};
 
 export const DEFAULT_SETTINGS = Settings.make({
   theme: "system",

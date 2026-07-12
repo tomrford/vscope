@@ -472,11 +472,11 @@ function fakePersistenceLayer() {
       Effect.sync(() => {
         settings = Settings.make({
           theme: patch.theme ?? settings.theme,
-          defaultSerialConfig: patch.defaultSerialConfig ?? settings.defaultSerialConfig,
-          polling: patch.polling ?? settings.polling,
-          snapshots: patch.snapshots ?? settings.snapshots,
-          liveView: patch.liveView ?? settings.liveView,
-          network: patch.network ?? settings.network,
+          defaultSerialConfig: { ...settings.defaultSerialConfig, ...patch.defaultSerialConfig },
+          polling: { ...settings.polling, ...patch.polling },
+          snapshots: { ...settings.snapshots, ...patch.snapshots },
+          liveView: { ...settings.liveView, ...patch.liveView },
+          network: { ...settings.network, ...patch.network },
         });
         return SettingsState.make({
           settings,

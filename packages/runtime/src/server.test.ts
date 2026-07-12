@@ -130,13 +130,15 @@ describe("@vscope/runtime server", () => {
         const sessionId = yield* initializeMcp();
 
         const readResult = yield* callMcpTool(sessionId, 2, "vscope_read_settings", {});
-        yield* callMcpTool(sessionId, 3, "vscope_patch_settings", { theme: "dark" });
+        yield* callMcpTool(sessionId, 3, "vscope_patch_settings", {
+          polling: { stateHz: 10 },
+        });
 
         expect(JSON.stringify(readResult)).toContain('"theme":"system"');
         expect(commands).toEqual([
           {
             type: "settings/patch",
-            patch: { theme: "dark" },
+            patch: { polling: { stateHz: 10 } },
           },
         ]);
       }),

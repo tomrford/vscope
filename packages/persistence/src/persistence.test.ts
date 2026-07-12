@@ -145,6 +145,11 @@ describe("@vscope/persistence", () => {
 
             const settings = yield* persistence.patchSettings({ theme: "dark" });
             expect(settings.settings.theme).toBe("dark");
+
+            const nested = yield* persistence.patchSettings({ polling: { stateHz: 10 } });
+            expect(nested.settings.polling.stateHz).toBe(10);
+            expect(nested.settings.polling.frameHz).toBe(DEFAULT_SETTINGS.polling.frameHz);
+            expect(nested.settings.theme).toBe("dark");
           }),
         );
 

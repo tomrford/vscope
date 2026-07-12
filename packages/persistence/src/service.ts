@@ -136,6 +136,26 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
           const merged = yield* decodeWith(Settings, "patch settings", {
             ...current.settings,
             ...patch,
+            defaultSerialConfig:
+              patch.defaultSerialConfig === undefined
+                ? current.settings.defaultSerialConfig
+                : { ...current.settings.defaultSerialConfig, ...patch.defaultSerialConfig },
+            polling:
+              patch.polling === undefined
+                ? current.settings.polling
+                : { ...current.settings.polling, ...patch.polling },
+            snapshots:
+              patch.snapshots === undefined
+                ? current.settings.snapshots
+                : { ...current.settings.snapshots, ...patch.snapshots },
+            liveView:
+              patch.liveView === undefined
+                ? current.settings.liveView
+                : { ...current.settings.liveView, ...patch.liveView },
+            network:
+              patch.network === undefined
+                ? current.settings.network
+                : { ...current.settings.network, ...patch.network },
           });
           return yield* writeSettings(merged);
         }),

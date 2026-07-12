@@ -111,15 +111,43 @@ export class RuntimeSnapshotFavoriteRequest extends Schema.Class<RuntimeSnapshot
   favorite: Schema.Boolean,
 }) {}
 
+const RuntimeSerialConfigPatch = Schema.Struct({
+  baudRate: Schema.optionalKey(SerialConfig.fields.baudRate),
+  dataBits: Schema.optionalKey(SerialConfig.fields.dataBits),
+  stopBits: Schema.optionalKey(SerialConfig.fields.stopBits),
+  parity: Schema.optionalKey(SerialConfig.fields.parity),
+  dtr: Schema.optionalKey(SerialConfig.fields.dtr),
+  rts: Schema.optionalKey(SerialConfig.fields.rts),
+});
+
+const RuntimePollingSettingsPatch = Schema.Struct({
+  stateHz: Schema.optionalKey(PollingSettings.fields.stateHz),
+  frameHz: Schema.optionalKey(PollingSettings.fields.frameHz),
+  serialTimeoutMs: Schema.optionalKey(PollingSettings.fields.serialTimeoutMs),
+  retryAttempts: Schema.optionalKey(PollingSettings.fields.retryAttempts),
+});
+
+const RuntimeSnapshotSettingsPatch = Schema.Struct({
+  retentionDays: Schema.optionalKey(SnapshotSettings.fields.retentionDays),
+});
+
+const RuntimeLiveViewSettingsPatch = Schema.Struct({
+  bufferDurationSeconds: Schema.optionalKey(LiveViewSettings.fields.bufferDurationSeconds),
+});
+
+const RuntimeNetworkSettingsPatch = Schema.Struct({
+  port: Schema.optionalKey(NetworkSettings.fields.port),
+});
+
 export class RuntimeSettingsPatchRequest extends Schema.Class<RuntimeSettingsPatchRequest>(
   "RuntimeSettingsPatchRequest",
 )({
   theme: Schema.optionalKey(Theme),
-  defaultSerialConfig: Schema.optionalKey(SerialConfig),
-  polling: Schema.optionalKey(PollingSettings),
-  snapshots: Schema.optionalKey(SnapshotSettings),
-  liveView: Schema.optionalKey(LiveViewSettings),
-  network: Schema.optionalKey(NetworkSettings),
+  defaultSerialConfig: Schema.optionalKey(RuntimeSerialConfigPatch),
+  polling: Schema.optionalKey(RuntimePollingSettingsPatch),
+  snapshots: Schema.optionalKey(RuntimeSnapshotSettingsPatch),
+  liveView: Schema.optionalKey(RuntimeLiveViewSettingsPatch),
+  network: Schema.optionalKey(RuntimeNetworkSettingsPatch),
 }) {}
 
 export class RuntimeApiError extends Schema.TaggedErrorClass<RuntimeApiError>("RuntimeApiError")(

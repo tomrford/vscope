@@ -711,6 +711,10 @@ const viewSettingsDialog = (model: Model, h: H): Html => {
             viewSettingsCheckbox(h, "Assert RTS", draft.rts, SettingsRtsToggled()),
           ]),
           viewSettingsSection(h, "Polling", [
+            h.p(
+              [...sx(h, appStyles.helperText)],
+              ["These values are used the next time a device connects."],
+            ),
             h.div(
               [...sx(h, appStyles.settingsFields)],
               [
