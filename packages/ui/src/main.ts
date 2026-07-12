@@ -14,14 +14,16 @@ import {
   Model,
   RefreshPortsRequested,
   RtValueChanged,
+  RtValueCommitted,
   RunRequested,
   SaveSnapshotRequested,
   SelectedPortChanged,
   SetChannelMapRequested,
-  SetRtValuesRequested,
   SetTimingRequested,
   SetTriggerRequested,
+  SnapshotCompareToggled,
   SnapshotLabelChanged,
+  SnapshotPlotMounted,
   StopRequested,
   TimingPreTriggerChanged,
   TimingTotalChanged,
@@ -33,8 +35,10 @@ import {
   update,
 } from "./model.ts";
 import type { MenuId, Message } from "./model.ts";
-import { acquireLivePlot, releaseLivePlot } from "./liveplot.ts";
-import { appStyles, chartColors, sx } from "./styles.ts";
+import { acquireLivePlot, channelColor, releaseLivePlot } from "./liveplot.ts";
+import { liveHref, routeSnapshotIds, snapshotsHref, type SnapshotsRoute } from "./route.ts";
+import { acquireSnapshotPlot, releaseSnapshotPlot, snapshotChannelLabels } from "./snapshotplot.ts";
+import { appStyles, sx } from "./styles.ts";
 
 export { Model, init, update };
 export type { Message };
@@ -53,6 +57,18 @@ const MountLivePlot = Mount.define(
     (element) =>
       Effect.acquireRelease(acquireLivePlot(element, channel), releaseLivePlot).pipe(
         Effect.as(LivePlotMounted()),
+      ),
+);
+
+const MountSnapshotPlot = Mount.define(
+  "MountSnapshotPlot",
+  { channel: Schema.Int },
+  SnapshotPlotMounted,
+)(
+  ({ channel }) =>
+    (element) =>
+      Effect.acquireRelease(acquireSnapshotPlot(element, channel), releaseSnapshotPlot).pipe(
+        Effect.as(SnapshotPlotMounted()),
       ),
 );
 
@@ -130,19 +146,7 @@ const viewHeader = (model: Model, h: H): Html =>
   h.header(
     [...sx(h, appStyles.header)],
     [
-      h.div(
-        [...sx(h, appStyles.brand)],
-        [
-          h.div([...sx(h, appStyles.brandMark)], []),
-          h.div(
-            [],
-            [
-              h.h1([...sx(h, appStyles.brandName)], ["vscope"]),
-              h.p([...sx(h, appStyles.brandSub)], [appReadiness(model)]),
-            ],
-          ),
-        ],
-      ),
+      viewBrand(h, appReadiness(model)),
       h.div([...sx(h, appStyles.spacer)], []),
       viewConnection(model, h),
       viewStateBadge(model, h),
@@ -308,13 +312,13 @@ const viewDock = (model: Model, h: H): Html =>
           viewMenuButton(model, h, "timing", timebaseButtonLabel(model), viewTimingPopover),
           viewMenuButton(model, h, "trigger", triggerButtonLabel(model), viewTriggerPopover),
           viewMenuButton(model, h, "channels", "Channels", viewChannelsPopover),
-          viewMenuButton(model, h, "rt", "RT buffers", viewRtPopover),
+          viewMenuButton(model, h, "rt", "RT buffers", viewRtDialog),
           viewMenuButton(
             model,
             h,
             "snapshots",
             `Snapshots (${model.snapshots.length})`,
-            viewSnapshotsPopover,
+            viewSnapshotsDialog,
             false,
           ),
           viewMenuButton(
@@ -492,34 +496,48 @@ const viewChannelsPopover = (model: Model, h: H): Html => {
   );
 };
 
-const viewRtPopover = (model: Model, h: H): Html => {
+const viewRtDialog = (model: Model, h: H): Html => {
   const labels = model.activeDevice?.rtLabels ?? [];
-  return h.div(
-    [...sx(h, appStyles.popoverPanel, appStyles.popoverWide)],
+  return h.section(
+    [...sx(h, appStyles.dialog)],
     [
-      viewPopoverHeader(h, "RT buffers", `${model.rtValueDrafts.length} values`),
       h.div(
-        [...sx(h, appStyles.popoverList)],
-        model.rtValueDrafts.map((value, index) =>
-          h.label(
-            [h.Key(String(index)), ...sx(h, appStyles.rtRow)],
+        [...sx(h, appStyles.dialogHeader)],
+        [
+          h.div(
+            [],
             [
-              h.span([...sx(h, appStyles.mappingIndex)], [labels[index] || `RT ${index + 1}`]),
-              h.input([
-                h.Attribute("type", "number"),
-                ...sx(h, appStyles.input),
-                h.Value(value),
-                h.OnInput((next) => RtValueChanged({ index, value: next })),
-                h.Disabled(!canWriteRt(model)),
-              ]),
+              h.h2([...sx(h, appStyles.dialogTitle)], ["RT buffers"]),
+              h.p(
+                [...sx(h, appStyles.helperText)],
+                ["Each value writes to the device as soon as the field is committed"],
+              ),
             ],
           ),
-        ),
+          viewButton(h, "Close", MenuClosed(), { small: true }),
+        ],
       ),
-      viewButton(h, "Write values", SetRtValuesRequested(), {
-        variant: "primary",
-        disabled: !canWriteRt(model),
-      }),
+      model.rtValueDrafts.length === 0
+        ? h.div([...sx(h, appStyles.tableEmpty)], ["The connected device exposes no RT buffers."])
+        : h.div(
+            [...sx(h, appStyles.rtGrid)],
+            model.rtValueDrafts.map((value, index) =>
+              h.label(
+                [h.Key(String(index)), ...sx(h, appStyles.field)],
+                [
+                  h.span([...sx(h, appStyles.fieldLabel)], [labels[index] || `RT ${index + 1}`]),
+                  h.input([
+                    h.Attribute("type", "number"),
+                    ...sx(h, appStyles.input),
+                    h.Value(value),
+                    h.OnInput((next) => RtValueChanged({ index, value: next })),
+                    h.OnChange((next) => RtValueCommitted({ index, value: next })),
+                    h.Disabled(!canWriteRt(model)),
+                  ]),
+                ],
+              ),
+            ),
+          ),
     ],
   );
 };
@@ -548,9 +566,30 @@ const viewSaveSnapshotPopover = (model: Model, h: H): Html =>
     ],
   );
 
-const viewSnapshotsPopover = (model: Model, h: H): Html =>
+const viewLinkButton = (
+  h: H,
+  label: string,
+  href: string,
+  options: { readonly primary?: boolean; readonly small?: boolean } = {},
+): Html =>
+  h.a(
+    [
+      h.Href(href),
+      h.Target("_blank"),
+      ...sx(
+        h,
+        appStyles.btn,
+        appStyles.linkBtn,
+        options.small && appStyles.btnSmall,
+        options.primary && appStyles.btnPrimary,
+      ),
+    ],
+    [label],
+  );
+
+const viewSnapshotsDialog = (model: Model, h: H): Html =>
   h.section(
-    [...sx(h, appStyles.snapshotDialog)],
+    [...sx(h, appStyles.dialog)],
     [
       h.div(
         [...sx(h, appStyles.dialogHeader)],
@@ -559,10 +598,26 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
             [],
             [
               h.h2([...sx(h, appStyles.dialogTitle)], ["Snapshots"]),
-              h.p([...sx(h, appStyles.helperText)], ["Saved high-resolution captures"]),
+              h.p(
+                [...sx(h, appStyles.helperText)],
+                ["Saved high-resolution captures · select two or more to compare"],
+              ),
             ],
           ),
-          viewButton(h, "Close", MenuClosed(), { small: true }),
+          h.div(
+            [...sx(h, appStyles.cluster)],
+            [
+              model.compareSelection.length >= 2
+                ? viewLinkButton(
+                    h,
+                    `Compare (${model.compareSelection.length})`,
+                    snapshotsHref(model.compareSelection),
+                    { primary: true, small: true },
+                  )
+                : null,
+              viewButton(h, "Close", MenuClosed(), { small: true }),
+            ],
+          ),
         ],
       ),
       h.div(
@@ -576,8 +631,8 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
                 [
                   h.tr(
                     [],
-                    ["Name", "Device", "Channels", "Samples", "Duration", "Created"].map((label) =>
-                      h.th([...sx(h, appStyles.tableHead)], [label]),
+                    ["", "Name", "Device", "Channels", "Samples", "Duration", "Created", ""].map(
+                      (label) => h.th([...sx(h, appStyles.tableHead)], [label]),
                     ),
                   ),
                 ],
@@ -590,7 +645,7 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
                         [],
                         [
                           h.td(
-                            [h.Attribute("colspan", "6"), ...sx(h, appStyles.tableEmpty)],
+                            [h.Attribute("colspan", "8"), ...sx(h, appStyles.tableEmpty)],
                             ["No saved snapshots."],
                           ),
                         ],
@@ -600,6 +655,17 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
                       h.tr(
                         [h.Key(snapshot.id), ...sx(h, appStyles.tableRow)],
                         [
+                          h.td(
+                            [...sx(h, appStyles.tableCell)],
+                            [
+                              h.input([
+                                h.Attribute("type", "checkbox"),
+                                h.Checked(model.compareSelection.includes(snapshot.id)),
+                                h.OnClick(SnapshotCompareToggled({ id: snapshot.id })),
+                                h.AriaLabel(`Select ${snapshot.label} for comparison`),
+                              ]),
+                            ],
+                          ),
                           h.td(
                             [...sx(h, appStyles.tableCell, appStyles.tableName)],
                             [snapshot.label],
@@ -618,6 +684,14 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
                             [`${formatNumber(snapshot.totalDurationSeconds)} s`],
                           ),
                           h.td([...sx(h, appStyles.tableCell)], [formatDate(snapshot.createdAt)]),
+                          h.td(
+                            [...sx(h, appStyles.tableCell)],
+                            [
+                              viewLinkButton(h, "View", snapshotsHref([snapshot.id]), {
+                                small: true,
+                              }),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -629,45 +703,188 @@ const viewSnapshotsPopover = (model: Model, h: H): Html =>
     ],
   );
 
-export const view = (model: Model): Document => {
-  const h = html<Message>();
-  return {
-    title: "vscope",
-    body: h.div(
-      [...sx(h, appStyles.root)],
-      [
-        h.div(
-          [...sx(h, appStyles.shell)],
-          [
-            viewHeader(model, h),
-            h.main(
-              [...sx(h, appStyles.body)],
-              [
-                viewScreen(model, h),
-                model.error ? h.div([...sx(h, appStyles.errorBanner)], [model.error]) : null,
-                viewDock(model, h),
-              ],
-            ),
-          ],
-        ),
-        model.openMenu
-          ? h.button(
-              [
-                h.Type("button"),
-                h.OnClick(MenuClosed()),
-                h.AriaLabel("Close menu"),
-                ...sx(h, appStyles.backdrop),
-              ],
-              [],
-            )
-          : null,
-      ],
-    ),
-  };
+const viewBrand = (h: H, subtitle: string): Html =>
+  h.div(
+    [...sx(h, appStyles.brand)],
+    [
+      h.div([...sx(h, appStyles.brandMark)], []),
+      h.div(
+        [],
+        [
+          h.h1([...sx(h, appStyles.brandName)], ["vscope"]),
+          h.p([...sx(h, appStyles.brandSub)], [subtitle]),
+        ],
+      ),
+    ],
+  );
+
+const viewViewerHeader = (h: H, subtitle: string, meta: string): Html =>
+  h.header(
+    [...sx(h, appStyles.header)],
+    [
+      viewBrand(h, subtitle),
+      h.div([...sx(h, appStyles.spacer)], []),
+      h.span([...sx(h, appStyles.miniStatus)], [meta]),
+      h.a(
+        [h.Href(liveHref()), ...sx(h, appStyles.btn, appStyles.btnSmall, appStyles.linkBtn)],
+        ["Live scope"],
+      ),
+    ],
+  );
+
+const viewerIssues = (model: Model, ids: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const missing =
+    model.snapshots.length === 0
+      ? []
+      : ids
+          .filter((id) => !model.snapshots.some((snapshot) => snapshot.id === id))
+          .map((id) => `Unknown snapshot id ${id}`);
+  const failed = ids.flatMap((id) => {
+    const load = model.snapshotLoads[id];
+    if (load?.status !== "failed") return [];
+    const label = model.snapshots.find((snapshot) => snapshot.id === id)?.label ?? id;
+    return [`${label}: ${load.message ?? "sample download failed"}`];
+  });
+  return [...missing, ...failed];
 };
 
-const channelColor = (channel: number): string =>
-  chartColors[channel % chartColors.length] ?? chartColors[0];
+const viewerEmptyText = (model: Model, ids: ReadonlyArray<string>): string => {
+  if (ids.length === 0) {
+    return "No snapshots selected. Open one from the Snapshots dialog on the live scope.";
+  }
+  return model.snapshots.length === 0 ? "Loading snapshot index…" : "Snapshot not found.";
+};
+
+const viewSnapshotViewer = (model: Model, route: SnapshotsRoute, h: H): Html => {
+  const ids = routeSnapshotIds(route);
+  const records = ids.flatMap((id) => {
+    const record = model.snapshots.find((snapshot) => snapshot.id === id);
+    return record ? [record] : [];
+  });
+  const channelCount = records.reduce(
+    (max, record) => Math.max(max, record.sample.channelCount),
+    0,
+  );
+  const labels = records[0] ? snapshotChannelLabels(records[0]) : [];
+  const issues = viewerIssues(model, ids);
+
+  return h.div(
+    [...sx(h, appStyles.shell)],
+    [
+      viewViewerHeader(h, "snapshot viewer", records.map((record) => record.label).join(" · ")),
+      h.main(
+        [...sx(h, appStyles.body)],
+        [
+          h.div(
+            [...sx(h, appStyles.screen)],
+            channelCount === 0
+              ? [h.div([...sx(h, appStyles.plotEmpty)], [viewerEmptyText(model, ids)])]
+              : Array.from({ length: channelCount }, (_, channel) =>
+                  h.section(
+                    [h.Key(String(channel)), ...sx(h, appStyles.signalRow)],
+                    [
+                      h.div(
+                        [...sx(h, appStyles.plotViewport)],
+                        [
+                          h.div(
+                            [
+                              ...sx(h, appStyles.plotLegend),
+                              h.Style({ color: channelColor(channel) }),
+                            ],
+                            [`${channel + 1}. ${labels[channel] ?? `CH${channel + 1}`}`],
+                          ),
+                          h.canvas(
+                            [
+                              h.AriaLabel(
+                                `Snapshot channel ${channel + 1}: ${labels[channel] ?? ""}`,
+                              ),
+                              h.OnMount(MountSnapshotPlot({ channel })),
+                              ...sx(h, appStyles.plotCanvas),
+                            ],
+                            [],
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+          ),
+          issues.length > 0 ? h.div([...sx(h, appStyles.errorBanner)], [issues.join(" · ")]) : null,
+          h.p(
+            [...sx(h, appStyles.viewerHint)],
+            [
+              records.length > 1
+                ? "Scroll to zoom · drag to pan · double-click to reset · later captures draw dimmed"
+                : "Scroll to zoom · drag to pan · double-click to reset",
+            ],
+          ),
+        ],
+      ),
+    ],
+  );
+};
+
+const viewNotFound = (path: string, h: H): Html =>
+  h.div(
+    [...sx(h, appStyles.shell)],
+    [
+      viewViewerHeader(h, "not found", ""),
+      h.main(
+        [...sx(h, appStyles.body)],
+        [h.div([...sx(h, appStyles.plotEmpty)], [`No page at ${path}.`])],
+      ),
+    ],
+  );
+
+const viewLiveContent = (model: Model, h: H): ReadonlyArray<Html | null> => [
+  h.div(
+    [...sx(h, appStyles.shell)],
+    [
+      viewHeader(model, h),
+      h.main(
+        [...sx(h, appStyles.body)],
+        [
+          viewScreen(model, h),
+          model.error ? h.div([...sx(h, appStyles.errorBanner)], [model.error]) : null,
+          viewDock(model, h),
+        ],
+      ),
+    ],
+  ),
+  model.openMenu
+    ? h.button(
+        [
+          h.Type("button"),
+          h.OnClick(MenuClosed()),
+          h.AriaLabel("Close menu"),
+          ...sx(h, appStyles.backdrop),
+        ],
+        [],
+      )
+    : null,
+];
+
+export const view = (model: Model): Document => {
+  const h = html<Message>();
+  const page = Match.value(model.route).pipe(
+    Match.withReturnType<{
+      readonly title: string;
+      readonly content: ReadonlyArray<Html | null>;
+    }>(),
+    Match.tagsExhaustive({
+      LiveRoute: () => ({ title: "vscope", content: viewLiveContent(model, h) }),
+      SnapshotsRoute: (route) => ({
+        title: "vscope · snapshots",
+        content: [viewSnapshotViewer(model, route, h)],
+      }),
+      NotFoundRoute: ({ path }) => ({ title: "vscope", content: [viewNotFound(path, h)] }),
+    }),
+  );
+  return {
+    title: page.title,
+    body: h.div([...sx(h, appStyles.root)], [...page.content]),
+  };
+};
 
 const timebaseButtonLabel = (model: Model): string => {
   const timing = model.config?.timing;

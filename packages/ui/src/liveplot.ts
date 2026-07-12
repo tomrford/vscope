@@ -6,7 +6,12 @@ import {
 } from "@vscope/liveplot";
 import { Effect } from "effect";
 
-import { chartColors } from "./theme.stylex.ts";
+// Per-channel trace colours, indexed by scope channel. Plain values rather
+// than theme vars: the canvas engine needs concrete colours at runtime.
+const chartColors = ["#2563eb", "#c026d3", "#059669", "#d97706", "#7c3aed"] as const;
+
+export const channelColor = (channel: number): string =>
+  chartColors[channel % chartColors.length] ?? chartColors[0];
 
 export interface LiveFrameInput {
   readonly path: string;
@@ -32,7 +37,7 @@ const seriesFor = (channel: number): Array<LiveSeries> => [
   {
     id: `channel-${channel}`,
     label: labels[channel] ?? `Channel ${channel + 1}`,
-    color: chartColors[channel % chartColors.length] ?? chartColors[0],
+    color: channelColor(channel),
     points: channelHistory[channel] ?? [],
   },
 ];

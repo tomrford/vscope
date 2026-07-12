@@ -12,8 +12,14 @@ import {
 import { Cause, Effect, Match, Schema } from "effect";
 import * as Command from "foldkit/command";
 import { m } from "foldkit/message";
+import * as Navigation from "foldkit/navigation";
+import { UrlRequest } from "foldkit/navigation";
+import * as UrlModule from "foldkit/url";
+import { Url } from "foldkit/url";
 
 import { RuntimeClient, type RuntimeRpc } from "./client.ts";
+import { Route, parseRoute, routeSnapshotIds } from "./route.ts";
+import { loadSnapshotSamples } from "./snapshotplot.ts";
 
 // Which grouped-settings popover is open. Ephemeral view state, but kept in the
 // Model so open/close is explicit, testable, and survives a render.
@@ -37,14 +43,22 @@ export const ControlAction = Schema.Literals([
   "saveSnapshot",
   "setTiming",
   "setTrigger",
-  "setRtValues",
   "setChannelMap",
 ]);
 export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
 
 const BusyState = Schema.NullOr(ControlAction);
 
+// Load status per snapshot id on the viewer route. The decoded samples
+// themselves live in the snapshotplot store, not the model.
+export const SnapshotLoad = Schema.Struct({
+  status: Schema.Literals(["loading", "loaded", "failed"]),
+  message: Schema.NullOr(Schema.String),
+});
+export type SnapshotLoad = Schema.Schema.Type<typeof SnapshotLoad>;
+
 export const Model = Schema.Struct({
+  route: Route,
   app: Schema.NullOr(RuntimeAppDto),
   ports: Schema.Array(RuntimePortInfo),
   activeDevice: Schema.NullOr(RuntimeActiveDevice),
@@ -62,6 +76,8 @@ export const Model = Schema.Struct({
   rtValueDrafts: Schema.Array(Schema.String),
   channelMapDraft: Schema.Array(Schema.String),
   snapshotLabelDraft: Schema.String,
+  compareSelection: Schema.Array(Schema.String),
+  snapshotLoads: Schema.Record(Schema.String, SnapshotLoad),
   openMenu: Schema.NullOr(MenuId),
   busy: BusyState,
   error: Schema.NullOr(Schema.String),
@@ -69,6 +85,23 @@ export const Model = Schema.Struct({
 
 export type Model = Schema.Schema.Type<typeof Model>;
 
+export const UrlRequested = m("UrlRequested", {
+  request: UrlRequest,
+});
+export const RouteChanged = m("RouteChanged", {
+  url: Url,
+});
+export const NavigationDone = m("NavigationDone");
+export const SnapshotSamplesLoaded = m("SnapshotSamplesLoaded", {
+  id: Schema.String,
+});
+export const SnapshotSamplesFailed = m("SnapshotSamplesFailed", {
+  id: Schema.String,
+  message: Schema.String,
+});
+export const SnapshotCompareToggled = m("SnapshotCompareToggled", {
+  id: Schema.String,
+});
 export const AppChanged = m("AppChanged", {
   app: RuntimeAppDto,
 });
@@ -94,8 +127,13 @@ export const FrameReceived = m("FrameReceived", {
   frame: Schema.NullOr(RuntimeFramePayload),
 });
 export const LivePlotMounted = m("LivePlotMounted");
+export const SnapshotPlotMounted = m("SnapshotPlotMounted");
 export const RuntimeLinkDown = m("RuntimeLinkDown");
 export const CommandSettled = m("CommandSettled");
+export const RtWriteSettled = m("RtWriteSettled");
+export const RtWriteFailed = m("RtWriteFailed", {
+  message: Schema.String,
+});
 export const RefreshPortsFailed = m("RefreshPortsFailed", {
   message: Schema.String,
 });
@@ -131,6 +169,10 @@ export const RtValueChanged = m("RtValueChanged", {
   index: Schema.Int,
   value: Schema.String,
 });
+export const RtValueCommitted = m("RtValueCommitted", {
+  index: Schema.Int,
+  value: Schema.String,
+});
 export const ChannelMapChanged = m("ChannelMapChanged", {
   channel: Schema.Int,
   value: Schema.String,
@@ -147,10 +189,15 @@ export const TriggerRequested = m("TriggerRequested");
 export const SaveSnapshotRequested = m("SaveSnapshotRequested");
 export const SetTimingRequested = m("SetTimingRequested");
 export const SetTriggerRequested = m("SetTriggerRequested");
-export const SetRtValuesRequested = m("SetRtValuesRequested");
 export const SetChannelMapRequested = m("SetChannelMapRequested");
 
 export const Message = Schema.Union([
+  UrlRequested,
+  RouteChanged,
+  NavigationDone,
+  SnapshotSamplesLoaded,
+  SnapshotSamplesFailed,
+  SnapshotCompareToggled,
   AppChanged,
   PortsLoaded,
   PortsRescanned,
@@ -160,8 +207,11 @@ export const Message = Schema.Union([
   DeviceStatusReceived,
   FrameReceived,
   LivePlotMounted,
+  SnapshotPlotMounted,
   RuntimeLinkDown,
   CommandSettled,
+  RtWriteSettled,
+  RtWriteFailed,
   RefreshPortsFailed,
   PortsRescanFailed,
   RuntimeCommandFailed,
@@ -174,6 +224,7 @@ export const Message = Schema.Union([
   TriggerThresholdChanged,
   TriggerModeChanged,
   RtValueChanged,
+  RtValueCommitted,
   ChannelMapChanged,
   SnapshotLabelChanged,
   RefreshPortsRequested,
@@ -185,7 +236,6 @@ export const Message = Schema.Union([
   SaveSnapshotRequested,
   SetTimingRequested,
   SetTriggerRequested,
-  SetRtValuesRequested,
   SetChannelMapRequested,
 ]);
 export type Message = Schema.Schema.Type<typeof Message>;
@@ -219,6 +269,37 @@ const settledCommand = (run: RuntimeOperation<unknown>) =>
     () => CommandSettled(),
     (message) => RuntimeCommandFailed({ message }),
   );
+
+const PushUrl = Command.define(
+  "PushUrl",
+  { url: Schema.String },
+  Message,
+)(({ url }) => Navigation.pushUrl(url).pipe(Effect.as(NavigationDone())));
+
+const LoadPage = Command.define(
+  "LoadPage",
+  { href: Schema.String },
+  Message,
+)(({ href }) => Navigation.load(href).pipe(Effect.as(NavigationDone())));
+
+const LoadSnapshotSamples = Command.define(
+  "LoadSnapshotSamples",
+  {
+    id: Schema.String,
+    durationSeconds: Schema.Finite,
+    sampleRateHz: Schema.NullOr(Schema.Finite),
+  },
+  Message,
+)((payload) =>
+  loadSnapshotSamples(payload).pipe(
+    Effect.timeout("30 seconds"),
+    Effect.matchCause({
+      onFailure: (cause) =>
+        SnapshotSamplesFailed({ id: payload.id, message: errorReason(Cause.squash(cause)) }),
+      onSuccess: () => SnapshotSamplesLoaded({ id: payload.id }),
+    }),
+  ),
+);
 
 const RefreshPorts = Command.define(
   "RefreshPorts",
@@ -288,20 +369,18 @@ const SetTrigger = Command.define(
   Message,
 )((trigger) => settledCommand((rpc) => rpc["device.setTrigger"](trigger)));
 
-const RtValueWrite = Schema.Struct({
-  index: Schema.Int,
-  value: Schema.Finite,
-});
-
-const SetRtValues = Command.define(
-  "SetRtValues",
-  { writes: Schema.Array(RtValueWrite) },
+// RT writes run without occupying the busy state so the dialog stays live
+// while a write is in flight; they settle through their own messages so they
+// never clear a concurrent command's busy marker.
+const WriteRtValue = Command.define(
+  "WriteRtValue",
+  { index: Schema.Int, value: Schema.Finite },
   Message,
-)(({ writes }) =>
-  settledCommand((rpc) =>
-    Effect.forEach(writes, ({ index, value }) => rpc["device.setRtValue"]({ index, value }), {
-      discard: true,
-    }),
+)(({ index, value }) =>
+  runtimeCommand(
+    (rpc) => rpc["device.setRtValue"]({ index, value }),
+    () => RtWriteSettled(),
+    (message) => RtWriteFailed({ message }),
   ),
 );
 
@@ -324,8 +403,9 @@ const SetChannelMap = Command.define(
   ),
 );
 
-export const init = (): UpdateResult => [
+export const init = (url: Url): UpdateResult => [
   {
+    route: parseRoute(url),
     app: null,
     ports: [],
     activeDevice: null,
@@ -343,6 +423,8 @@ export const init = (): UpdateResult => [
     rtValueDrafts: [],
     channelMapDraft: [],
     snapshotLabelDraft: "",
+    compareSelection: [],
+    snapshotLoads: {},
     openMenu: null,
     busy: null,
     error: null,
@@ -364,9 +446,27 @@ const nextSelectedPort = (
   return ports[0]?.path ?? "";
 };
 
+const seedRtValueDrafts = (
+  config: RuntimeDeviceConfigPayload | null,
+  rtCount: number,
+): ReadonlyArray<string> => {
+  if (!config) return [];
+  const values = new Map(config.rtValues);
+  const length = Math.max(rtCount, ...config.rtValues.map(([index]) => index + 1));
+  return Array.from({ length }, (_, index) => {
+    const value = values.get(index);
+    return value === undefined ? "" : String(value);
+  });
+};
+
 const modelWithConfig = (model: Model, config: RuntimeDeviceConfigPayload | null): Model => {
   const timing = config?.timing;
   const trigger = config?.trigger;
+  const rtCount = model.activeDevice?.info?.rtCount ?? 0;
+  // RT fields write on commit, so a config emission (e.g. the echo of a write
+  // to another field) must not clobber an in-progress edit: reseed only the
+  // drafts still matching their previous seed.
+  const previousSeed = seedRtValueDrafts(model.config, rtCount);
 
   return {
     ...model,
@@ -377,17 +477,10 @@ const modelWithConfig = (model: Model, config: RuntimeDeviceConfigPayload | null
     triggerChannelDraft: trigger ? String(trigger.channel) : "",
     triggerThresholdDraft: trigger ? String(trigger.threshold) : "",
     triggerModeDraft: trigger?.mode ?? "disabled",
-    rtValueDrafts: config
-      ? Array.from(
-          {
-            length: Math.max(
-              model.activeDevice?.info?.rtCount ?? 0,
-              ...config.rtValues.map(([index]) => index + 1),
-            ),
-          },
-          (_, index) => String(config.rtValues.find(([entry]) => entry === index)?.[1] ?? ""),
-        )
-      : [],
+    rtValueDrafts: seedRtValueDrafts(config, rtCount).map((seed, index) => {
+      const draft = model.rtValueDrafts[index];
+      return draft !== undefined && draft !== previousSeed[index] ? draft : seed;
+    }),
     channelMapDraft: config?.channelMap.map(String) ?? [],
   };
 };
@@ -412,21 +505,28 @@ const failLocal = (model: Model, message: string): UpdateResult => [
   [],
 ];
 
-const changedRtValues = (
-  model: Model,
-):
-  | { readonly writes: ReadonlyArray<{ readonly index: number; readonly value: number }> }
-  | {
-      readonly error: string;
-    } => {
-  const current = new Map(model.config?.rtValues ?? []);
-  const writes: Array<{ readonly index: number; readonly value: number }> = [];
-  for (const [index, draft] of model.rtValueDrafts.entries()) {
-    const value = parseFinite(draft);
-    if (value === null) return { error: `RT ${index + 1} must be a number.` };
-    if (current.get(index) !== value) writes.push({ index, value });
-  }
-  return { writes };
+// A sample download starts once the route names an id and its record is
+// known; the route and the snapshots facet can arrive in either order.
+const withSampleLoads = (model: Model): UpdateResult => {
+  if (model.route._tag !== "SnapshotsRoute") return [model, []];
+  const pending = routeSnapshotIds(model.route).flatMap((id) => {
+    if (model.snapshotLoads[id] !== undefined) return [];
+    const record = model.snapshots.find((snapshot) => snapshot.id === id);
+    return record ? [{ id, record }] : [];
+  });
+  if (pending.length === 0) return [model, []];
+  const snapshotLoads: Record<string, SnapshotLoad> = { ...model.snapshotLoads };
+  for (const { id } of pending) snapshotLoads[id] = { status: "loading", message: null };
+  return [
+    { ...model, snapshotLoads },
+    pending.map(({ id, record }) =>
+      LoadSnapshotSamples({
+        id,
+        durationSeconds: record.totalDurationSeconds,
+        sampleRateHz: record.sampleRateHz,
+      }),
+    ),
+  ];
 };
 
 const changedChannelMap = (
@@ -453,6 +553,35 @@ export const update = (model: Model, message: Message): UpdateResult =>
   Match.value(message).pipe(
     Match.withReturnType<UpdateResult>(),
     Match.tagsExhaustive({
+      UrlRequested: ({ request }) =>
+        request._tag === "Internal"
+          ? [model, [PushUrl({ url: UrlModule.toString(request.url) })]]
+          : [model, [LoadPage({ href: request.href })]],
+      RouteChanged: ({ url }) => withSampleLoads({ ...model, route: parseRoute(url) }),
+      NavigationDone: () => [model, []],
+      SnapshotSamplesLoaded: ({ id }) => [
+        {
+          ...model,
+          snapshotLoads: { ...model.snapshotLoads, [id]: { status: "loaded", message: null } },
+        },
+        [],
+      ],
+      SnapshotSamplesFailed: ({ id, message }) => [
+        {
+          ...model,
+          snapshotLoads: { ...model.snapshotLoads, [id]: { status: "failed", message } },
+        },
+        [],
+      ],
+      SnapshotCompareToggled: ({ id }) => [
+        {
+          ...model,
+          compareSelection: model.compareSelection.includes(id)
+            ? model.compareSelection.filter((entry) => entry !== id)
+            : [...model.compareSelection, id],
+        },
+        [],
+      ],
       AppChanged: ({ app }) => [{ ...model, app, linkUp: true }, []],
       PortsLoaded: ({ ports }) => {
         const refreshSettled = model.busy === "refresh";
@@ -492,12 +621,23 @@ export const update = (model: Model, message: Message): UpdateResult =>
           : [nextModel, []];
       },
       DeviceConfigChanged: ({ config }) => [modelWithConfig(model, config), []],
-      SnapshotsChanged: ({ snapshots }) => [{ ...model, snapshots, linkUp: true }, []],
+      SnapshotsChanged: ({ snapshots }) =>
+        withSampleLoads({
+          ...model,
+          snapshots,
+          linkUp: true,
+          compareSelection: model.compareSelection.filter((id) =>
+            snapshots.some((snapshot) => snapshot.id === id),
+          ),
+        }),
       DeviceStatusReceived: ({ status }) => [{ ...model, status, linkUp: true }, []],
       FrameReceived: ({ frame }) => [{ ...model, frame }, []],
       LivePlotMounted: () => [model, []],
+      SnapshotPlotMounted: () => [model, []],
       RuntimeLinkDown: () => [{ ...model, linkUp: false }, []],
       CommandSettled: () => [{ ...model, busy: null, error: null }, []],
+      RtWriteSettled: () => [{ ...model, error: null }, []],
+      RtWriteFailed: ({ message }) => [{ ...model, error: message }, []],
       RefreshPortsFailed: ({ message }) =>
         model.busy === "refresh" ? [{ ...model, busy: null, error: message }, []] : [model, []],
       PortsRescanFailed: ({ message }) =>
@@ -533,6 +673,22 @@ export const update = (model: Model, message: Message): UpdateResult =>
         },
         [],
       ],
+      RtValueCommitted: ({ index, value }) => {
+        const seed = String(new Map(model.config?.rtValues ?? []).get(index) ?? "");
+        const withDraft = (draft: string): Model => ({
+          ...model,
+          rtValueDrafts: model.rtValueDrafts.map((entry, position) =>
+            position === index ? draft : entry,
+          ),
+        });
+        if (value.trim() === "") return [withDraft(seed), []];
+        const parsed = parseFinite(value);
+        if (parsed === null) return [{ ...model, error: `RT ${index + 1} must be a number.` }, []];
+        const normalized = withDraft(String(parsed));
+        return String(parsed) === seed
+          ? [normalized, []]
+          : [{ ...normalized, error: null }, [WriteRtValue({ index, value: parsed })]];
+      },
       ChannelMapChanged: ({ channel, value }) => [
         {
           ...model,
@@ -600,15 +756,6 @@ export const update = (model: Model, message: Message): UpdateResult =>
         return [
           { ...model, openMenu: null, busy: "setTrigger", error: null },
           [SetTrigger({ channel, threshold, mode: model.triggerModeDraft })],
-        ];
-      },
-      SetRtValuesRequested: () => {
-        const result = changedRtValues(model);
-        if ("error" in result) return failLocal(model, result.error);
-        if (result.writes.length === 0) return [{ ...model, openMenu: null, error: null }, []];
-        return [
-          { ...model, openMenu: null, busy: "setRtValues", error: null },
-          [SetRtValues({ writes: result.writes })],
         ];
       },
       SetChannelMapRequested: () => {

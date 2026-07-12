@@ -14,6 +14,8 @@ import {
   type Model,
 } from "./model.ts";
 import { ingestLiveFrame, resetLivePlot } from "./liveplot.ts";
+import { routeSnapshotIds } from "./route.ts";
+import { configureSnapshotPlots, snapshotChannelLabels } from "./snapshotplot.ts";
 
 const linkLost = "Runtime facet stream ended";
 
@@ -32,6 +34,35 @@ const frameDependencies = (model: Model) => {
     windowSeconds: model.app?.settings.liveView.bufferDurationSeconds ?? 30,
   };
 };
+
+const SnapshotViewDependency = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  durationSeconds: Schema.Finite,
+  sampleRateHz: Schema.NullOr(Schema.Finite),
+  channelCount: Schema.Int,
+  channelLabels: Schema.Array(Schema.String),
+});
+
+const snapshotViewDependencies = (model: Model) => ({
+  entries:
+    model.route._tag === "SnapshotsRoute"
+      ? routeSnapshotIds(model.route).flatMap((id) => {
+          const record = model.snapshots.find((snapshot) => snapshot.id === id);
+          if (!record) return [];
+          return [
+            {
+              id,
+              label: record.label,
+              durationSeconds: record.totalDurationSeconds,
+              sampleRateHz: record.sampleRateHz,
+              channelCount: record.sample.channelCount,
+              channelLabels: snapshotChannelLabels(record),
+            },
+          ];
+        })
+      : [],
+});
 
 const liveFacet = <A, E>(
   open: (rpc: RuntimeRpc) => Stream.Stream<A, E, never>,
@@ -101,6 +132,16 @@ export const subscriptions = Subscription.make<Model, Message, RuntimeClient>()(
           (rpc) => rpc["snapshots.index"](),
           (snapshots) => SnapshotsChanged({ snapshots }),
         ),
+    },
+  ),
+  // Pushes the viewer layout into the snapshotplot store whenever the route
+  // or the matching records change; the canvases render from that store.
+  snapshotView: entry(
+    { entries: Schema.Array(SnapshotViewDependency) },
+    {
+      modelToDependencies: snapshotViewDependencies,
+      dependenciesToStream: ({ entries }) =>
+        Stream.fromEffect(Effect.sync(() => configureSnapshotPlots(entries))).pipe(Stream.drain),
     },
   ),
   frames: entry(

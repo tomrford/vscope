@@ -6,6 +6,7 @@ import type { MakeRuntimeReturn } from "foldkit/runtime";
 
 import { RuntimeClient, RuntimeClientLive } from "./client.ts";
 import { Model, init, update, view } from "./main.ts";
+import { Message, RouteChanged, UrlRequested } from "./model.ts";
 import { subscriptions } from "./subscriptions.ts";
 
 // In dev the StyleX styles are served by the plugin middleware and re-fetched
@@ -27,6 +28,13 @@ const program: MakeRuntimeReturn = {
         update,
         view,
         subscriptions,
+        routing: {
+          onUrlRequest: (request) => UrlRequested({ request }),
+          onUrlChange: (url) => RouteChanged({ url }),
+        },
+        // Lets DevTools (and its MCP bridge) decode and dispatch Messages,
+        // e.g. driving the UI without a physical device attached.
+        devTools: { Message, excludeFromHistory: ["FrameReceived"] },
         // Foldkit provides this layer separately to commands and subscriptions,
         // so the effectful socket acquisition stays outside the program runtime.
         resources: Layer.succeed(RuntimeClient, client),

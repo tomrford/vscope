@@ -13,7 +13,8 @@ export default defineConfig({
       "/mcp": "http://127.0.0.1:5174",
       // The RPC route is a websocket upgrade, not plain HTTP.
       "/rpc": { target: "http://127.0.0.1:5174", ws: true },
-      "/snapshots": "http://127.0.0.1:5174",
+      // Only sample downloads go to the daemon; /snapshots itself is a UI route.
+      "^/snapshots/.+/samples$": "http://127.0.0.1:5174",
     },
   },
   build: {

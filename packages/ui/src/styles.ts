@@ -2,8 +2,7 @@ import * as stylex from "@stylexjs/stylex";
 import type { Attribute } from "foldkit/html";
 import type { html } from "foldkit/html";
 
-export { chartColors, colors } from "./theme.stylex.ts";
-import { colors } from "./theme.stylex.ts";
+import { colors, shadows } from "./theme.stylex.ts";
 
 type StyleInput = stylex.StyleXStyles | false | null | undefined;
 type HtmlFactory<Message> = ReturnType<typeof html<Message>>;
@@ -136,7 +135,7 @@ export const appStyles = stylex.create({
     borderStyle: "solid",
     borderColor: colors.line,
     borderRadius: 4,
-    backgroundColor: "rgba(255, 255, 255, 0.92)",
+    backgroundColor: colors.legendBg,
     fontSize: 10,
     lineHeight: "14px",
     fontWeight: 650,
@@ -193,26 +192,34 @@ export const appStyles = stylex.create({
     },
   },
   btnSmall: { minHeight: 28, padding: "0 9px", fontSize: 11 },
+  linkBtn: { textDecoration: "none" },
+  viewerHint: {
+    margin: 0,
+    color: colors.textSoft,
+    fontSize: 11,
+    lineHeight: "16px",
+    textAlign: "center",
+  },
   btnPrimary: {
     borderColor: colors.text,
     backgroundColor: colors.text,
     color: colors.panel,
-    ":hover": { backgroundColor: "#27272a" },
+    ":hover": { backgroundColor: colors.textRaised },
   },
   btnRun: {
-    borderColor: "#bbf7d0",
+    borderColor: colors.runBorder,
     backgroundColor: colors.runSoft,
     color: colors.run,
-    ":hover": { backgroundColor: "#dcfce7" },
+    ":hover": { backgroundColor: colors.runSoftRaised },
   },
   btnStop: {
-    borderColor: "#fecaca",
+    borderColor: colors.dangerBorder,
     backgroundColor: colors.dangerSoft,
     color: colors.danger,
-    ":hover": { backgroundColor: "#fee2e2" },
+    ":hover": { backgroundColor: colors.dangerSoftRaised },
   },
   btnActive: {
-    borderColor: "#bfdbfe",
+    borderColor: colors.accentBorder,
     color: colors.accentStrong,
     backgroundColor: colors.accentSoft,
   },
@@ -237,7 +244,7 @@ export const appStyles = stylex.create({
       borderColor: colors.accent,
       outlineWidth: 2,
       outlineStyle: "solid",
-      outlineColor: "#dbeafe",
+      outlineColor: colors.focusRing,
       outlineOffset: 1,
     },
   },
@@ -259,7 +266,7 @@ export const appStyles = stylex.create({
       borderColor: colors.accent,
       outlineWidth: 2,
       outlineStyle: "solid",
-      outlineColor: "#dbeafe",
+      outlineColor: colors.focusRing,
       outlineOffset: 1,
     },
   },
@@ -279,8 +286,8 @@ export const appStyles = stylex.create({
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.lineStrong,
-    backgroundColor: "#ffffff",
-    boxShadow: "0 18px 48px rgba(24, 24, 27, 0.18), 0 2px 8px rgba(24, 24, 27, 0.08)",
+    backgroundColor: colors.panel,
+    boxShadow: shadows.popover,
   },
   popoverWide: { width: { default: 380, "@media (max-width: 520px)": "calc(100vw - 28px)" } },
   saveSnapshotPopover: { right: 0, left: "auto" },
@@ -312,12 +319,6 @@ export const appStyles = stylex.create({
     alignItems: "center",
     gap: 9,
   },
-  rtRow: {
-    display: "grid",
-    gridTemplateColumns: "minmax(0, 1fr) 128px",
-    alignItems: "center",
-    gap: 9,
-  },
   popoverActions: { display: "flex", justifyContent: "flex-end", gap: 7 },
   mappingIndex: {
     overflow: "hidden",
@@ -327,7 +328,7 @@ export const appStyles = stylex.create({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  snapshotDialog: {
+  dialog: {
     position: "fixed",
     inset: { default: 28, "@media (max-width: 680px)": 10 },
     zIndex: 60,
@@ -339,8 +340,17 @@ export const appStyles = stylex.create({
     borderWidth: 1,
     borderStyle: "solid",
     borderColor: colors.lineStrong,
-    backgroundColor: "#ffffff",
-    boxShadow: "0 24px 72px rgba(24, 24, 27, 0.24)",
+    backgroundColor: colors.panel,
+    boxShadow: shadows.dialog,
+  },
+  rtGrid: {
+    minHeight: 0,
+    overflowY: "auto",
+    alignContent: "start",
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+    gap: 14,
+    paddingRight: 2,
   },
   dialogHeader: {
     display: "flex",
@@ -398,7 +408,7 @@ export const appStyles = stylex.create({
     borderWidth: 0,
     padding: 0,
     cursor: "default",
-    backgroundColor: "rgba(24, 24, 27, 0.24)",
+    backgroundColor: colors.overlay,
   },
   stateBadge: {
     display: "inline-flex",
@@ -417,11 +427,11 @@ export const appStyles = stylex.create({
     letterSpacing: 0.25,
     textTransform: "uppercase",
   },
-  stateRun: { backgroundColor: colors.runSoft, color: colors.run, borderColor: "#bbf7d0" },
+  stateRun: { backgroundColor: colors.runSoft, color: colors.run, borderColor: colors.runBorder },
   stateAcquire: {
     backgroundColor: colors.acquireSoft,
     color: colors.acquire,
-    borderColor: "#fde68a",
+    borderColor: colors.acquireBorder,
   },
   stateHalt: {
     backgroundColor: colors.haltSoft,
@@ -431,16 +441,20 @@ export const appStyles = stylex.create({
   stateReady: {
     backgroundColor: colors.accentSoft,
     color: colors.accentStrong,
-    borderColor: "#bfdbfe",
+    borderColor: colors.accentBorder,
   },
-  stateFault: { backgroundColor: colors.dangerSoft, color: colors.danger, borderColor: "#fecaca" },
+  stateFault: {
+    backgroundColor: colors.dangerSoft,
+    color: colors.danger,
+    borderColor: colors.dangerBorder,
+  },
   dot: { width: 6, height: 6, borderRadius: 999, backgroundColor: "currentColor" },
   errorBanner: {
     padding: "7px 11px",
     borderRadius: 6,
     borderWidth: 1,
     borderStyle: "solid",
-    borderColor: "#fecaca",
+    borderColor: colors.dangerBorder,
     backgroundColor: colors.dangerSoft,
     color: colors.danger,
     fontSize: 12,

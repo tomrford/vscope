@@ -1,4 +1,5 @@
 import {
+  PersistentId,
   RuntimeActiveDevice,
   RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
@@ -6,8 +7,12 @@ import {
   RuntimePortInfo,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
+  SnapshotRecord,
+  Timestamp,
 } from "@vscope/shared";
 import { describe, expect, it } from "@effect/vitest";
+import { Option } from "effect";
+import * as Url from "foldkit/url";
 
 import {
   ActiveDeviceChanged,
@@ -22,17 +27,21 @@ import {
   RuntimeLinkDown,
   SaveSnapshotRequested,
   SnapshotLabelChanged,
+  SnapshotSamplesLoaded,
+  SnapshotsChanged,
   SetTimingRequested,
   SetTriggerRequested,
   SetChannelMapRequested,
-  SetRtValuesRequested,
   TimingTotalChanged,
   RtValueChanged,
+  RtValueCommitted,
   TriggerChannelChanged,
   TriggerThresholdChanged,
   init,
   update,
 } from "./model.ts";
+
+const testUrl = Option.getOrThrow(Url.fromString("http://127.0.0.1:5173/"));
 
 const activeDevice = (connected: boolean) =>
   RuntimeActiveDevice.make({
@@ -47,7 +56,7 @@ const activeDevice = (connected: boolean) =>
 
 describe("@vscope/ui model", () => {
   it("starts offline and scans ports without marking the UI busy", () => {
-    const [model, commands] = init();
+    const [model, commands] = init(testUrl);
 
     expect(model.linkUp).toBe(false);
     expect(model.busy).toBeNull();
@@ -56,7 +65,7 @@ describe("@vscope/ui model", () => {
   });
 
   it("folds facet values independently and keeps stale data on link loss", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const port = RuntimePortInfo.make({ path: "/dev/tty.test" });
     const [refreshing] = update(model, RefreshPortsRequested());
     const [backgroundFailed] = update(
@@ -84,7 +93,7 @@ describe("@vscope/ui model", () => {
   });
 
   it("rescans ports and clears status when a connected device disappears", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const [connected] = update(model, ActiveDeviceChanged({ device: activeDevice(true) }));
     const [running] = update(
       connected,
@@ -110,7 +119,7 @@ describe("@vscope/ui model", () => {
   });
 
   it("reseeds drafts only when the device config facet changes", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const [editing] = update(model, TimingTotalChanged({ value: "edited" }));
     const config = RuntimeDeviceConfigPayload.make({
       timing: RuntimeSetTimingRequest.make({
@@ -139,8 +148,8 @@ describe("@vscope/ui model", () => {
     expect(configured.rtValueDrafts).toEqual(["1", "2"]);
   });
 
-  it("creates batched commands for changed RT values and channel mappings", () => {
-    const [model] = init();
+  it("creates batched commands for changed channel mappings", () => {
+    const [model] = init(testUrl);
     const [connected] = update(model, ActiveDeviceChanged({ device: activeDevice(true) }));
     const config = RuntimeDeviceConfigPayload.make({
       timing: null,
@@ -152,19 +161,82 @@ describe("@vscope/ui model", () => {
       ],
     });
     const [configured] = update(connected, DeviceConfigChanged({ config }));
-    const [rtEdited] = update(configured, RtValueChanged({ index: 1, value: "2.5" }));
-    const [rtSaving, rtCommands] = update(rtEdited, SetRtValuesRequested());
     const [mapEdited] = update(configured, ChannelMapChanged({ channel: 1, value: "2" }));
     const [mapSaving, mapCommands] = update(mapEdited, SetChannelMapRequested());
 
-    expect(rtSaving.busy).toBe("setRtValues");
-    expect(rtCommands.map((command) => command.name)).toEqual(["SetRtValues"]);
     expect(mapSaving.busy).toBe("setChannelMap");
     expect(mapCommands.map((command) => command.name)).toEqual(["SetChannelMap"]);
   });
 
+  it("writes RT values individually on commit, skipping unchanged and blank fields", () => {
+    const [model] = init(testUrl);
+    const [connected] = update(model, ActiveDeviceChanged({ device: activeDevice(true) }));
+    const config = RuntimeDeviceConfigPayload.make({
+      timing: null,
+      trigger: null,
+      channelMap: [0],
+      rtValues: [
+        [0, 1],
+        [1, 2],
+      ],
+    });
+    const [configured] = update(connected, DeviceConfigChanged({ config }));
+    const [edited] = update(configured, RtValueChanged({ index: 1, value: "2.50" }));
+    const [committed, writeCommands] = update(
+      edited,
+      RtValueCommitted({ index: 1, value: "2.50" }),
+    );
+    const [unchanged, unchangedCommands] = update(
+      configured,
+      RtValueCommitted({ index: 0, value: "1" }),
+    );
+    const [blank, blankCommands] = update(configured, RtValueCommitted({ index: 0, value: "  " }));
+    const [invalid, invalidCommands] = update(
+      configured,
+      RtValueCommitted({ index: 0, value: "abc" }),
+    );
+
+    expect(committed.busy).toBeNull();
+    expect(committed.rtValueDrafts).toEqual(["1", "2.5"]);
+    expect(writeCommands.map((command) => command.name)).toEqual(["WriteRtValue"]);
+    expect(unchanged.rtValueDrafts).toEqual(["1", "2"]);
+    expect(unchangedCommands).toHaveLength(0);
+    expect(blank.rtValueDrafts).toEqual(["1", "2"]);
+    expect(blankCommands).toHaveLength(0);
+    expect(invalid.error).toBe("RT 1 must be a number.");
+    expect(invalidCommands).toHaveLength(0);
+  });
+
+  it("keeps dirty RT drafts when a config emission reseeds the rest", () => {
+    const [model] = init(testUrl);
+    const [connected] = update(model, ActiveDeviceChanged({ device: activeDevice(true) }));
+    const config = RuntimeDeviceConfigPayload.make({
+      timing: null,
+      trigger: null,
+      channelMap: [0],
+      rtValues: [
+        [0, 1],
+        [1, 2],
+      ],
+    });
+    const [configured] = update(connected, DeviceConfigChanged({ config }));
+    const [editing] = update(configured, RtValueChanged({ index: 1, value: "9" }));
+    const echo = RuntimeDeviceConfigPayload.make({
+      timing: null,
+      trigger: null,
+      channelMap: [0],
+      rtValues: [
+        [0, 5],
+        [1, 2],
+      ],
+    });
+    const [reseeded] = update(editing, DeviceConfigChanged({ config: echo }));
+
+    expect(reseeded.rtValueDrafts).toEqual(["5", "9"]);
+  });
+
   it("retains the latest throttled live frame for channel readouts", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const frame = RuntimeFramePayload.make({ values: [1.25, -0.5] });
     const [withFrame, commands] = update(model, FrameReceived({ frame }));
 
@@ -174,7 +246,7 @@ describe("@vscope/ui model", () => {
   });
 
   it("rejects blank numeric drafts before creating runtime commands", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const [invalidTiming, timingCommands] = update(model, SetTimingRequested());
     const [withChannel] = update(model, TriggerChannelChanged({ value: "0" }));
     const [thresholdCleared] = update(withChannel, TriggerThresholdChanged({ value: "   " }));
@@ -186,8 +258,49 @@ describe("@vscope/ui model", () => {
     expect(triggerCommands).toHaveLength(0);
   });
 
+  it("starts sample downloads when the viewer route and records are both known", () => {
+    const viewerUrl = Option.getOrThrow(
+      Url.fromString("http://127.0.0.1:5173/snapshots?ids=snap-1,snap-2"),
+    );
+    const [model] = init(viewerUrl);
+    expect(model.route._tag).toBe("SnapshotsRoute");
+
+    const snapshot = SnapshotRecord.make({
+      id: PersistentId.make("snap-1"),
+      label: "capture",
+      device: { name: "test-device" },
+      sample: {
+        format: "f32le-interleaved-v1",
+        channelCount: 2,
+        sampleCount: 4,
+        byteLength: 32,
+        stored: true,
+      },
+      sampleRateHz: 1000,
+      totalDurationSeconds: 0.004,
+      preTriggerSeconds: 0,
+      channelMap: [0, 1],
+      trigger: { threshold: 0, channel: 0, mode: "rising" },
+      rtValues: [],
+      metadata: { variables: ["a", "b"] },
+      createdAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
+      updatedAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
+    });
+    const [loading, commands] = update(model, SnapshotsChanged({ snapshots: [snapshot] }));
+
+    expect(commands.map((command) => command.name)).toEqual(["LoadSnapshotSamples"]);
+    expect(loading.snapshotLoads["snap-1"]?.status).toBe("loading");
+    expect(loading.snapshotLoads["snap-2"]).toBeUndefined();
+
+    const [loaded] = update(loading, SnapshotSamplesLoaded({ id: "snap-1" }));
+    const [again, repeatCommands] = update(loaded, SnapshotsChanged({ snapshots: [snapshot] }));
+    expect(loaded.snapshotLoads["snap-1"]?.status).toBe("loaded");
+    expect(repeatCommands).toHaveLength(0);
+    expect(again.snapshotLoads["snap-1"]?.status).toBe("loaded");
+  });
+
   it("requires a snapshot name before starting a save", () => {
-    const [model] = init();
+    const [model] = init(testUrl);
     const [blank, blankCommands] = update(model, SaveSnapshotRequested());
     const [named] = update(model, SnapshotLabelChanged({ value: "capture" }));
     const [saving, saveCommands] = update(named, SaveSnapshotRequested());
