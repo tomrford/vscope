@@ -9,7 +9,6 @@ import type {
 import type {
   SerialConnectionClosedError,
   SerialDrainError,
-  SerialFlushError,
   SerialReadError,
   SerialWriteError,
 } from "./transport";
@@ -20,7 +19,6 @@ export class VScopeTransportError extends Data.TaggedError("VScopeTransportError
     | SerialReadError
     | SerialWriteError
     | SerialDrainError
-    | SerialFlushError
     | SerialConnectionClosedError;
 }> {}
 

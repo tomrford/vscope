@@ -1,5 +1,4 @@
 import type * as Effect from "effect/Effect";
-import type * as Stream from "effect/Stream";
 import type { TriggerMode } from "@vscope/shared";
 
 import type { VScopeDeviceError } from "./errors";
@@ -12,7 +11,6 @@ export interface VScopeDeviceInfo {
   readonly isrKHz: number;
   readonly variableCount: number;
   readonly rtCount: number;
-  readonly rtBufferCapacity: number;
   readonly nameLength: number;
   readonly endianness: VScopeEndianness;
   readonly deviceName: string;
@@ -31,11 +29,7 @@ export interface VScopeTrigger {
 
 export interface VScopeControlStatus {
   readonly state: VScopeStateValue;
-  readonly requestedState: VScopeStateValue;
   readonly snapshotValid: boolean;
-  readonly requestPending: boolean;
-  readonly triggerEnabled: boolean;
-  readonly flags: number;
 }
 
 export interface VScopeSnapshotHeader {
@@ -47,7 +41,6 @@ export interface VScopeSnapshotHeader {
   readonly rtValues: ReadonlyArray<number>;
   readonly channelCount: number;
   readonly sampleCount: number;
-  readonly byteLength: number;
 }
 
 export interface VScopeStaticMetadata {
@@ -59,7 +52,6 @@ export interface VScopeStaticMetadata {
 
 export interface SnapshotBytesOptions {
   readonly header?: VScopeSnapshotHeader | undefined;
-  readonly samplesPerChunk?: number | undefined;
 }
 
 export interface OpenVScopeDeviceOptions extends OpenSerialTransportOptions {
@@ -81,7 +73,6 @@ export interface VScopeDevice {
   readonly getStatus: (
     options?: VScopeRequestOptions,
   ) => Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
-  readonly getState: Effect.Effect<VScopeStateValue, VScopeDeviceError>;
   readonly start: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly stop: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
   readonly trigger: Effect.Effect<VScopeControlStatus, VScopeDeviceError>;
@@ -89,19 +80,14 @@ export interface VScopeDevice {
     options?: VScopeRequestOptions,
   ) => Effect.Effect<ReadonlyArray<number>, VScopeDeviceError>;
   readonly getSnapshotHeader: Effect.Effect<VScopeSnapshotHeader, VScopeDeviceError>;
-  readonly snapshotBytes: (
-    options?: SnapshotBytesOptions,
-  ) => Stream.Stream<Uint8Array, VScopeDeviceError>;
   readonly collectSnapshotBytes: (
     options?: SnapshotBytesOptions,
   ) => Effect.Effect<Uint8Array, VScopeDeviceError>;
-  readonly getVariableCatalog: Effect.Effect<ReadonlyArray<string>, VScopeDeviceError>;
   readonly getChannelMap: Effect.Effect<ReadonlyArray<number>, VScopeDeviceError>;
   readonly setChannelMap: (
     channel: number,
     variable: number,
   ) => Effect.Effect<ReadonlyArray<number>, VScopeDeviceError>;
-  readonly getRtLabels: Effect.Effect<ReadonlyArray<string>, VScopeDeviceError>;
   readonly getRtValue: (index: number) => Effect.Effect<number, VScopeDeviceError>;
   readonly setRtValue: (index: number, value: number) => Effect.Effect<number, VScopeDeviceError>;
   readonly getTrigger: Effect.Effect<VScopeTrigger, VScopeDeviceError>;

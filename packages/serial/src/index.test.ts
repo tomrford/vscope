@@ -5,39 +5,41 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect, Fiber, Stream } from "effect";
 
 import {
+  VScopeFirmwareError,
+  VScopeInvalidArgumentError,
+  VScopeResponseTimeoutError,
+  VScopeSessionClosedError,
+  VScopeTransportError,
+  VScopeUnexpectedResponseError,
+} from "./errors";
+import { openVScopeDevice } from "./device";
+import { VScopeDeviceAlreadyOpenError, VScopeSerial, makeVScopeSerialLayer } from "./manager";
+import {
   ByteReader,
   ByteWriter,
   encodeVScopeFrame,
-  makeSerialDriver,
-  openVScopeDevice,
-  SerialCloseError,
-  VScopeDeviceAlreadyOpenError,
-  VScopeFirmwareError,
   VScopeFrameParseError,
   VScopeFrameParser,
-  VScopeInvalidArgumentError,
-  VScopeResponseTimeoutError,
   VSCOPE_FRAME_TIMEOUT_MILLIS,
   VScopeMessageType,
-  VScopeSerial,
-  VScopeSessionClosedError,
   VScopeState,
   VScopeStatusFlag,
   VScopeStatus,
-  VScopeTransportError,
   VScopeTriggerMode,
-  VScopeUnexpectedResponseError,
-  makeVScopeSerialLayer,
   vscopeCrc8,
+  type VScopeEndianness,
+  type VScopeState as VScopeStateValue,
+  type VScopeTriggerMode as VScopeTriggerModeValue,
+} from "./protocol";
+import {
+  makeSerialDriver,
+  SerialCloseError,
   type SerialCallback,
   type SerialDriver,
   type SerialOpenOptions,
   type SerialPortConstructor,
   type SerialPortLike,
-  type VScopeEndianness,
-  type VScopeState as VScopeStateValue,
-  type VScopeTriggerMode as VScopeTriggerModeValue,
-} from ".";
+} from "./transport";
 import { VScopeEndianness as Endianness } from "./protocol";
 
 describe("@vscope/serial protocol", () => {
@@ -248,14 +250,13 @@ describe("@vscope/serial device", () => {
     }),
   );
 
-  it.live("streams snapshot data in firmware-sized dense byte chunks", () =>
+  it.live("collects snapshot data across firmware-sized requests", () =>
     Effect.gen(function* () {
-      const driver = fakeDriver([
-        fakeFirmware({
-          path: "/dev/tty.vscope-snapshot",
-          deviceName: "scope-snapshot",
-        }),
-      ]);
+      const firmware = fakeFirmware({
+        path: "/dev/tty.vscope-snapshot",
+        deviceName: "scope-snapshot",
+      });
+      const driver = fakeDriver([firmware]);
 
       const device = yield* openVScopeDevice({
         path: "/dev/tty.vscope-snapshot",
@@ -263,10 +264,9 @@ describe("@vscope/serial device", () => {
         driver,
         requestTimeoutMillis: 1000,
       });
-      const chunks = yield* device.snapshotBytes().pipe(Stream.runCollect);
       const bytes = yield* device.collectSnapshotBytes();
 
-      expect(chunks.length).toBeGreaterThan(1);
+      expect(firmware.requestCount(VScopeMessageType.GetSnapshotData)).toBeGreaterThan(1);
       expect(bytes.byteLength).toBe(1000 * 5 * Float32Array.BYTES_PER_ELEMENT);
 
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -291,9 +291,7 @@ describe("@vscope/serial device", () => {
       });
       const header = yield* device.getSnapshotHeader;
       const baseline = firmware.requestTypes.length;
-      const snapshotFiber = yield* device
-        .snapshotBytes({ header })
-        .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      const snapshotFiber = yield* device.collectSnapshotBytes({ header }).pipe(Effect.forkChild);
 
       for (let attempts = 0; attempts < 100; attempts += 1) {
         if (firmware.requestCount(VScopeMessageType.GetSnapshotData) > 0) break;
@@ -311,7 +309,8 @@ describe("@vscope/serial device", () => {
           .filter(
             (type) =>
               type === VScopeMessageType.GetSnapshotData || type === VScopeMessageType.GetFrame,
-          ),
+          )
+          .slice(0, 3),
       ).toEqual([
         VScopeMessageType.GetSnapshotData,
         VScopeMessageType.GetFrame,
@@ -415,7 +414,7 @@ describe("@vscope/serial device", () => {
 
         const timedOutFrame = yield* Effect.exit(device.getFrame());
         yield* Effect.sleep("30 millis");
-        const nextRequest = yield* Effect.exit(device.getState);
+        const nextRequest = yield* Effect.exit(device.getStatus());
 
         expect(timedOutFrame._tag).toBe("Failure");
         if (timedOutFrame._tag === "Failure") {
@@ -577,7 +576,7 @@ describe("@vscope/serial device", () => {
 });
 
 describe("@vscope/serial manager", () => {
-  it.live("manages devices by path and resolves duplicate names by first match", () => {
+  it.live("manages devices by unambiguous serial paths", () => {
     const driver = fakeDriver([
       fakeFirmware({ path: "/dev/tty.vscope-a", deviceName: "same-name" }),
       fakeFirmware({ path: "/dev/tty.vscope-b", deviceName: "same-name" }),
@@ -595,7 +594,6 @@ describe("@vscope/serial manager", () => {
         baudRate: 115200,
         requestTimeoutMillis: 1000,
       });
-      const byName = yield* manager.getDevice("same-name");
       const duplicateExit = yield* Effect.exit(
         manager.openDevice({
           path: "/dev/tty.vscope-a",
@@ -606,7 +604,6 @@ describe("@vscope/serial manager", () => {
 
       expect(first.path).toBe("/dev/tty.vscope-a");
       expect(second.path).toBe("/dev/tty.vscope-b");
-      expect(byName.path).toBe("/dev/tty.vscope-a");
       expect(duplicateExit._tag).toBe("Failure");
       if (duplicateExit._tag === "Failure") {
         const errors = duplicateExit.cause.reasons
@@ -662,7 +659,7 @@ describe("@vscope/serial manager", () => {
         });
         const closeExit = yield* Effect.exit(device.close);
         const afterFailedClose = yield* manager.listDevices;
-        const stateAfterFailedClose = yield* Effect.exit(device.getState);
+        const stateAfterFailedClose = yield* Effect.exit(device.getStatus());
         const retryExit = yield* Effect.exit(manager.removeDevice("/dev/tty.vscope-close-fail"));
         const afterRetry = yield* manager.listDevices;
 
@@ -851,14 +848,12 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
 
 class MemorySerialPort extends EventEmitter implements SerialPortLike {
   readonly path: string;
-  readonly baudRate: number;
   readonly #firmware: FakeFirmware;
   #isOpen = false;
 
   constructor(options: SerialOpenOptions, firmware: FakeFirmware) {
     super();
     this.path = options.path;
-    this.baudRate = options.baudRate;
     this.#firmware = firmware;
   }
 
@@ -924,10 +919,6 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
   }
 
   drain(callback?: SerialCallback): void {
-    queueMicrotask(() => callback?.(undefined));
-  }
-
-  flush(callback?: SerialCallback): void {
     queueMicrotask(() => callback?.(undefined));
   }
 

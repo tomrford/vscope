@@ -147,7 +147,6 @@ function initialStores(): FakeStores {
         isrKHz: 100,
         variableCount: 8,
         rtCount: 2,
-        rtBufferCapacity: 2,
         nameLength: 32,
         endianness: VScopeEndianness.Little,
         deviceName: "fake-scope",
@@ -158,11 +157,7 @@ function initialStores(): FakeStores {
     },
     status: {
       state: VScopeState.Halted,
-      requestedState: VScopeState.Halted,
       snapshotValid: false,
-      requestPending: false,
-      triggerEnabled: true,
-      flags: 0,
     },
     config: {
       timing,

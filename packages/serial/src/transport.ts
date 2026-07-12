@@ -38,7 +38,7 @@ export interface OpenSerialTransportOptions extends SerialOpenOptions {
   readonly driver?: SerialDriver | undefined;
 }
 
-export type SerialOperation = "write" | "drain" | "flush" | "close" | "read";
+export type SerialOperation = "write" | "drain" | "close" | "read";
 
 export class SerialListError extends Data.TaggedError("SerialListError")<{
   readonly cause: unknown;
@@ -59,11 +59,6 @@ export class SerialDrainError extends Data.TaggedError("SerialDrainError")<{
   readonly cause: unknown;
 }> {}
 
-export class SerialFlushError extends Data.TaggedError("SerialFlushError")<{
-  readonly path: string;
-  readonly cause: unknown;
-}> {}
-
 export class SerialCloseError extends Data.TaggedError("SerialCloseError")<{
   readonly path: string;
   readonly cause: unknown;
@@ -79,27 +74,15 @@ export class SerialConnectionClosedError extends Data.TaggedError("SerialConnect
   readonly operation: SerialOperation;
 }> {}
 
-export type SerialError =
-  | SerialListError
-  | SerialOpenError
-  | SerialWriteError
-  | SerialDrainError
-  | SerialFlushError
-  | SerialCloseError
-  | SerialReadError
-  | SerialConnectionClosedError;
-
 export type SerialCallback = (error: Error | null | undefined) => void;
 
 export interface SerialPortLike {
   readonly path: string;
-  readonly baudRate: number;
   readonly isOpen: boolean;
   open(callback?: SerialCallback): void;
   set(options: SerialControlSignals, callback?: SerialCallback): void;
   write(chunk: SerialBytes, callback?: SerialCallback): boolean;
   drain(callback?: SerialCallback): void;
-  flush(callback?: SerialCallback): void;
   close(callback?: SerialCallback): void;
   on(event: "data", listener: (chunk: Buffer) => void): this;
   on(event: "error", listener: (error: Error) => void): this;
@@ -135,14 +118,11 @@ export interface SerialDriver {
 
 export interface SerialTransport {
   readonly path: string;
-  readonly baudRate: number;
-  readonly isOpen: Effect.Effect<boolean>;
   readonly read: Effect.Effect<Uint8Array, SerialReadError | SerialConnectionClosedError>;
   readonly write: (
     bytes: SerialBytes,
   ) => Effect.Effect<void, SerialWriteError | SerialConnectionClosedError>;
   readonly drain: Effect.Effect<void, SerialDrainError | SerialConnectionClosedError>;
-  readonly flush: Effect.Effect<void, SerialFlushError | SerialConnectionClosedError>;
   readonly close: Effect.Effect<void, SerialCloseError>;
 }
 
@@ -182,9 +162,6 @@ const serialPortInfoInput = (info: unknown): SerialPortInfoInput => {
     ...(vendorId !== undefined ? { vendorId } : {}),
   };
 };
-
-export const mapSerialPortInfo = (info: unknown): SerialPortInfo =>
-  SerialPortInfo.make(serialPortInfoInput(info));
 
 const decodeSerialPortInfo = (info: unknown): Effect.Effect<SerialPortInfo, SerialListError> =>
   Schema.decodeUnknownEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
@@ -374,8 +351,6 @@ const makeTransport = (
 
   return {
     path,
-    baudRate: port.baudRate,
-    isOpen: Effect.sync(() => !state.closed && port.isOpen),
     read: Queue.take(readQueue).pipe(
       Effect.mapError((cause) =>
         Cause.isDone(cause) ? new SerialConnectionClosedError({ path, operation: "read" }) : cause,
@@ -401,16 +376,6 @@ const makeTransport = (
           port,
           (callback) => port.drain(callback),
           (cause) => new SerialDrainError({ path, cause }),
-        );
-      }),
-    ),
-    flush: operationLock.withPermit(
-      Effect.gen(function* () {
-        yield* ensureOpen("flush");
-        yield* serialCallback(
-          port,
-          (callback) => port.flush(callback),
-          (cause) => new SerialFlushError({ path, cause }),
         );
       }),
     ),

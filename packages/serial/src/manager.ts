@@ -49,17 +49,16 @@ export interface VScopeSerialOptions {
   readonly driver?: SerialDriver | undefined;
 }
 
+export type VScopeOpenOptions = Omit<OpenVScopeDeviceOptions, "driver">;
+
 export interface VScopeSerialService {
   readonly listPorts: Effect.Effect<ReadonlyArray<SerialPortInfo>, SerialListError>;
   readonly openDevice: (
-    options: OpenVScopeDeviceOptions,
+    options: VScopeOpenOptions,
   ) => Effect.Effect<
     VScopeDevice,
     VScopeDeviceAlreadyOpenError | SerialOpenError | VScopeDeviceError
   >;
-  readonly getDevice: (
-    identifier: string,
-  ) => Effect.Effect<VScopeDevice, VScopeDeviceNotFoundError>;
   readonly getDeviceByPath: (
     path: string,
   ) => Effect.Effect<VScopeDevice, VScopeDeviceNotFoundError>;
@@ -98,27 +97,6 @@ export const makeVScopeSerial = Effect.fn("VScopeSerial.make")(function* (
   const entriesRef = yield* Ref.make(new Map<string, DeviceEntry>());
   const lock = yield* Semaphore.make(1);
   const events = yield* PubSub.bounded<VScopeSerialEvent>({ capacity: 256, replay: 32 });
-
-  const findEntryWithPath = (
-    entries: ReadonlyMap<string, DeviceEntry>,
-    identifier: string,
-  ): readonly [string, DeviceEntry] | undefined => {
-    const byPath = entries.get(identifier);
-    if (byPath) {
-      return [identifier, byPath];
-    }
-
-    for (const [path, entry] of entries) {
-      if (entry.device.deviceName === identifier) {
-        return [path, entry];
-      }
-    }
-
-    return undefined;
-  };
-
-  const findEntry = (entries: ReadonlyMap<string, DeviceEntry>, identifier: string) =>
-    findEntryWithPath(entries, identifier)?.[1];
 
   const deleteEntry = (path: string) =>
     Ref.update(entriesRef, (entries) => {
@@ -237,15 +215,6 @@ export const makeVScopeSerial = Effect.fn("VScopeSerial.make")(function* (
           return device;
         }),
       ),
-    getDevice: (identifier) =>
-      Ref.get(entriesRef).pipe(
-        Effect.flatMap((entries) => {
-          const entry = findEntry(entries, identifier);
-          return entry
-            ? Effect.succeed(entry.device)
-            : Effect.fail(new VScopeDeviceNotFoundError({ identifier }));
-        }),
-      ),
     getDeviceByPath: (path) =>
       Ref.get(entriesRef).pipe(
         Effect.flatMap((entries) => {
@@ -259,13 +228,11 @@ export const makeVScopeSerial = Effect.fn("VScopeSerial.make")(function* (
       lock.withPermit(
         Effect.gen(function* () {
           const entries = yield* Ref.get(entriesRef);
-          const found = findEntryWithPath(entries, identifier);
-          if (!found) {
+          const entry = entries.get(identifier);
+          if (!entry) {
             return yield* new VScopeDeviceNotFoundError({ identifier });
           }
-
-          const [path, entry] = found;
-          yield* closeEntry(path, entry);
+          yield* closeEntry(identifier, entry);
         }),
       ),
     closeAll: lock.withPermit(

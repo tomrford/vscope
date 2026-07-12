@@ -141,7 +141,6 @@ export class RuntimeDeviceInfo extends Schema.Class<RuntimeDeviceInfo>("RuntimeD
   isrKHz: NonNegativeInt,
   variableCount: NonNegativeInt,
   rtCount: NonNegativeInt,
-  rtBufferCapacity: NonNegativeInt,
   nameLength: NonNegativeInt,
   endianness: Schema.Literals([0, 1]),
   deviceName: Schema.String,

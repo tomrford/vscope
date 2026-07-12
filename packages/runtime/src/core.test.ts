@@ -21,14 +21,13 @@ import {
   VScopeDeviceNotFoundError,
   VScopeEndianness,
   VScopeFrameParseError,
-  VScopeInvalidArgumentError,
   VScopeSerial,
   VScopeState,
-  type OpenVScopeDeviceOptions,
   type SerialPortInfo,
   type VScopeControlStatus,
   type VScopeDevice,
   type VScopeDeviceInfo,
+  type VScopeOpenOptions,
   type VScopeSerialEvent,
   type VScopeSerialService,
   type VScopeState as VScopeStateValue,
@@ -36,6 +35,7 @@ import {
   type VScopeTiming,
   type VScopeTrigger,
 } from "@vscope/serial";
+import { VScopeInvalidArgumentError } from "../../serial/src/errors";
 
 import { RuntimeCore, RuntimeCoreLive } from ".";
 
@@ -61,7 +61,6 @@ const fakeInfo: VScopeDeviceInfo = {
   isrKHz: 20,
   variableCount: 2,
   rtCount: 2,
-  rtBufferCapacity: 16,
   nameLength: 16,
   endianness: VScopeEndianness.Little,
   deviceName: "scope-a",
@@ -132,7 +131,7 @@ describe("@vscope/runtime core", () => {
   });
 
   {
-    let openedWith: OpenVScopeDeviceOptions | null = null;
+    let openedWith: VScopeOpenOptions | null = null;
 
     layer(
       coreTestLayer(
@@ -535,7 +534,7 @@ function snapshotSampleBytes(): Uint8Array {
 
 interface FakeSerialLayerOptions {
   readonly device?: FakeDeviceOptions | undefined;
-  readonly onOpen?: ((openOptions: OpenVScopeDeviceOptions) => void) | undefined;
+  readonly onOpen?: ((openOptions: VScopeOpenOptions) => void) | undefined;
 }
 
 interface FakeDeviceOptions {
@@ -582,14 +581,6 @@ function fakeSerialLayer(
             });
             return device;
           }),
-        getDevice: (identifier) =>
-          Effect.flatMap(
-            Effect.sync(() => findDevice(devices, identifier)),
-            (device) =>
-              device
-                ? Effect.succeed(device)
-                : Effect.fail(new VScopeDeviceNotFoundError({ identifier })),
-          ),
         getDeviceByPath: (path) =>
           Effect.flatMap(
             Effect.sync(() => devices.get(path)),
@@ -600,7 +591,7 @@ function fakeSerialLayer(
           ),
         removeDevice: (identifier) =>
           Effect.gen(function* () {
-            const device = findDevice(devices, identifier);
+            const device = devices.get(identifier);
             if (!device) {
               return yield* new VScopeDeviceNotFoundError({ identifier });
             }
@@ -642,16 +633,6 @@ function fakeSerialLayer(
   );
 }
 
-function findDevice(
-  devices: ReadonlyMap<string, VScopeDevice>,
-  identifier: string,
-): VScopeDevice | undefined {
-  return (
-    devices.get(identifier) ??
-    Array.from(devices.values()).find((device) => device.deviceName === identifier)
-  );
-}
-
 function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice {
   let state: VScopeStateValue = VScopeState.Halted;
   let requestedState: VScopeStateValue = VScopeState.Halted;
@@ -665,14 +646,7 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
 
   const status = (): VScopeControlStatus => ({
     state,
-    requestedState,
     snapshotValid,
-    requestPending: state !== requestedState,
-    triggerEnabled: fakeTrigger.mode !== "disabled",
-    flags:
-      (snapshotValid ? 1 : 0) |
-      (state !== requestedState ? 2 : 0) |
-      (fakeTrigger.mode !== "disabled" ? 4 : 0),
   });
 
   const advanceStatus = () => {
@@ -714,7 +688,6 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
         advanceStatus();
         return status();
       }),
-    getState: Effect.sync(() => state),
     start: Effect.sync(() => {
       requestedState = VScopeState.Running;
       state = VScopeState.Running;
@@ -765,16 +738,13 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
       rtValues: [1, 2],
       channelCount: fakeInfo.channelCount,
       sampleCount: fakeInfo.bufferSize,
-      byteLength: fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
     }),
-    snapshotBytes: () => Stream.fromIterable([snapshotSampleBytes()]),
     collectSnapshotBytes: () =>
       options.collectSnapshotDelayMillis === undefined
         ? Effect.succeed(snapshotSampleBytes())
         : Effect.sleep(`${options.collectSnapshotDelayMillis} millis`).pipe(
             Effect.as(snapshotSampleBytes()),
           ),
-    getVariableCatalog: Effect.succeed(fakeMetadata.variables),
     getChannelMap: failIfMisconfigured("getChannelMap").pipe(Effect.as(fakeMetadata.channelMap)),
     setChannelMap: (channel, variable) =>
       failIfMisconfigured("setChannelMap").pipe(
@@ -782,7 +752,6 @@ function fakeDevice(path: string, options: FakeDeviceOptions = {}): VScopeDevice
           fakeMetadata.channelMap.map((current, index) => (index === channel ? variable : current)),
         ),
       ),
-    getRtLabels: Effect.succeed(fakeMetadata.rtLabels),
     getRtValue: (index) => Effect.succeed(rtValues.get(index) ?? 0),
     setRtValue: (index, value) =>
       Effect.sync(() => {
