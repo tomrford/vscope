@@ -5,12 +5,14 @@
  * no badge/pulse/momentum/current-line features.
  */
 
-import { drawCrosshair } from "./draw/crosshair";
+import { drawCrosshair, formatTimeAgoLabel } from "./draw/crosshair";
 import { drawEmpty } from "./draw/empty";
-import { drawGrid } from "./draw/grid";
+import { buildDomainTicks, buildRelativeTicks, drawGrid } from "./draw/grid";
 import { drawLoading } from "./draw/loading";
 import { drawMultiSeries, type VisibleSeries } from "./draw/line-multiseries";
+import { panDomain, zoomDomain } from "./math/domain";
 import { interpolateAtTime } from "./math/interpolate";
+import { formatDomainSeconds } from "./math/intervals";
 import { lerp } from "./math/lerp";
 import { computeMultiRange } from "./math/range";
 import { resolvePalette } from "./theme";
@@ -20,6 +22,7 @@ import type {
   LiveChartConfig,
   LiveHoverPayload,
   LiveSeries,
+  TimeDomain,
 } from "./types";
 const MAX_DT_MS = 50;
 const WINDOW_LERP = 0.16;
@@ -35,6 +38,8 @@ const DEFAULT_PADDING: ChartPadding = {
   bottom: 28,
   left: 12,
 };
+
+const ZOOM_STEP = 1.2;
 
 const getDpr = (): number => Math.min(window.devicePixelRatio || 1, 3);
 
@@ -69,10 +74,13 @@ const toVisibleSeries = (
   leftEdge: number,
   rightEdge: number,
 ): VisibleSeries[] => {
+  // Slack keeps the line entering the left edge connected without dragging in
+  // far-offscreen points when zoomed into a sub-second domain.
+  const slack = Math.min(1, (rightEdge - leftEdge) * 0.05);
   const visible: VisibleSeries[] = [];
   for (const series of seriesList) {
     const points = series.points.filter(
-      (point) => point.time >= leftEdge - 1 && point.time <= rightEdge,
+      (point) => point.time >= leftEdge - slack && point.time <= rightEdge,
     );
 
     if (points.length === 0) {
@@ -143,13 +151,16 @@ export const createLivePlotEngine = (
   let config = initialConfig;
   let destroyed = false;
 
+  const initialDomain = initialConfig.domain ?? null;
   const state: InternalState = {
     width: 0,
     height: 0,
     raf: 0,
     lastFrameMs: 0,
-    displayWindowSecs: Math.max(1, initialConfig.windowSecs),
-    displayNowSec: Date.now() / 1000,
+    displayWindowSecs: initialDomain
+      ? Math.max(initialDomain.end - initialDomain.start, 1e-9)
+      : Math.max(1, initialConfig.windowSecs),
+    displayNowSec: initialDomain ? initialDomain.end : Date.now() / 1000,
     displayMin: -1,
     displayMax: 1,
     rangeInit: false,
@@ -222,6 +233,63 @@ export const createLivePlotEngine = (
   container.addEventListener("touchend", touchEnd);
   container.addEventListener("touchcancel", touchEnd);
 
+  // Pan/zoom gestures, active only when the owner supplies the data extent
+  // and a change handler (i.e. static/domain mode).
+  const gestureContext = (): { domain: TimeDomain; bounds: TimeDomain } | null => {
+    const bounds = config.domainBounds;
+    if (!bounds || !config.onDomainChange) return null;
+    return { domain: config.domain ?? bounds, bounds };
+  };
+
+  const chartRatioAt = (clientX: number): number => {
+    const rect = container.getBoundingClientRect();
+    const chartWidth = Math.max(1, rect.width - DEFAULT_PADDING.left - DEFAULT_PADDING.right);
+    return Math.min(1, Math.max(0, (clientX - rect.left - DEFAULT_PADDING.left) / chartWidth));
+  };
+
+  const wheel = (event: WheelEvent): void => {
+    const context = gestureContext();
+    if (!context) return;
+    event.preventDefault();
+    const factor = event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+    config.onDomainChange?.(
+      zoomDomain(context.domain, context.bounds, chartRatioAt(event.clientX), factor),
+    );
+  };
+
+  let dragX: number | null = null;
+  const pointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0 || gestureContext() === null) return;
+    dragX = event.clientX;
+    container.setPointerCapture(event.pointerId);
+  };
+  const pointerMove = (event: PointerEvent): void => {
+    const context = gestureContext();
+    if (dragX === null || !context) return;
+    const rect = container.getBoundingClientRect();
+    const chartWidth = Math.max(1, rect.width - DEFAULT_PADDING.left - DEFAULT_PADDING.right);
+    const deltaRatio = (event.clientX - dragX) / chartWidth;
+    dragX = event.clientX;
+    config.onDomainChange?.(panDomain(context.domain, context.bounds, deltaRatio));
+  };
+  const pointerUp = (event: PointerEvent): void => {
+    dragX = null;
+    if (container.hasPointerCapture(event.pointerId)) {
+      container.releasePointerCapture(event.pointerId);
+    }
+  };
+  const doubleClick = (): void => {
+    if (gestureContext() === null) return;
+    config.onDomainChange?.(null);
+  };
+
+  container.addEventListener("wheel", wheel, { passive: false });
+  container.addEventListener("pointerdown", pointerDown);
+  container.addEventListener("pointermove", pointerMove);
+  container.addEventListener("pointerup", pointerUp);
+  container.addEventListener("pointercancel", pointerUp);
+  container.addEventListener("dblclick", doubleClick);
+
   const draw = (): void => {
     if (destroyed) return;
 
@@ -252,23 +320,25 @@ export const createLivePlotEngine = (
 
     applyDpr(ctx, dpr, state.width, state.height);
 
-    const realNowSec = Date.now() / 1000;
+    const domain = config.domain ?? null;
+    const targetNowSec = domain ? domain.end : Date.now() / 1000;
+    const targetWindowSecs = domain
+      ? Math.max(domain.end - domain.start, 1e-9)
+      : Math.max(1, config.windowSecs);
 
-    if (config.paused) {
-      state.displayNowSec = state.displayNowSec || realNowSec;
+    if (config.paused && !domain) {
+      state.displayNowSec = state.displayNowSec || targetNowSec;
     } else {
-      state.displayNowSec = lerp(state.displayNowSec, realNowSec, CATCHUP_LERP, dtMs);
-      if (Math.abs(state.displayNowSec - realNowSec) < 0.01) {
-        state.displayNowSec = realNowSec;
+      state.displayNowSec = lerp(state.displayNowSec, targetNowSec, CATCHUP_LERP, dtMs);
+      if (Math.abs(state.displayNowSec - targetNowSec) < targetWindowSecs * 0.001) {
+        state.displayNowSec = targetNowSec;
       }
     }
 
-    state.displayWindowSecs = lerp(
-      state.displayWindowSecs,
-      Math.max(1, config.windowSecs),
-      WINDOW_LERP,
-      dtMs,
-    );
+    state.displayWindowSecs = lerp(state.displayWindowSecs, targetWindowSecs, WINDOW_LERP, dtMs);
+    if (Math.abs(state.displayWindowSecs - targetWindowSecs) < targetWindowSecs * 0.001) {
+      state.displayWindowSecs = targetWindowSecs;
+    }
 
     const leftEdge = state.displayNowSec - state.displayWindowSecs;
     const visibleSeries = toVisibleSeries(config.series, leftEdge, state.displayNowSec);
@@ -349,7 +419,10 @@ export const createLivePlotEngine = (
     );
 
     if (config.showGrid) {
-      drawGrid(ctx, layout, palette, state.displayNowSec, state.displayWindowSecs);
+      const ticks = domain
+        ? buildDomainTicks(leftEdge, state.displayNowSec, layout.toX)
+        : buildRelativeTicks(state.displayWindowSecs, state.displayNowSec, layout.toX);
+      drawGrid(ctx, layout, palette, ticks);
     }
 
     drawMultiSeries(ctx, layout, visibleSeries, config.showFill, state.chartReveal, nowMs);
@@ -399,7 +472,10 @@ export const createLivePlotEngine = (
       value: interpolateAtTime(entry.points, clampedTime),
     }));
 
-    drawCrosshair(ctx, layout, palette, crosshairX, state.displayNowSec - clampedTime, hoverValues);
+    const crosshairHeader = domain
+      ? formatDomainSeconds(clampedTime, state.displayWindowSecs / 1000)
+      : formatTimeAgoLabel(state.displayNowSec - clampedTime);
+    drawCrosshair(ctx, layout, palette, crosshairX, crosshairHeader, hoverValues);
 
     if (usingLocalScrub) {
       state.hoverActive = true;
@@ -447,6 +523,12 @@ export const createLivePlotEngine = (
       container.removeEventListener("touchmove", touchMove);
       container.removeEventListener("touchend", touchEnd);
       container.removeEventListener("touchcancel", touchEnd);
+      container.removeEventListener("wheel", wheel);
+      container.removeEventListener("pointerdown", pointerDown);
+      container.removeEventListener("pointermove", pointerMove);
+      container.removeEventListener("pointerup", pointerUp);
+      container.removeEventListener("pointercancel", pointerUp);
+      container.removeEventListener("dblclick", doubleClick);
       document.removeEventListener("visibilitychange", onVisibility);
       clearHover();
     },

@@ -29,6 +29,13 @@ export type LiveHoverPayload = {
   values: LiveHoverSeriesValue[];
 };
 
+/** Fixed time window in capture seconds. When set, the chart renders a
+ *  static domain (snapshot mode) instead of a marching live window. */
+export type TimeDomain = {
+  start: number;
+  end: number;
+};
+
 export type LiveChartInput = {
   series: LiveSeries[];
   windowSecs: number;
@@ -36,6 +43,10 @@ export type LiveChartInput = {
   loading: boolean;
   emptyText?: string;
   scrubTime?: number | null;
+  domain?: TimeDomain | null;
+  /** Full data extent. Together with `onDomainChange` this enables the
+   *  engine's pan/zoom gestures (wheel, drag, double-click reset). */
+  domainBounds?: TimeDomain | null;
 };
 
 export type LiveChartTheme = "light" | "dark";
@@ -46,6 +57,10 @@ export type LiveChartConfig = LiveChartInput & {
   showGrid: boolean;
   showFill: boolean;
   onHover?: (payload: LiveHoverPayload | null) => void;
+  /** Receives the window proposed by a pan/zoom gesture; `null` asks for the
+   *  full extent. The engine never moves its own window — the owner applies
+   *  the change via `setConfig`, which is what keeps sibling plots in sync. */
+  onDomainChange?: (domain: TimeDomain | null) => void;
 };
 
 export type ChartPadding = {
@@ -81,7 +96,7 @@ export type LiveChartPalette = {
   font: string;
 };
 
-export type XTick = {
-  secondsAgo: number;
+export type AxisTick = {
   x: number;
+  label: string;
 };

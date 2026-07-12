@@ -10,4 +10,5 @@ export type {
   LiveChartInput,
   LiveHoverPayload,
   LiveChartConfig,
+  TimeDomain,
 } from "./types";

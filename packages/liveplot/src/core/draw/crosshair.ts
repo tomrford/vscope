@@ -6,7 +6,7 @@
 
 import type { ChartLayout, LiveChartPalette, LiveHoverSeriesValue } from "../types";
 
-const formatTimeLabel = (secondsAgo: number): string => {
+export const formatTimeAgoLabel = (secondsAgo: number): string => {
   const rounded = Math.max(0, Math.round(secondsAgo));
   return rounded === 0 ? "now" : `-${rounded}s`;
 };
@@ -21,7 +21,7 @@ export const drawCrosshair = (
   layout: ChartLayout,
   palette: LiveChartPalette,
   x: number,
-  secondsAgo: number,
+  header: string,
   values: LiveHoverSeriesValue[],
 ): void => {
   const { padding, width, height } = layout;
@@ -37,7 +37,6 @@ export const drawCrosshair = (
   ctx.font = palette.font;
   ctx.textBaseline = "middle";
 
-  const header = formatTimeLabel(secondsAgo);
   const rows = [header, ...values.map((v) => `${v.label}: ${formatValue(v.value)}`)];
 
   let boxWidth = 0;

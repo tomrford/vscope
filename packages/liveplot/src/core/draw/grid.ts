@@ -1,30 +1,50 @@
 /**
  * Adapted from liveline (MIT): https://github.com/benjitaylor/liveline
  * Source commit: a913578832784bb6abdb148b6af9cf1739be2759
- * Local changes: relative-time x axis and simplified y-grid.
+ * Local changes: relative- and domain-time x axes and simplified y-grid.
  */
 
-import { formatRelativeSeconds, niceTimeInterval } from "../math/intervals";
-import type { ChartLayout, LiveChartPalette, XTick } from "../types";
+import { formatDomainSeconds, formatRelativeSeconds, niceTimeInterval } from "../math/intervals";
+import type { AxisTick, ChartLayout, LiveChartPalette } from "../types";
 
 const GRID_ROWS = 4;
 
-export const buildXTicks = (
+// Live mode: ticks labelled as seconds before "now".
+export const buildRelativeTicks = (
   windowSecs: number,
   nowSec: number,
   toX: (time: number) => number,
-): XTick[] => {
+): AxisTick[] => {
   const interval = niceTimeInterval(windowSecs);
-  const ticks: XTick[] = [];
+  const ticks: AxisTick[] = [];
 
   for (let secondsAgo = windowSecs; secondsAgo >= 0; secondsAgo -= interval) {
     const rounded = Math.max(0, Math.round(secondsAgo));
-    const x = toX(nowSec - rounded);
-    ticks.push({ secondsAgo: rounded, x });
+    ticks.push({ x: toX(nowSec - rounded), label: formatRelativeSeconds(rounded) });
   }
 
-  if (ticks.length === 0 || ticks[ticks.length - 1].secondsAgo !== 0) {
-    ticks.push({ secondsAgo: 0, x: toX(nowSec) });
+  if (ticks.length === 0 || ticks[ticks.length - 1].label !== "0") {
+    ticks.push({ x: toX(nowSec), label: formatRelativeSeconds(0) });
+  }
+
+  return ticks;
+};
+
+// Static mode: ticks at nice absolute capture times within [start, end].
+export const buildDomainTicks = (
+  start: number,
+  end: number,
+  toX: (time: number) => number,
+): AxisTick[] => {
+  const span = Math.max(end - start, 1e-9);
+  const interval = niceTimeInterval(span);
+  const first = Math.ceil(start / interval - 1e-6);
+  const last = Math.floor(end / interval + 1e-6);
+  const ticks: AxisTick[] = [];
+
+  for (let step = first; step <= last; step += 1) {
+    const time = step * interval;
+    ticks.push({ x: toX(time), label: formatDomainSeconds(time, interval) });
   }
 
   return ticks;
@@ -34,9 +54,8 @@ export const drawGrid = (
   ctx: CanvasRenderingContext2D,
   layout: ChartLayout,
   palette: LiveChartPalette,
-  nowSec: number,
-  windowSecs: number,
-): XTick[] => {
+  ticks: AxisTick[],
+): void => {
   const { width, height, padding, minVal, maxVal, toY } = layout;
 
   ctx.save();
@@ -63,8 +82,6 @@ export const drawGrid = (
     }
   }
 
-  const ticks = buildXTicks(windowSecs, nowSec, layout.toX);
-
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.fillStyle = palette.axis;
@@ -76,10 +93,8 @@ export const drawGrid = (
     ctx.strokeStyle = palette.axis;
     ctx.stroke();
 
-    const label = formatRelativeSeconds(tick.secondsAgo);
-    ctx.fillText(label, tick.x, height - padding.bottom + 7);
+    ctx.fillText(tick.label, tick.x, height - padding.bottom + 7);
   }
 
   ctx.restore();
-  return ticks;
 };
