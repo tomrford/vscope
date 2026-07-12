@@ -6,6 +6,7 @@ import {
   LiveViewSettings,
   NetworkSettings,
   PollingSettings,
+  PersistentId,
   RecoveryState,
   SerialConfig,
   Settings,
@@ -95,6 +96,19 @@ export class RuntimeSnapshotCaptureRequest extends Schema.Class<RuntimeSnapshotC
   "RuntimeSnapshotCaptureRequest",
 )({
   label: Schema.optionalKey(Schema.String),
+}) {}
+
+export class RuntimeSnapshotIdRequest extends Schema.Class<RuntimeSnapshotIdRequest>(
+  "RuntimeSnapshotIdRequest",
+)({
+  id: PersistentId,
+}) {}
+
+export class RuntimeSnapshotFavoriteRequest extends Schema.Class<RuntimeSnapshotFavoriteRequest>(
+  "RuntimeSnapshotFavoriteRequest",
+)({
+  id: PersistentId,
+  favorite: Schema.Boolean,
 }) {}
 
 export class RuntimeSettingsPatchRequest extends Schema.Class<RuntimeSettingsPatchRequest>(
@@ -276,6 +290,14 @@ export class RuntimeRpcs extends RpcGroup.make(
   }),
   Rpc.make("snapshots.capture", {
     payload: RuntimeSnapshotCaptureRequest,
+    error: RuntimeApiError,
+  }),
+  Rpc.make("snapshots.delete", {
+    payload: RuntimeSnapshotIdRequest,
+    error: RuntimeApiError,
+  }),
+  Rpc.make("snapshots.favorite", {
+    payload: RuntimeSnapshotFavoriteRequest,
     error: RuntimeApiError,
   }),
   Rpc.make("snapshots.list", {

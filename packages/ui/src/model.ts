@@ -1,4 +1,5 @@
 import {
+  PersistentId,
   RuntimeActiveDevice,
   RuntimeAppDto,
   RuntimeControlStatus,
@@ -44,6 +45,8 @@ export const ControlAction = Schema.Literals([
   "setTiming",
   "setTrigger",
   "setChannelMap",
+  "deleteSnapshot",
+  "favoriteSnapshot",
 ]);
 export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
 
@@ -77,6 +80,7 @@ export const Model = Schema.Struct({
   channelMapDraft: Schema.Array(Schema.String),
   snapshotLabelDraft: Schema.String,
   compareSelection: Schema.Array(Schema.String),
+  snapshotDeleteCandidate: Schema.NullOr(PersistentId),
   snapshotLoads: Schema.Record(Schema.String, SnapshotLoad),
   openMenu: Schema.NullOr(MenuId),
   busy: BusyState,
@@ -101,6 +105,16 @@ export const SnapshotSamplesFailed = m("SnapshotSamplesFailed", {
 });
 export const SnapshotCompareToggled = m("SnapshotCompareToggled", {
   id: Schema.String,
+});
+export const SnapshotDeleteToggled = m("SnapshotDeleteToggled", {
+  id: PersistentId,
+});
+export const SnapshotDeleteConfirmed = m("SnapshotDeleteConfirmed", {
+  id: PersistentId,
+});
+export const SnapshotFavoriteChanged = m("SnapshotFavoriteChanged", {
+  id: PersistentId,
+  favorite: Schema.Boolean,
 });
 export const AppChanged = m("AppChanged", {
   app: RuntimeAppDto,
@@ -198,6 +212,9 @@ export const Message = Schema.Union([
   SnapshotSamplesLoaded,
   SnapshotSamplesFailed,
   SnapshotCompareToggled,
+  SnapshotDeleteToggled,
+  SnapshotDeleteConfirmed,
+  SnapshotFavoriteChanged,
   AppChanged,
   PortsLoaded,
   PortsRescanned,
@@ -350,6 +367,18 @@ const SaveSnapshot = Command.define(
   }),
 );
 
+const DeleteSnapshot = Command.define(
+  "DeleteSnapshot",
+  { id: PersistentId },
+  Message,
+)(({ id }) => settledCommand((rpc) => rpc["snapshots.delete"]({ id })));
+
+const SetSnapshotFavorite = Command.define(
+  "SetSnapshotFavorite",
+  { id: PersistentId, favorite: Schema.Boolean },
+  Message,
+)((payload) => settledCommand((rpc) => rpc["snapshots.favorite"](payload)));
+
 const SetTiming = Command.define(
   "SetTiming",
   {
@@ -424,6 +453,7 @@ export const init = (url: Url): UpdateResult => [
     channelMapDraft: [],
     snapshotLabelDraft: "",
     compareSelection: [],
+    snapshotDeleteCandidate: null,
     snapshotLoads: {},
     openMenu: null,
     busy: null,
@@ -529,6 +559,24 @@ const withSampleLoads = (model: Model): UpdateResult => {
   ];
 };
 
+// A viewer owns samples after its one successful download. Keep the matching
+// metadata in that tab if the live index later reports deletion; a fresh tab
+// has no loaded entry and therefore renders the id as missing.
+const withLoadedViewerSnapshots = (
+  model: Model,
+  snapshots: ReadonlyArray<SnapshotRecord>,
+): ReadonlyArray<SnapshotRecord> => {
+  if (model.route._tag !== "SnapshotsRoute") return snapshots;
+  const routeIds = new Set(routeSnapshotIds(model.route));
+  const retained = model.snapshots.filter(
+    (snapshot) =>
+      routeIds.has(snapshot.id) &&
+      model.snapshotLoads[snapshot.id]?.status === "loaded" &&
+      !snapshots.some((current) => current.id === snapshot.id),
+  );
+  return [...snapshots, ...retained];
+};
+
 const changedChannelMap = (
   model: Model,
 ):
@@ -582,6 +630,26 @@ export const update = (model: Model, message: Message): UpdateResult =>
         },
         [],
       ],
+      SnapshotDeleteToggled: ({ id }) => [
+        {
+          ...model,
+          snapshotDeleteCandidate: model.snapshotDeleteCandidate === id ? null : id,
+        },
+        [],
+      ],
+      SnapshotDeleteConfirmed: ({ id }) => [
+        {
+          ...model,
+          snapshotDeleteCandidate: null,
+          busy: "deleteSnapshot",
+          error: null,
+        },
+        [DeleteSnapshot({ id })],
+      ],
+      SnapshotFavoriteChanged: ({ id, favorite }) => [
+        { ...model, busy: "favoriteSnapshot", error: null },
+        [SetSnapshotFavorite({ id, favorite })],
+      ],
       AppChanged: ({ app }) => [{ ...model, app, linkUp: true }, []],
       PortsLoaded: ({ ports }) => {
         const refreshSettled = model.busy === "refresh";
@@ -621,15 +689,22 @@ export const update = (model: Model, message: Message): UpdateResult =>
           : [nextModel, []];
       },
       DeviceConfigChanged: ({ config }) => [modelWithConfig(model, config), []],
-      SnapshotsChanged: ({ snapshots }) =>
-        withSampleLoads({
+      SnapshotsChanged: ({ snapshots }) => {
+        const visibleSnapshots = withLoadedViewerSnapshots(model, snapshots);
+        return withSampleLoads({
           ...model,
-          snapshots,
+          snapshots: visibleSnapshots,
           linkUp: true,
           compareSelection: model.compareSelection.filter((id) =>
-            snapshots.some((snapshot) => snapshot.id === id),
+            visibleSnapshots.some((snapshot) => snapshot.id === id),
           ),
-        }),
+          snapshotDeleteCandidate: visibleSnapshots.some(
+            (snapshot) => snapshot.id === model.snapshotDeleteCandidate,
+          )
+            ? model.snapshotDeleteCandidate
+            : null,
+        });
+      },
       DeviceStatusReceived: ({ status }) => [{ ...model, status, linkUp: true }, []],
       FrameReceived: ({ frame }) => [{ ...model, frame }, []],
       LivePlotMounted: () => [model, []],
@@ -654,7 +729,7 @@ export const update = (model: Model, message: Message): UpdateResult =>
           [],
         ];
       },
-      MenuClosed: () => [{ ...model, openMenu: null }, []],
+      MenuClosed: () => [{ ...model, openMenu: null, snapshotDeleteCandidate: null }, []],
       SelectedPortChanged: ({ path }) => [{ ...model, selectedPort: path }, []],
       TimingTotalChanged: ({ value }) => [{ ...model, timingTotalSecondsDraft: value }, []],
       TimingPreTriggerChanged: ({ value }) => [

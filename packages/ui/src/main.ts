@@ -22,6 +22,9 @@ import {
   SetTimingRequested,
   SetTriggerRequested,
   SnapshotCompareToggled,
+  SnapshotDeleteConfirmed,
+  SnapshotDeleteToggled,
+  SnapshotFavoriteChanged,
   SnapshotLabelChanged,
   SnapshotPlotMounted,
   StopRequested,
@@ -631,9 +634,16 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                 [
                   h.tr(
                     [],
-                    ["", "Name", "Device", "Channels", "Samples", "Duration", "Created", ""].map(
-                      (label) => h.th([...sx(h, appStyles.tableHead)], [label]),
-                    ),
+                    [
+                      "",
+                      "Name",
+                      "Device",
+                      "Channels",
+                      "Samples",
+                      "Duration",
+                      "Created",
+                      "Actions",
+                    ].map((label) => h.th([...sx(h, appStyles.tableHead)], [label])),
                   ),
                 ],
               ),
@@ -687,9 +697,44 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                           h.td(
                             [...sx(h, appStyles.tableCell)],
                             [
-                              viewLinkButton(h, "View", snapshotsHref([snapshot.id]), {
-                                small: true,
-                              }),
+                              h.div(
+                                [...sx(h, appStyles.cluster)],
+                                [
+                                  viewLinkButton(h, "View", snapshotsHref([snapshot.id]), {
+                                    small: true,
+                                  }),
+                                  viewButton(
+                                    h,
+                                    snapshot.favorite ? "Unfavourite" : "Favourite",
+                                    SnapshotFavoriteChanged({
+                                      id: snapshot.id,
+                                      favorite: !snapshot.favorite,
+                                    }),
+                                    { small: true, disabled: isBusy(model) },
+                                  ),
+                                  model.snapshotDeleteCandidate === snapshot.id
+                                    ? viewButton(
+                                        h,
+                                        "Confirm delete",
+                                        SnapshotDeleteConfirmed({ id: snapshot.id }),
+                                        { small: true, disabled: isBusy(model) },
+                                      )
+                                    : viewButton(
+                                        h,
+                                        "Delete",
+                                        SnapshotDeleteToggled({ id: snapshot.id }),
+                                        { small: true, disabled: isBusy(model) },
+                                      ),
+                                  model.snapshotDeleteCandidate === snapshot.id
+                                    ? viewButton(
+                                        h,
+                                        "Cancel",
+                                        SnapshotDeleteToggled({ id: snapshot.id }),
+                                        { small: true, disabled: isBusy(model) },
+                                      )
+                                    : null,
+                                ],
+                              ),
                             ],
                           ),
                         ],

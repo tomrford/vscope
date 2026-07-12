@@ -51,4 +51,13 @@ export const persistenceMigrations = SqliteMigrator.fromRecord({
       )
     `;
   }),
+  "2_snapshot_favorites": Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+
+    yield* sql`ALTER TABLE snapshots ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0`;
+    yield* sql`
+      CREATE INDEX snapshots_favorite_created_at_idx
+        ON snapshots(favorite DESC, created_at DESC, id DESC)
+    `;
+  }),
 });

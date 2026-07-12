@@ -36,6 +36,7 @@ export const SnapshotRow = Schema.Struct({
   trigger_json: Schema.String,
   rt_values_json: Schema.String,
   metadata_json: Schema.String,
+  favorite: Schema.Number,
   created_at: Schema.String,
   updated_at: Schema.String,
   has_samples: Schema.Number,

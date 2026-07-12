@@ -17,6 +17,8 @@ import {
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
   RuntimeSnapshotCaptureRequest,
+  RuntimeSnapshotFavoriteRequest,
+  RuntimeSnapshotIdRequest,
   RuntimeTimingPatch,
   RuntimeTriggerPatch,
   RuntimePortInfo,
@@ -187,6 +189,10 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
         "device.frames": () => api.subscriptions.frames,
         "snapshots.capture": ({ label }) =>
           api.rpc.captureSnapshot(label).pipe(Effect.mapError(runtimeApiError)),
+        "snapshots.delete": ({ id }) =>
+          api.rpc.deleteSnapshot(id).pipe(Effect.mapError(runtimeApiError)),
+        "snapshots.favorite": ({ id, favorite }) =>
+          api.rpc.setSnapshotFavorite(id, favorite).pipe(Effect.mapError(runtimeApiError)),
         "snapshots.list": () => api.rpc.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
         "snapshots.index": () => api.subscriptions.snapshots,
       });
@@ -797,6 +803,26 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.Destructive, false)
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_delete_snapshot", {
+    description: "Delete a saved snapshot and its samples.",
+    parameters: RuntimeSnapshotIdRequest,
+    success: Schema.String,
+    failure: RuntimeApiError,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, true)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_set_snapshot_favorite", {
+    description: "Set whether a saved snapshot is retained as a favorite.",
+    parameters: RuntimeSnapshotFavoriteRequest,
+    success: Schema.String,
+    failure: RuntimeApiError,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
 );
 
 const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
@@ -851,6 +877,14 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
           .dispatch({ type: "snapshots/capture", label })
           .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
       vscope_list_snapshots: () => core.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
+      vscope_delete_snapshot: ({ id }) =>
+        core
+          .dispatch({ type: "snapshots/delete", id })
+          .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
+      vscope_set_snapshot_favorite: ({ id, favorite }) =>
+        core
+          .dispatch({ type: "snapshots/favorite", id, favorite })
+          .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
     });
   }),
 );

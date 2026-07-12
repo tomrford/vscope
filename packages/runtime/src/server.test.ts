@@ -4,6 +4,7 @@ import { VScopeEndianness, VScopeState } from "@vscope/serial";
 import type { SerialPortInfo, VScopeTiming, VScopeTrigger } from "@vscope/serial";
 import {
   DEFAULT_SETTINGS,
+  PersistentId,
   makeRuntimeRpcClient,
   noRecovery,
   runtimeRpcSocketUrl,
@@ -93,12 +94,34 @@ describe("@vscope/runtime server", () => {
         expect(JSON.stringify(tools)).toContain("vscope_write_channel_map");
         expect(JSON.stringify(tools)).not.toContain("vscope_set_rt_value");
         expect(JSON.stringify(tools)).toContain("vscope_save_snapshot");
+        expect(JSON.stringify(tools)).toContain("vscope_delete_snapshot");
+        expect(JSON.stringify(tools)).toContain("vscope_set_snapshot_favorite");
         expect(JSON.stringify(tools)).not.toContain("vscope_capture_snapshot");
       }),
     );
   });
 
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
+    it.effect("mutates snapshot lifecycle through RPC core commands", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const id = PersistentId.make("snapshot:rpc");
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const rpc = yield* makeRuntimeRpcClient(yield* testRuntimeRpcUrl);
+            yield* rpc["snapshots.favorite"]({ id, favorite: true });
+            yield* rpc["snapshots.delete"]({ id });
+          }),
+        );
+
+        expect(commands).toEqual([
+          { type: "snapshots/favorite", id, favorite: true },
+          { type: "snapshots/delete", id },
+        ]);
+      }),
+    );
+
     it.effect("reads the latest polled frame through MCP", () =>
       Effect.gen(function* () {
         const sessionId = yield* initializeMcp();
@@ -265,6 +288,32 @@ describe("@vscope/runtime server", () => {
           {
             type: "snapshots/capture",
             label: "bench capture",
+          },
+        ]);
+      }),
+    );
+
+    it.effect("mutates snapshot lifecycle through MCP core commands", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+        const id = "snapshot:test";
+
+        yield* callMcpTool(sessionId, 2, "vscope_set_snapshot_favorite", {
+          id,
+          favorite: true,
+        });
+        yield* callMcpTool(sessionId, 3, "vscope_delete_snapshot", { id });
+
+        expect(commands).toEqual([
+          {
+            type: "snapshots/favorite",
+            id: PersistentId.make(id),
+            favorite: true,
+          },
+          {
+            type: "snapshots/delete",
+            id: PersistentId.make(id),
           },
         ]);
       }),

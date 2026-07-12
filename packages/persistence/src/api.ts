@@ -11,6 +11,7 @@ import type {
   SnapshotRecord,
   SnapshotSampleBlob,
   SnapshotSamplesWrite,
+  Timestamp,
 } from "@vscope/shared";
 
 export type OpenPersistenceOptions = {
@@ -34,11 +35,12 @@ export type PersistenceService = {
   readonly getSnapshot: (
     id: PersistentId,
   ) => Effect.Effect<Option.Option<SnapshotRecord>, PersistenceError>;
-  readonly renameSnapshot: (
+  readonly setSnapshotFavorite: (
     id: PersistentId,
-    label: string,
+    favorite: boolean,
   ) => Effect.Effect<SnapshotRecord, PersistenceError>;
   readonly deleteSnapshot: (id: PersistentId) => Effect.Effect<void, PersistenceError>;
+  readonly pruneSnapshotsBefore: (cutoff: Timestamp) => Effect.Effect<number, PersistenceError>;
   readonly writeSnapshotSamples: (
     id: PersistentId,
     samples: SnapshotSamplesWrite,

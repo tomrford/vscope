@@ -26,6 +26,9 @@ import {
   RefreshPortsRequested,
   RuntimeLinkDown,
   SaveSnapshotRequested,
+  SnapshotDeleteConfirmed,
+  SnapshotDeleteToggled,
+  SnapshotFavoriteChanged,
   SnapshotLabelChanged,
   SnapshotSamplesLoaded,
   SnapshotsChanged,
@@ -283,6 +286,7 @@ describe("@vscope/ui model", () => {
       trigger: { threshold: 0, channel: 0, mode: "rising" },
       rtValues: [],
       metadata: { variables: ["a", "b"] },
+      favorite: false,
       createdAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
       updatedAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
     });
@@ -294,9 +298,12 @@ describe("@vscope/ui model", () => {
 
     const [loaded] = update(loading, SnapshotSamplesLoaded({ id: "snap-1" }));
     const [again, repeatCommands] = update(loaded, SnapshotsChanged({ snapshots: [snapshot] }));
+    const [afterDeletion, deletionCommands] = update(loaded, SnapshotsChanged({ snapshots: [] }));
     expect(loaded.snapshotLoads["snap-1"]?.status).toBe("loaded");
     expect(repeatCommands).toHaveLength(0);
     expect(again.snapshotLoads["snap-1"]?.status).toBe("loaded");
+    expect(afterDeletion.snapshots).toEqual([snapshot]);
+    expect(deletionCommands).toHaveLength(0);
   });
 
   it("requires a snapshot name before starting a save", () => {
@@ -309,5 +316,23 @@ describe("@vscope/ui model", () => {
     expect(blankCommands).toHaveLength(0);
     expect(saving.busy).toBe("saveSnapshot");
     expect(saveCommands.map((command) => command.name)).toEqual(["SaveSnapshot"]);
+  });
+
+  it("confirms deletion and toggles favorites through runtime commands", () => {
+    const [model] = init(testUrl);
+    const id = PersistentId.make("snapshot:test");
+    const [confirming] = update(model, SnapshotDeleteToggled({ id }));
+    const [deleting, deleteCommands] = update(confirming, SnapshotDeleteConfirmed({ id }));
+    const [favoriting, favoriteCommands] = update(
+      model,
+      SnapshotFavoriteChanged({ id, favorite: true }),
+    );
+
+    expect(confirming.snapshotDeleteCandidate).toBe(id);
+    expect(deleting.snapshotDeleteCandidate).toBeNull();
+    expect(deleting.busy).toBe("deleteSnapshot");
+    expect(deleteCommands.map((command) => command.name)).toEqual(["DeleteSnapshot"]);
+    expect(favoriting.busy).toBe("favoriteSnapshot");
+    expect(favoriteCommands.map((command) => command.name)).toEqual(["SetSnapshotFavorite"]);
   });
 });

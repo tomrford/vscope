@@ -18,6 +18,7 @@ import {
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
   SnapshotTrigger,
+  type Timestamp,
   noRecovery,
   snapshotSampleByteLength,
   recovery,
@@ -185,6 +186,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       trigger,
       rtValues,
       metadata,
+      favorite: decodedRow.favorite === 1,
       createdAt: decodedRow.created_at,
       updatedAt: decodedRow.updated_at,
     });
@@ -284,6 +286,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       trigger: draft.trigger,
       rtValues: draft.rtValues,
       metadata: draft.metadata,
+      favorite: false,
       createdAt,
       updatedAt: createdAt,
     });
@@ -316,6 +319,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               trigger_json,
               rt_values_json,
               metadata_json,
+              favorite,
               created_at,
               updated_at
             ) VALUES (
@@ -332,6 +336,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               ${triggerJson},
               ${rtValuesJson},
               ${metadataJson},
+              ${record.favorite ? 1 : 0},
               ${record.createdAt},
               ${record.updatedAt}
             )
@@ -372,7 +377,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
             FROM snapshots
             LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-            ORDER BY snapshots.created_at DESC, snapshots.id DESC
+            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
           `
         : sql`
             SELECT
@@ -380,7 +385,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
             FROM snapshots
             LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-            ORDER BY snapshots.created_at DESC, snapshots.id DESC
+            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
             LIMIT ${query.limit}
           `,
     );
@@ -414,21 +419,24 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     return snapshots;
   });
 
-  const renameSnapshot = Effect.fn("Persistence.renameSnapshot")(function* (
+  const setSnapshotFavorite = Effect.fn("Persistence.setSnapshotFavorite")(function* (
     id: PersistentId,
-    label: string,
+    favorite: boolean,
   ) {
     const current = yield* requireSnapshot(id);
+    if (current.favorite === favorite) {
+      return current;
+    }
     const updatedAt = yield* createTimestamp();
-    const updated = yield* decodeWith(SnapshotRecord, "rename snapshot", {
+    const updated = yield* decodeWith(SnapshotRecord, "set snapshot favorite", {
       ...current,
-      label,
+      favorite,
       updatedAt,
     });
 
     yield* runSql(
-      "rename snapshot",
-      sql`UPDATE snapshots SET label = ${updated.label}, updated_at = ${updated.updatedAt} WHERE id = ${updated.id}`,
+      "set snapshot favorite",
+      sql`UPDATE snapshots SET favorite = ${updated.favorite ? 1 : 0}, updated_at = ${updated.updatedAt} WHERE id = ${updated.id}`,
     );
 
     return updated;
@@ -436,6 +444,20 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
 
   const deleteSnapshot = Effect.fn("Persistence.deleteSnapshot")(function* (id: PersistentId) {
     yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
+  });
+
+  const pruneSnapshotsBefore = Effect.fn("Persistence.pruneSnapshotsBefore")(function* (
+    cutoff: Timestamp,
+  ) {
+    const deleted = yield* runSql(
+      "prune snapshots",
+      sql`
+        DELETE FROM snapshots
+        WHERE favorite = 0 AND created_at < ${cutoff}
+        RETURNING id
+      `,
+    );
+    return deleted.length;
   });
 
   const writeSnapshotSamples = Effect.fn("Persistence.writeSnapshotSamples")(function* (
@@ -493,8 +515,9 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     createSnapshot,
     listSnapshots,
     getSnapshot,
-    renameSnapshot,
+    setSnapshotFavorite,
     deleteSnapshot,
+    pruneSnapshotsBefore,
     writeSnapshotSamples,
     readSnapshotSamples,
   };

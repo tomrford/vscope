@@ -53,6 +53,11 @@ export interface RuntimeRpcHandlers {
   ) => Effect.Effect<void, RuntimeCoreError>;
   readonly readFrame: Effect.Effect<RuntimeFramePayload | null>;
   readonly captureSnapshot: (label?: string | undefined) => Effect.Effect<void, RuntimeCoreError>;
+  readonly deleteSnapshot: (id: PersistentId) => Effect.Effect<void, RuntimeCoreError>;
+  readonly setSnapshotFavorite: (
+    id: PersistentId,
+    favorite: boolean,
+  ) => Effect.Effect<void, RuntimeCoreError>;
   readonly listSnapshots: Effect.Effect<ReadonlyArray<SnapshotRecord>, RuntimeCoreError>;
 }
 
@@ -102,6 +107,8 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
       dispatch({ type: "devices/setChannelMap", channel, variable }),
     readFrame,
     captureSnapshot: (label) => dispatch({ type: "snapshots/capture", label }),
+    deleteSnapshot: (id) => dispatch({ type: "snapshots/delete", id }),
+    setSnapshotFavorite: (id, favorite) => dispatch({ type: "snapshots/favorite", id, favorite }),
     listSnapshots,
   };
 

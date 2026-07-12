@@ -4,7 +4,7 @@ import nodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 
 import { SqliteClient } from "@effect/sql-sqlite-node";
-import { Effect, Option } from "effect";
+import { Effect, Option, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
@@ -15,6 +15,7 @@ import {
   SnapshotDraft,
   SnapshotSamplesWrite,
   SnapshotTrigger,
+  Timestamp,
 } from "@vscope/shared";
 
 import { Persistence, initializePersistence, makePersistenceLayer } from "./index.ts";
@@ -64,6 +65,10 @@ function snapshotDraft(label: string, sampleCount: number): SnapshotDraft {
 function floatBytes(values: ReadonlyArray<number>): Uint8Array {
   const floats = new Float32Array(values);
   return new Uint8Array(floats.buffer.slice(0));
+}
+
+function timestamp(value: string) {
+  return Schema.decodeUnknownSync(Timestamp)(value);
 }
 
 describe("@vscope/persistence", () => {
@@ -188,6 +193,43 @@ describe("@vscope/persistence", () => {
     ),
   );
 
+  it.effect("drops the obsolete auto-save field without resetting saved settings", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            yield* persistence.readSettings;
+          }),
+        );
+        yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const saved = JSON.stringify({
+              ...DEFAULT_SETTINGS,
+              theme: "dark",
+              snapshots: { autoSave: false, retentionDays: 30 },
+            });
+            yield* sql`UPDATE settings SET data_json = ${saved} WHERE id = 1`;
+          }),
+        );
+
+        const state = yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            return yield* persistence.readSettings;
+          }),
+        );
+        expect(state.settings.theme).toBe("dark");
+        expect(state.settings.snapshots.retentionDays).toBe(30);
+        expect(state.recovery.pending).toBe(false);
+      }),
+    ),
+  );
+
   it.effect("concurrent settings patches preserve independent fields", () =>
     withTempPath((path) =>
       runWithPersistence(
@@ -242,8 +284,8 @@ describe("@vscope/persistence", () => {
           }
           expect(Array.from(loaded.value.data)).toEqual(Array.from(samples.data));
 
-          const renamed = yield* persistence.renameSnapshot(snapshot.id, "Renamed trace");
-          expect(renamed.label).toBe("Renamed trace");
+          const favorite = yield* persistence.setSnapshotFavorite(snapshot.id, true);
+          expect(favorite.favorite).toBe(true);
 
           const replacement = SnapshotSamplesWrite.make({
             format: SNAPSHOT_SAMPLE_FORMAT,
@@ -260,6 +302,50 @@ describe("@vscope/persistence", () => {
 
           yield* persistence.deleteSnapshot(snapshot.id);
           expect(yield* persistence.listSnapshots()).toEqual([]);
+        }),
+      ),
+    ),
+  );
+
+  it.effect("sorts favorites first and exempts them from retention pruning", () =>
+    withTempPath((path) =>
+      runWithPersistence(
+        path,
+        Effect.gen(function* () {
+          const persistence = yield* Persistence;
+          const old = yield* persistence.createSnapshot(
+            SnapshotDraft.make({
+              ...snapshotDraft("Old favorite", 1),
+              createdAt: timestamp("2024-01-01T00:00:00.000Z"),
+            }),
+          );
+          const expired = yield* persistence.createSnapshot(
+            SnapshotDraft.make({
+              ...snapshotDraft("Expired", 1),
+              createdAt: timestamp("2024-01-02T00:00:00.000Z"),
+            }),
+          );
+          const recent = yield* persistence.createSnapshot(
+            SnapshotDraft.make({
+              ...snapshotDraft("Recent", 1),
+              createdAt: timestamp("2024-02-01T00:00:00.000Z"),
+            }),
+          );
+
+          yield* persistence.setSnapshotFavorite(old.id, true);
+          expect((yield* persistence.listSnapshots()).map((snapshot) => snapshot.id)).toEqual([
+            old.id,
+            recent.id,
+            expired.id,
+          ]);
+
+          expect(
+            yield* persistence.pruneSnapshotsBefore(timestamp("2024-01-15T00:00:00.000Z")),
+          ).toBe(1);
+          expect((yield* persistence.listSnapshots()).map((snapshot) => snapshot.id)).toEqual([
+            old.id,
+            recent.id,
+          ]);
         }),
       ),
     ),

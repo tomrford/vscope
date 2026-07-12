@@ -1,4 +1,5 @@
 import {
+  Clock,
   Deferred,
   Effect,
   Fiber,
@@ -7,6 +8,7 @@ import {
   PubSub,
   Ref,
   Schedule,
+  Schema,
   Scope,
   Semaphore,
   Stream,
@@ -21,6 +23,7 @@ import {
   type SnapshotSampleBlob,
   SnapshotSamplesWrite,
   SnapshotTrigger,
+  Timestamp,
   errorReason,
 } from "@vscope/shared";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
@@ -87,6 +90,20 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
   const monitorFiber = yield* Ref.make<DeviceMonitorFiber | null>(null);
   const sessionRef = yield* Ref.make<DeviceSession | null>(null);
   const dispatchLock = yield* Semaphore.make(1);
+
+  const refreshSnapshots = Effect.fn("RuntimeCore.refreshSnapshots")(function* (
+    retentionDays: RuntimeAppState["settings"]["snapshots"]["retentionDays"],
+  ) {
+    yield* pruneExpiredSnapshots(persistence, retentionDays);
+    const snapshots = yield* persistence
+      .listSnapshots()
+      .pipe(
+        Effect.mapError(
+          (cause) => new RuntimeCorePersistenceError({ operation: "snapshots/list", cause }),
+        ),
+      );
+    yield* SubscriptionRef.set(snapshotsRef, snapshots);
+  });
 
   const updateApp = (update: (app: RuntimeAppState) => RuntimeAppState) =>
     SubscriptionRef.updateAndGet(appRef, (app) => finalizeApp(update(app)));
@@ -590,15 +607,8 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
             (cause) => new RuntimeCorePersistenceError({ operation: command.type, cause }),
           ),
         );
-      const snapshots = yield* persistence
-        .listSnapshots()
-        .pipe(
-          Effect.mapError(
-            (cause) => new RuntimeCorePersistenceError({ operation: "snapshots/list", cause }),
-          ),
-        );
-
-      yield* SubscriptionRef.set(snapshotsRef, snapshots);
+      const app = yield* SubscriptionRef.get(appRef);
+      yield* refreshSnapshots(app.settings.snapshots.retentionDays);
       yield* clearActiveDeviceError(active.path);
       yield* logApp(`Captured snapshot "${record.label}" from ${active.deviceName}`);
     }).pipe(Effect.tapError((error) => applyDeviceError(active.path, error)));
@@ -622,6 +632,7 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
             settings: stateResult.settings,
             settingsRecovery: stateResult.recovery,
           }));
+          yield* refreshSnapshots(stateResult.settings.snapshots.retentionDays);
         });
       case "devices/connect":
         return connectDevice(command);
@@ -629,6 +640,28 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
         return disconnectDevice();
       case "snapshots/capture":
         return captureSnapshot(command);
+      case "snapshots/delete":
+        return persistence.deleteSnapshot(command.id).pipe(
+          Effect.mapError(
+            (cause) => new RuntimeCorePersistenceError({ operation: command.type, cause }),
+          ),
+          Effect.andThen(
+            SubscriptionRef.get(appRef).pipe(
+              Effect.flatMap((app) => refreshSnapshots(app.settings.snapshots.retentionDays)),
+            ),
+          ),
+        );
+      case "snapshots/favorite":
+        return persistence.setSnapshotFavorite(command.id, command.favorite).pipe(
+          Effect.mapError(
+            (cause) => new RuntimeCorePersistenceError({ operation: command.type, cause }),
+          ),
+          Effect.andThen(
+            SubscriptionRef.get(appRef).pipe(
+              Effect.flatMap((app) => refreshSnapshots(app.settings.snapshots.retentionDays)),
+            ),
+          ),
+        );
       case "devices/run":
       case "devices/stop":
       case "devices/setTiming":
@@ -716,6 +749,7 @@ const hydrateInitialStores = Effect.fn("RuntimeCore.hydrateInitialStores")(funct
       (cause) => new RuntimeCorePersistenceError({ operation: "settings/read", cause }),
     ),
   );
+  yield* pruneExpiredSnapshots(persistence, settingsState.settings.snapshots.retentionDays);
   const snapshots = yield* persistence
     .listSnapshots()
     .pipe(
@@ -736,6 +770,27 @@ const hydrateInitialStores = Effect.fn("RuntimeCore.hydrateInitialStores")(funct
     }),
     snapshots,
   };
+});
+
+const pruneExpiredSnapshots = Effect.fn("RuntimeCore.pruneExpiredSnapshots")(function* (
+  persistence: PersistenceService,
+  retentionDays: RuntimeAppState["settings"]["snapshots"]["retentionDays"],
+) {
+  if (retentionDays === "never") {
+    return;
+  }
+
+  const now = yield* Clock.currentTimeMillis;
+  const cutoff = Schema.decodeUnknownSync(Timestamp)(
+    new Date(now - retentionDays * 24 * 60 * 60 * 1000).toISOString(),
+  );
+  yield* persistence
+    .pruneSnapshotsBefore(cutoff)
+    .pipe(
+      Effect.mapError(
+        (cause) => new RuntimeCorePersistenceError({ operation: "snapshots/prune", cause }),
+      ),
+    );
 });
 
 function finalizeApp(app: RuntimeAppState): RuntimeAppState {

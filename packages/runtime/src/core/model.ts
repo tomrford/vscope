@@ -1,5 +1,6 @@
 import type { Schema } from "effect";
 import type {
+  PersistentId,
   RecoveryState,
   RuntimeLogEntryDto,
   RuntimeWarningDto,
@@ -60,6 +61,17 @@ export interface SnapshotCaptureCommand {
   readonly label?: string | undefined;
 }
 
+export interface SnapshotDeleteCommand {
+  readonly type: "snapshots/delete";
+  readonly id: PersistentId;
+}
+
+export interface SnapshotFavoriteCommand {
+  readonly type: "snapshots/favorite";
+  readonly id: PersistentId;
+  readonly favorite: boolean;
+}
+
 export type DeviceControlCommand =
   | {
       readonly type: "devices/run";
@@ -106,4 +118,6 @@ export type CoreCommand =
       readonly type: "devices/disconnect";
     }
   | SnapshotCaptureCommand
+  | SnapshotDeleteCommand
+  | SnapshotFavoriteCommand
   | DeviceControlCommand;

@@ -49,7 +49,6 @@ export class PollingSettings extends Schema.Class<PollingSettings>("PollingSetti
 }) {}
 
 export class SnapshotSettings extends Schema.Class<SnapshotSettings>("SnapshotSettings")({
-  autoSave: Schema.Boolean,
   retentionDays: Schema.Union([
     Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
     Schema.Literals(["never"]),
@@ -85,7 +84,6 @@ export const DEFAULT_SETTINGS = Settings.make({
     retryAttempts: 2,
   }),
   snapshots: SnapshotSettings.make({
-    autoSave: false,
     retentionDays: "never",
   }),
   liveView: LiveViewSettings.make({
@@ -166,6 +164,7 @@ export class SnapshotRecord extends Schema.Class<SnapshotRecord>("SnapshotRecord
   trigger: SnapshotTrigger,
   rtValues: Schema.Array(Schema.Finite),
   metadata: JsonObject,
+  favorite: Schema.Boolean,
   createdAt: Timestamp,
   updatedAt: Timestamp,
 }) {}

@@ -7,9 +7,12 @@ import {
   SNAPSHOT_SAMPLE_FORMAT,
   Settings,
   SettingsState,
+  SnapshotDraft,
   SnapshotRecord,
   SnapshotSampleBlob,
   SnapshotSampleDescriptor,
+  SnapshotSettings,
+  SnapshotTrigger,
   Timestamp,
   noRecovery,
   type SnapshotListQuery,
@@ -305,6 +308,16 @@ describe("@vscope/runtime core", () => {
         expect(samples?.data.byteLength).toBe(
           fakeInfo.channelCount * fakeInfo.bufferSize * Float32Array.BYTES_PER_ELEMENT,
         );
+
+        yield* core.dispatch({
+          type: "snapshots/favorite",
+          id: snapshot.id,
+          favorite: true,
+        });
+        expect((yield* core.listSnapshots)[0]?.favorite).toBe(true);
+
+        yield* core.dispatch({ type: "snapshots/delete", id: snapshot.id });
+        expect(yield* core.listSnapshots).toEqual([]);
       }),
     );
   });
@@ -374,6 +387,34 @@ describe("@vscope/runtime core", () => {
   });
 
   layer(coreTestLayer())((it) => {
+    it.effect("applies retention changes while preserving favorites", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const persistence = yield* Persistence;
+        const old = yield* persistence.createSnapshot(
+          retentionSnapshotDraft("Old favorite", "1970-01-01T00:00:00.000Z"),
+        );
+        yield* persistence.createSnapshot(
+          retentionSnapshotDraft("Expired", "1970-01-10T00:00:00.000Z"),
+        );
+        const recent = yield* persistence.createSnapshot(
+          retentionSnapshotDraft("Recent", "1970-01-30T00:00:00.000Z"),
+        );
+        yield* persistence.setSnapshotFavorite(old.id, true);
+        yield* TestClock.setTime(Date.parse("1970-02-01T00:00:00.000Z"));
+
+        yield* core.dispatch({
+          type: "settings/patch",
+          patch: { snapshots: SnapshotSettings.make({ retentionDays: 7 }) },
+        });
+
+        expect((yield* core.listSnapshots).map((snapshot) => snapshot.id)).toEqual([
+          old.id,
+          recent.id,
+        ]);
+      }),
+    );
+
     it.effect("persists settings patches through the core dispatch boundary", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;
@@ -390,7 +431,11 @@ describe("@vscope/runtime core", () => {
 });
 
 function coreTestLayer(serialLayer = fakeSerialLayer([fakePort])) {
-  return RuntimeCoreLive.pipe(Layer.provide(Layer.mergeAll(fakePersistenceLayer(), serialLayer)));
+  const persistenceLayer = fakePersistenceLayer();
+  return Layer.merge(
+    persistenceLayer,
+    RuntimeCoreLive.pipe(Layer.provide(Layer.mergeAll(persistenceLayer, serialLayer))),
+  );
 }
 
 function advanceTestClock(durationMillis: number) {
@@ -448,7 +493,7 @@ function fakePersistenceLayer() {
     createSnapshot: (draft, samples) =>
       Effect.sync(() => {
         const id = persistentId(`snapshot:${(snapshotCounter += 1)}`);
-        const now = timestamp();
+        const now = draft.createdAt ?? timestamp();
         const record = SnapshotRecord.make({
           id,
           label: draft.label,
@@ -467,6 +512,7 @@ function fakePersistenceLayer() {
           trigger: draft.trigger,
           rtValues: draft.rtValues,
           metadata: draft.metadata,
+          favorite: false,
           createdAt: now,
           updatedAt: now,
         });
@@ -495,8 +541,39 @@ function fakePersistenceLayer() {
         const snapshot = snapshots.find((candidate) => candidate.id === id);
         return snapshot ? Option.some(snapshot) : Option.none();
       }),
-    renameSnapshot: () => Effect.die("fake persistence renameSnapshot is not implemented"),
-    deleteSnapshot: () => Effect.void,
+    setSnapshotFavorite: (id, favorite) =>
+      Effect.sync(() => {
+        const index = snapshots.findIndex((snapshot) => snapshot.id === id);
+        const current = snapshots[index];
+        if (current === undefined) throw new Error(`Unknown snapshot ${id}`);
+        const updated = SnapshotRecord.make({ ...current, favorite, updatedAt: timestamp() });
+        snapshots[index] = updated;
+        snapshots.sort(
+          (left, right) =>
+            Number(right.favorite) - Number(left.favorite) ||
+            right.createdAt.localeCompare(left.createdAt),
+        );
+        return updated;
+      }),
+    deleteSnapshot: (id) =>
+      Effect.sync(() => {
+        const index = snapshots.findIndex((snapshot) => snapshot.id === id);
+        if (index >= 0) snapshots.splice(index, 1);
+        snapshotSamples.delete(id);
+      }),
+    pruneSnapshotsBefore: (cutoff) =>
+      Effect.sync(() => {
+        let deleted = 0;
+        for (let index = snapshots.length - 1; index >= 0; index -= 1) {
+          const snapshot = snapshots[index];
+          if (snapshot && !snapshot.favorite && snapshot.createdAt < cutoff) {
+            snapshots.splice(index, 1);
+            snapshotSamples.delete(snapshot.id);
+            deleted += 1;
+          }
+        }
+        return deleted;
+      }),
     writeSnapshotSamples: () =>
       Effect.die("fake persistence writeSnapshotSamples is not implemented"),
     readSnapshotSamples: (id) =>
@@ -530,6 +607,23 @@ function snapshotSampleBytes(): Uint8Array {
     samples[index] = index;
   }
   return new Uint8Array(samples.buffer.slice(0));
+}
+
+function retentionSnapshotDraft(label: string, createdAt: string): SnapshotDraft {
+  return SnapshotDraft.make({
+    label,
+    device: { name: fakeInfo.deviceName },
+    channelCount: fakeInfo.channelCount,
+    sampleCount: 1,
+    sampleRateHz: 1_000,
+    totalDurationSeconds: 0.001,
+    preTriggerSeconds: 0,
+    channelMap: [0, 1],
+    trigger: SnapshotTrigger.make(fakeTrigger),
+    rtValues: [0, 0],
+    metadata: {},
+    createdAt: Timestamp.make(createdAt),
+  });
 }
 
 interface FakeSerialLayerOptions {
