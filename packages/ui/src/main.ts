@@ -1,4 +1,4 @@
-import { TriggerMode, type RuntimeDeviceState } from "@vscope/shared";
+import { SerialParity, Theme, TriggerMode, type RuntimeDeviceState } from "@vscope/shared";
 import { Effect, Match, Schema } from "effect";
 import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
@@ -21,6 +21,14 @@ import {
   SetChannelMapRequested,
   SetTimingRequested,
   SetTriggerRequested,
+  SettingsApplyRequested,
+  SettingsDataBitsChanged,
+  SettingsDtrToggled,
+  SettingsParityChanged,
+  SettingsRtsToggled,
+  SettingsStopBitsChanged,
+  SettingsTextChanged,
+  SettingsThemeChanged,
   SnapshotCompareToggled,
   SnapshotDeleteConfirmed,
   SnapshotDeleteToggled,
@@ -35,6 +43,7 @@ import {
   TriggerRequested,
   TriggerThresholdChanged,
   init,
+  resolvedTheme,
   update,
 } from "./model.ts";
 import type { MenuId, Message } from "./model.ts";
@@ -42,6 +51,7 @@ import { acquireLivePlot, channelColor, releaseLivePlot } from "./liveplot.ts";
 import { liveHref, routeSnapshotIds, snapshotsHref, type SnapshotsRoute } from "./route.ts";
 import { acquireSnapshotPlot, releaseSnapshotPlot, snapshotChannelLabels } from "./snapshotplot.ts";
 import { appStyles, sx } from "./styles.ts";
+import { darkColors, darkShadows } from "./theme.stylex.ts";
 
 export { Model, init, update };
 export type { Message };
@@ -50,6 +60,8 @@ type H = ReturnType<typeof html<Message>>;
 type ButtonVariant = "default" | "primary" | "run" | "stop" | "active";
 
 const triggerModes: ReadonlyArray<TriggerMode> = TriggerMode.literals;
+const themes: ReadonlyArray<Theme> = Theme.literals;
+const parities: ReadonlyArray<SerialParity> = SerialParity.literals;
 
 const MountLivePlot = Mount.define(
   "MountLivePlot",
@@ -335,6 +347,8 @@ const viewDock = (model: Model, h: H): Html =>
           ),
         ],
       ),
+      h.div([...sx(h, appStyles.dockSpacer)], []),
+      viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, false),
     ],
   );
 
@@ -541,6 +555,199 @@ const viewRtDialog = (model: Model, h: H): Html => {
               ),
             ),
           ),
+    ],
+  );
+};
+
+const viewSettingsSelect = (
+  h: H,
+  label: string,
+  value: string,
+  options: ReadonlyArray<{ readonly value: string; readonly label: string }>,
+  onChange: (value: string) => Message,
+): Html =>
+  h.label(
+    [...sx(h, appStyles.field)],
+    [
+      h.span([...sx(h, appStyles.fieldLabel)], [label]),
+      h.select(
+        [...sx(h, appStyles.select), h.Attribute("value", value), h.OnChange(onChange)],
+        options.map((option) =>
+          h.option(
+            [
+              h.Key(option.value),
+              h.Attribute("value", option.value),
+              h.Selected(option.value === value),
+            ],
+            [option.label],
+          ),
+        ),
+      ),
+    ],
+  );
+
+const viewSettingsTextField = (
+  h: H,
+  label: string,
+  field: Parameters<typeof SettingsTextChanged>[0]["field"],
+  value: string,
+  type: "number" | "text" = "number",
+): Html =>
+  h.label(
+    [...sx(h, appStyles.field)],
+    [
+      h.span([...sx(h, appStyles.fieldLabel)], [label]),
+      h.input([
+        h.Attribute("type", type),
+        ...sx(h, appStyles.input),
+        h.Value(value),
+        h.OnInput((next) => SettingsTextChanged({ field, value: next })),
+      ]),
+    ],
+  );
+
+const viewSettingsCheckbox = (h: H, label: string, checked: boolean, onClick: Message): Html =>
+  h.label(
+    [...sx(h, appStyles.checkboxField)],
+    [
+      h.input([h.Attribute("type", "checkbox"), h.Checked(checked), h.OnClick(onClick)]),
+      h.span([], [label]),
+    ],
+  );
+
+const viewSettingsSection = (h: H, title: string, content: ReadonlyArray<Html>): Html =>
+  h.section(
+    [...sx(h, appStyles.settingsSection)],
+    [h.h3([...sx(h, appStyles.settingsSectionTitle)], [title]), ...content],
+  );
+
+const viewSettingsDialog = (model: Model, h: H): Html => {
+  const draft = model.settingsDraft;
+  return h.section(
+    [...sx(h, appStyles.dialog)],
+    [
+      h.div(
+        [...sx(h, appStyles.dialogHeader)],
+        [
+          h.div(
+            [],
+            [
+              h.h2([...sx(h, appStyles.dialogTitle)], ["Settings"]),
+              h.p(
+                [...sx(h, appStyles.helperText)],
+                ["Runtime defaults are stored locally and used by the daemon."],
+              ),
+            ],
+          ),
+          h.div(
+            [...sx(h, appStyles.cluster)],
+            [
+              viewButton(h, "Cancel", MenuClosed(), { small: true }),
+              viewButton(h, "Apply", SettingsApplyRequested(), {
+                variant: "primary",
+                small: true,
+                disabled: isBusy(model),
+              }),
+            ],
+          ),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.settingsGrid)],
+        [
+          viewSettingsSection(h, "Appearance", [
+            viewSettingsSelect(
+              h,
+              "Theme",
+              draft.theme,
+              themes.map((theme) => ({
+                value: theme,
+                label: theme[0]?.toUpperCase() + theme.slice(1),
+              })),
+              (value) => SettingsThemeChanged({ theme: parseTheme(value) }),
+            ),
+          ]),
+          viewSettingsSection(h, "Live view", [
+            viewSettingsTextField(
+              h,
+              "Buffer duration (seconds)",
+              "bufferDurationSeconds",
+              draft.bufferDurationSeconds,
+            ),
+          ]),
+          viewSettingsSection(h, "Default serial connection", [
+            h.p(
+              [...sx(h, appStyles.helperText)],
+              ["These values are used the next time a device connects."],
+            ),
+            h.div(
+              [...sx(h, appStyles.settingsFields)],
+              [
+                viewSettingsTextField(h, "Baud rate", "baudRate", draft.baudRate),
+                viewSettingsSelect(
+                  h,
+                  "Data bits",
+                  String(draft.dataBits),
+                  [5, 6, 7, 8].map((value) => ({ value: String(value), label: String(value) })),
+                  (value) => SettingsDataBitsChanged({ dataBits: parseDataBits(value) }),
+                ),
+                viewSettingsSelect(
+                  h,
+                  "Stop bits",
+                  String(draft.stopBits),
+                  [1, 1.5, 2].map((value) => ({ value: String(value), label: String(value) })),
+                  (value) => SettingsStopBitsChanged({ stopBits: parseStopBits(value) }),
+                ),
+                viewSettingsSelect(
+                  h,
+                  "Parity",
+                  draft.parity,
+                  parities.map((parity) => ({ value: parity, label: parity })),
+                  (value) => SettingsParityChanged({ parity: parseParity(value) }),
+                ),
+              ],
+            ),
+            viewSettingsCheckbox(h, "Assert DTR", draft.dtr, SettingsDtrToggled()),
+            viewSettingsCheckbox(h, "Assert RTS", draft.rts, SettingsRtsToggled()),
+          ]),
+          viewSettingsSection(h, "Polling", [
+            h.div(
+              [...sx(h, appStyles.settingsFields)],
+              [
+                viewSettingsTextField(h, "State rate (Hz)", "stateHz", draft.stateHz),
+                viewSettingsTextField(h, "Frame rate (Hz)", "frameHz", draft.frameHz),
+                viewSettingsTextField(
+                  h,
+                  "Serial timeout (ms)",
+                  "serialTimeoutMs",
+                  draft.serialTimeoutMs,
+                ),
+                viewSettingsTextField(h, "Retry attempts", "retryAttempts", draft.retryAttempts),
+              ],
+            ),
+          ]),
+          viewSettingsSection(h, "Snapshots", [
+            viewSettingsTextField(
+              h,
+              "Retention days",
+              "retentionDays",
+              draft.retentionDays,
+              "text",
+            ),
+            h.p(
+              [...sx(h, appStyles.helperText)],
+              ["Enter ‘never’ to keep snapshots indefinitely."],
+            ),
+          ]),
+          viewSettingsSection(h, "Network", [
+            viewSettingsTextField(h, "Port", "port", draft.port),
+            h.p(
+              [...sx(h, appStyles.restartNote)],
+              ["A port change takes effect after restarting vscope."],
+            ),
+          ]),
+        ],
+      ),
     ],
   );
 };
@@ -911,6 +1118,7 @@ const viewLiveContent = (model: Model, h: H): ReadonlyArray<Html | null> => [
 
 export const view = (model: Model): Document => {
   const h = html<Message>();
+  const dark = resolvedTheme(model) === "dark";
   const page = Match.value(model.route).pipe(
     Match.withReturnType<{
       readonly title: string;
@@ -927,7 +1135,18 @@ export const view = (model: Model): Document => {
   );
   return {
     title: page.title,
-    body: h.div([...sx(h, appStyles.root)], [...page.content]),
+    body: h.div(
+      [
+        ...sx(
+          h,
+          appStyles.root,
+          dark && darkColors,
+          dark && darkShadows,
+          dark && appStyles.rootDark,
+        ),
+      ],
+      [...page.content],
+    ),
   };
 };
 
@@ -950,6 +1169,25 @@ const portLabel = (path: string, manufacturer: string | undefined): string =>
 const isTriggerMode = Schema.is(TriggerMode);
 const parseTriggerMode = (value: string): TriggerMode =>
   isTriggerMode(value) ? value : "disabled";
+
+const isTheme = Schema.is(Theme);
+const parseTheme = (value: string): Theme => (isTheme(value) ? value : "system");
+
+const isParity = Schema.is(SerialParity);
+const parseParity = (value: string): SerialParity => (isParity(value) ? value : "none");
+
+const parseDataBits = (value: string): 5 | 6 | 7 | 8 => {
+  if (value === "5") return 5;
+  if (value === "6") return 6;
+  if (value === "7") return 7;
+  return 8;
+};
+
+const parseStopBits = (value: string): 1 | 1.5 | 2 => {
+  if (value === "1") return 1;
+  if (value === "1.5") return 1.5;
+  return 2;
+};
 
 const formatDate = (value: string): string => {
   const date = new Date(value);

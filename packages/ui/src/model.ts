@@ -1,4 +1,8 @@
 import {
+  DEFAULT_SETTINGS,
+  LiveViewSettings,
+  NetworkSettings,
+  PollingSettings,
   PersistentId,
   RuntimeActiveDevice,
   RuntimeAppDto,
@@ -6,7 +10,13 @@ import {
   RuntimeDeviceConfigPayload,
   RuntimeFramePayload,
   RuntimePortInfo,
+  RuntimeSettingsPatchRequest,
+  SerialConfig,
+  SerialParity,
+  Settings,
+  SnapshotSettings,
   SnapshotRecord,
+  Theme,
   TriggerMode,
   errorReason,
 } from "@vscope/shared";
@@ -31,6 +41,7 @@ export const MenuId = Schema.Literals([
   "rt",
   "snapshots",
   "saveSnapshot",
+  "settings",
 ]);
 export type MenuId = Schema.Schema.Type<typeof MenuId>;
 
@@ -47,10 +58,41 @@ export const ControlAction = Schema.Literals([
   "setChannelMap",
   "deleteSnapshot",
   "favoriteSnapshot",
+  "saveSettings",
 ]);
 export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
 
 const BusyState = Schema.NullOr(ControlAction);
+
+const SettingsTextField = Schema.Literals([
+  "baudRate",
+  "stateHz",
+  "frameHz",
+  "serialTimeoutMs",
+  "retryAttempts",
+  "retentionDays",
+  "bufferDurationSeconds",
+  "port",
+]);
+type SettingsTextField = Schema.Schema.Type<typeof SettingsTextField>;
+
+export const SettingsDraft = Schema.Struct({
+  theme: Theme,
+  baudRate: Schema.String,
+  dataBits: Schema.Literals([5, 6, 7, 8]),
+  stopBits: Schema.Literals([1, 1.5, 2]),
+  parity: SerialParity,
+  dtr: Schema.Boolean,
+  rts: Schema.Boolean,
+  stateHz: Schema.String,
+  frameHz: Schema.String,
+  serialTimeoutMs: Schema.String,
+  retryAttempts: Schema.String,
+  retentionDays: Schema.String,
+  bufferDurationSeconds: Schema.String,
+  port: Schema.String,
+});
+export type SettingsDraft = Schema.Schema.Type<typeof SettingsDraft>;
 
 // Load status per snapshot id on the viewer route. The decoded samples
 // themselves live in the snapshotplot store, not the model.
@@ -82,12 +124,19 @@ export const Model = Schema.Struct({
   compareSelection: Schema.Array(Schema.String),
   snapshotDeleteCandidate: Schema.NullOr(PersistentId),
   snapshotLoads: Schema.Record(Schema.String, SnapshotLoad),
+  systemDark: Schema.Boolean,
+  settingsDraft: SettingsDraft,
   openMenu: Schema.NullOr(MenuId),
   busy: BusyState,
   error: Schema.NullOr(Schema.String),
 });
 
 export type Model = Schema.Schema.Type<typeof Model>;
+
+export const resolvedTheme = (model: Model): "light" | "dark" => {
+  const preference = model.app?.settings.theme ?? "system";
+  return preference === "system" ? (model.systemDark ? "dark" : "light") : preference;
+};
 
 export const UrlRequested = m("UrlRequested", {
   request: UrlRequest,
@@ -143,6 +192,9 @@ export const FrameReceived = m("FrameReceived", {
 export const LivePlotMounted = m("LivePlotMounted");
 export const SnapshotPlotMounted = m("SnapshotPlotMounted");
 export const RuntimeLinkDown = m("RuntimeLinkDown");
+export const SystemThemeChanged = m("SystemThemeChanged", {
+  dark: Schema.Boolean,
+});
 export const CommandSettled = m("CommandSettled");
 export const RtWriteSettled = m("RtWriteSettled");
 export const RtWriteFailed = m("RtWriteFailed", {
@@ -194,6 +246,21 @@ export const ChannelMapChanged = m("ChannelMapChanged", {
 export const SnapshotLabelChanged = m("SnapshotLabelChanged", {
   value: Schema.String,
 });
+export const SettingsTextChanged = m("SettingsTextChanged", {
+  field: SettingsTextField,
+  value: Schema.String,
+});
+export const SettingsThemeChanged = m("SettingsThemeChanged", { theme: Theme });
+export const SettingsDataBitsChanged = m("SettingsDataBitsChanged", {
+  dataBits: Schema.Literals([5, 6, 7, 8]),
+});
+export const SettingsStopBitsChanged = m("SettingsStopBitsChanged", {
+  stopBits: Schema.Literals([1, 1.5, 2]),
+});
+export const SettingsParityChanged = m("SettingsParityChanged", { parity: SerialParity });
+export const SettingsDtrToggled = m("SettingsDtrToggled");
+export const SettingsRtsToggled = m("SettingsRtsToggled");
+export const SettingsApplyRequested = m("SettingsApplyRequested");
 export const RefreshPortsRequested = m("RefreshPortsRequested");
 export const ConnectRequested = m("ConnectRequested");
 export const DisconnectRequested = m("DisconnectRequested");
@@ -226,6 +293,7 @@ export const Message = Schema.Union([
   LivePlotMounted,
   SnapshotPlotMounted,
   RuntimeLinkDown,
+  SystemThemeChanged,
   CommandSettled,
   RtWriteSettled,
   RtWriteFailed,
@@ -244,6 +312,14 @@ export const Message = Schema.Union([
   RtValueCommitted,
   ChannelMapChanged,
   SnapshotLabelChanged,
+  SettingsTextChanged,
+  SettingsThemeChanged,
+  SettingsDataBitsChanged,
+  SettingsStopBitsChanged,
+  SettingsParityChanged,
+  SettingsDtrToggled,
+  SettingsRtsToggled,
+  SettingsApplyRequested,
   RefreshPortsRequested,
   ConnectRequested,
   DisconnectRequested,
@@ -432,6 +508,29 @@ const SetChannelMap = Command.define(
   ),
 );
 
+const PatchSettings = Command.define(
+  "PatchSettings",
+  { patch: RuntimeSettingsPatchRequest },
+  Message,
+)(({ patch }) => settledCommand((rpc) => rpc["settings.patch"](patch)));
+
+const settingsDraftFrom = (settings: Settings): SettingsDraft => ({
+  theme: settings.theme,
+  baudRate: String(settings.defaultSerialConfig.baudRate),
+  dataBits: settings.defaultSerialConfig.dataBits,
+  stopBits: settings.defaultSerialConfig.stopBits,
+  parity: settings.defaultSerialConfig.parity,
+  dtr: settings.defaultSerialConfig.dtr,
+  rts: settings.defaultSerialConfig.rts,
+  stateHz: String(settings.polling.stateHz),
+  frameHz: String(settings.polling.frameHz),
+  serialTimeoutMs: String(settings.polling.serialTimeoutMs),
+  retryAttempts: String(settings.polling.retryAttempts),
+  retentionDays: String(settings.snapshots.retentionDays),
+  bufferDurationSeconds: String(settings.liveView.bufferDurationSeconds),
+  port: String(settings.network.port),
+});
+
 export const init = (url: Url): UpdateResult => [
   {
     route: parseRoute(url),
@@ -455,6 +554,8 @@ export const init = (url: Url): UpdateResult => [
     compareSelection: [],
     snapshotDeleteCandidate: null,
     snapshotLoads: {},
+    systemDark: false,
+    settingsDraft: settingsDraftFrom(DEFAULT_SETTINGS),
     openMenu: null,
     busy: null,
     error: null,
@@ -528,6 +629,87 @@ const parseFinite = (value: string): number | null => {
 const parseNonNegativeInteger = (value: string): number | null => {
   const parsed = parseFinite(value);
   return parsed !== null && Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+};
+
+const parseIntegerInRange = (value: string, minimum: number, maximum: number): number | null => {
+  const parsed = parseFinite(value);
+  return parsed !== null && Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : null;
+};
+
+const parseNumberInRange = (value: string, minimum: number, maximum: number): number | null => {
+  const parsed = parseFinite(value);
+  return parsed !== null && parsed >= minimum && parsed <= maximum ? parsed : null;
+};
+
+const updateSettingsText = (
+  draft: SettingsDraft,
+  field: SettingsTextField,
+  value: string,
+): SettingsDraft => {
+  switch (field) {
+    case "baudRate":
+      return { ...draft, baudRate: value };
+    case "stateHz":
+      return { ...draft, stateHz: value };
+    case "frameHz":
+      return { ...draft, frameHz: value };
+    case "serialTimeoutMs":
+      return { ...draft, serialTimeoutMs: value };
+    case "retryAttempts":
+      return { ...draft, retryAttempts: value };
+    case "retentionDays":
+      return { ...draft, retentionDays: value };
+    case "bufferDurationSeconds":
+      return { ...draft, bufferDurationSeconds: value };
+    case "port":
+      return { ...draft, port: value };
+  }
+};
+
+const settingsPatchFrom = (
+  draft: SettingsDraft,
+): { readonly patch: RuntimeSettingsPatchRequest } | { readonly error: string } => {
+  const baudRate = parseIntegerInRange(draft.baudRate, 1, Number.MAX_SAFE_INTEGER);
+  if (baudRate === null) return { error: "Baud rate must be a positive integer." };
+  const stateHz = parseNumberInRange(draft.stateHz, 0.1, 50);
+  if (stateHz === null) return { error: "State polling must be between 0.1 and 50 Hz." };
+  const frameHz = parseNumberInRange(draft.frameHz, 0.1, 100);
+  if (frameHz === null) return { error: "Frame polling must be between 0.1 and 100 Hz." };
+  const serialTimeoutMs = parseIntegerInRange(draft.serialTimeoutMs, 1, Number.MAX_SAFE_INTEGER);
+  if (serialTimeoutMs === null) return { error: "Serial timeout must be a positive integer." };
+  const retryAttempts = parseIntegerInRange(draft.retryAttempts, 0, Number.MAX_SAFE_INTEGER);
+  if (retryAttempts === null) return { error: "Retry attempts must be zero or greater." };
+  const retentionDays =
+    draft.retentionDays.trim() === "never"
+      ? "never"
+      : parseIntegerInRange(draft.retentionDays, 1, 3650);
+  if (retentionDays === null) return { error: "Retention must be ‘never’ or 1–3650 days." };
+  const bufferDurationSeconds = parseNumberInRange(draft.bufferDurationSeconds, 1, 3600);
+  if (bufferDurationSeconds === null) {
+    return { error: "Live buffer duration must be between 1 and 3600 seconds." };
+  }
+  const port = parseIntegerInRange(draft.port, 1, 65535);
+  if (port === null) return { error: "Network port must be between 1 and 65535." };
+
+  return {
+    patch: RuntimeSettingsPatchRequest.make({
+      theme: draft.theme,
+      defaultSerialConfig: SerialConfig.make({
+        baudRate,
+        dataBits: draft.dataBits,
+        stopBits: draft.stopBits,
+        parity: draft.parity,
+        dtr: draft.dtr,
+        rts: draft.rts,
+      }),
+      polling: PollingSettings.make({ stateHz, frameHz, serialTimeoutMs, retryAttempts }),
+      snapshots: SnapshotSettings.make({ retentionDays }),
+      liveView: LiveViewSettings.make({ bufferDurationSeconds }),
+      network: NetworkSettings.make({ port }),
+    }),
+  };
 };
 
 const failLocal = (model: Model, message: string): UpdateResult => [
@@ -650,7 +832,16 @@ export const update = (model: Model, message: Message): UpdateResult =>
         { ...model, busy: "favoriteSnapshot", error: null },
         [SetSnapshotFavorite({ id, favorite })],
       ],
-      AppChanged: ({ app }) => [{ ...model, app, linkUp: true }, []],
+      AppChanged: ({ app }) => [
+        {
+          ...model,
+          app,
+          linkUp: true,
+          settingsDraft:
+            model.openMenu === "settings" ? model.settingsDraft : settingsDraftFrom(app.settings),
+        },
+        [],
+      ],
       PortsLoaded: ({ ports }) => {
         const refreshSettled = model.busy === "refresh";
         return [
@@ -710,6 +901,7 @@ export const update = (model: Model, message: Message): UpdateResult =>
       LivePlotMounted: () => [model, []],
       SnapshotPlotMounted: () => [model, []],
       RuntimeLinkDown: () => [{ ...model, linkUp: false }, []],
+      SystemThemeChanged: ({ dark }) => [{ ...model, systemDark: dark }, []],
       CommandSettled: () => [{ ...model, busy: null, error: null }, []],
       RtWriteSettled: () => [{ ...model, error: null }, []],
       RtWriteFailed: ({ message }) => [{ ...model, error: message }, []],
@@ -725,6 +917,10 @@ export const update = (model: Model, message: Message): UpdateResult =>
             ...model,
             openMenu: opening ? menu : null,
             snapshotLabelDraft: opening && menu === "saveSnapshot" ? "" : model.snapshotLabelDraft,
+            settingsDraft:
+              opening && menu === "settings" && model.app
+                ? settingsDraftFrom(model.app.settings)
+                : model.settingsDraft,
           },
           [],
         ];
@@ -774,6 +970,49 @@ export const update = (model: Model, message: Message): UpdateResult =>
         [],
       ],
       SnapshotLabelChanged: ({ value }) => [{ ...model, snapshotLabelDraft: value }, []],
+      SettingsTextChanged: ({ field, value }) => [
+        { ...model, settingsDraft: updateSettingsText(model.settingsDraft, field, value) },
+        [],
+      ],
+      SettingsThemeChanged: ({ theme }) => [
+        { ...model, settingsDraft: { ...model.settingsDraft, theme } },
+        [],
+      ],
+      SettingsDataBitsChanged: ({ dataBits }) => [
+        { ...model, settingsDraft: { ...model.settingsDraft, dataBits } },
+        [],
+      ],
+      SettingsStopBitsChanged: ({ stopBits }) => [
+        { ...model, settingsDraft: { ...model.settingsDraft, stopBits } },
+        [],
+      ],
+      SettingsParityChanged: ({ parity }) => [
+        { ...model, settingsDraft: { ...model.settingsDraft, parity } },
+        [],
+      ],
+      SettingsDtrToggled: () => [
+        {
+          ...model,
+          settingsDraft: { ...model.settingsDraft, dtr: !model.settingsDraft.dtr },
+        },
+        [],
+      ],
+      SettingsRtsToggled: () => [
+        {
+          ...model,
+          settingsDraft: { ...model.settingsDraft, rts: !model.settingsDraft.rts },
+        },
+        [],
+      ],
+      SettingsApplyRequested: () => {
+        const result = settingsPatchFrom(model.settingsDraft);
+        return "error" in result
+          ? failLocal(model, result.error)
+          : [
+              { ...model, openMenu: null, busy: "saveSettings", error: null },
+              [PatchSettings({ patch: result.patch })],
+            ];
+      },
       RefreshPortsRequested: () => [
         { ...model, busy: "refresh", error: null },
         [RefreshPorts({ foreground: true })],

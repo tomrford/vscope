@@ -6,7 +6,7 @@ import {
   type LiveSeries,
   type TimeDomain,
 } from "@vscope/liveplot";
-import { RuntimeEndpoint, type SnapshotRecord } from "@vscope/shared";
+import { RuntimeEndpoint, type SnapshotRecord, type Theme } from "@vscope/shared";
 import { Effect } from "effect";
 
 import { channelColor } from "./liveplot.ts";
@@ -34,6 +34,7 @@ const plots = new Map<number, LivePlotEngine>();
 let viewEntries: ReadonlyArray<SnapshotViewEntry> = [];
 let viewKey = "";
 let viewport: TimeDomain | null = null;
+let theme: Exclude<Theme, "system"> = "light";
 
 // Later snapshots in a comparison reuse the channel colour at reduced alpha so
 // per-channel identity stays primary and capture identity reads as depth.
@@ -91,7 +92,7 @@ const configFor = (channel: number) => {
     paused: true,
     loading: viewEntries.some((entry) => !samplesById.has(entry.id)),
     emptyText: viewEntries.length === 0 ? "No snapshots selected" : "No data for this channel",
-    theme: "light" as const,
+    theme,
     scrubEnabled: true,
     showGrid: true,
     showFill: false,
@@ -116,6 +117,11 @@ export const configureSnapshotPlots = (entries: ReadonlyArray<SnapshotViewEntry>
     viewport = null;
   }
   viewEntries = entries;
+  render();
+};
+
+export const setSnapshotPlotTheme = (nextTheme: Exclude<Theme, "system">): void => {
+  theme = nextTheme;
   render();
 };
 

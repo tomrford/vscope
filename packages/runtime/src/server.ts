@@ -14,6 +14,7 @@ import {
   RuntimeFramePayload,
   RuntimeRpcs,
   RuntimeRpcSerialization,
+  RuntimeSettingsPatchRequest,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
   RuntimeSnapshotCaptureRequest,
@@ -24,7 +25,7 @@ import {
   RuntimePortInfo,
   SnapshotRecord,
   PersistentId,
-  type Settings,
+  Settings,
 } from "@vscope/shared";
 import { Context, Effect, Layer, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
@@ -675,6 +676,20 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.Destructive, false)
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_read_settings", {
+    description: "Read persisted runtime settings.",
+    success: Settings,
+  })
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_patch_settings", {
+    description: "Patch persisted runtime settings. Network port changes apply after restart.",
+    parameters: RuntimeSettingsPatchRequest,
+    success: Schema.String,
+    failure: RuntimeApiError,
+  }),
   Tool.make("vscope_list_ports", {
     description: "List available serial ports.",
     parameters: RuntimeListPortsMcpRequest,
@@ -830,6 +845,11 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
     const core = yield* RuntimeCore;
     return RuntimeMcpToolkit.of({
       vscope_get_app: () => core.app.pipe(Effect.map(appDto)),
+      vscope_read_settings: () => core.app.pipe(Effect.map((app) => app.settings)),
+      vscope_patch_settings: (patch) =>
+        core
+          .dispatch({ type: "settings/patch", patch })
+          .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
       vscope_list_ports: (filters) =>
         core.listPorts.pipe(
           Effect.map((ports) =>

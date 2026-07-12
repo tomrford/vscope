@@ -4,6 +4,7 @@ import {
   type LivePoint,
   type LiveSeries,
 } from "@vscope/liveplot";
+import type { Theme } from "@vscope/shared";
 import { Effect } from "effect";
 
 // Per-channel trace colours, indexed by scope channel. Plain values rather
@@ -32,6 +33,7 @@ let channelHistory: Array<Array<LivePoint>> = [];
 let labels: ReadonlyArray<string> = [];
 let mapping: ReadonlyArray<number> = [];
 let windowSeconds = 30;
+let theme: Exclude<Theme, "system"> = "light";
 
 const seriesFor = (channel: number): Array<LiveSeries> => [
   {
@@ -48,7 +50,7 @@ const configFor = (channel: number, loading = false) => ({
   paused: false,
   loading,
   emptyText: activePath === null ? "Connect a device" : "Waiting for data",
-  theme: "light" as const,
+  theme,
   scrubEnabled: false,
   showGrid: true,
   showFill: false,
@@ -127,5 +129,10 @@ export const resetLivePlot = (): void => {
   channelHistory = [];
   labels = [];
   mapping = [];
+  render();
+};
+
+export const setLivePlotTheme = (nextTheme: Exclude<Theme, "system">): void => {
+  theme = nextTheme;
   render();
 };

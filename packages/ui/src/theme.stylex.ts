@@ -1,8 +1,8 @@
 import * as stylex from "@stylexjs/stylex";
 
-// Neutral light application surfaces with colour reserved for live signals and
-// device state. Tokens compile to CSS variables so an alternate theme can be
-// applied later with stylex.createTheme.
+// Neutral application surfaces with colour reserved for live signals and
+// device state. Alternate values stay on the same tokens so every StyleX
+// consumer switches as one root theme.
 export const colors = stylex.defineVars({
   bg: "#f7f7f8",
   panel: "#ffffff",
@@ -40,4 +40,43 @@ export const colors = stylex.defineVars({
 export const shadows = stylex.defineVars({
   popover: "0 18px 48px rgba(24, 24, 27, 0.18), 0 2px 8px rgba(24, 24, 27, 0.08)",
   dialog: "0 24px 72px rgba(24, 24, 27, 0.24)",
+});
+
+export const darkColors = stylex.createTheme(colors, {
+  bg: "#09090b",
+  panel: "#18181b",
+  panelMuted: "#1c1c20",
+  panelRaised: "#27272a",
+  screen: "#111113",
+  line: "#27272a",
+  lineStrong: "#3f3f46",
+  text: "#fafafa",
+  textRaised: "#e4e4e7",
+  textMuted: "#d4d4d8",
+  textSoft: "#a1a1aa",
+  accent: "#60a5fa",
+  accentStrong: "#93c5fd",
+  accentSoft: "#172554",
+  accentBorder: "#1e40af",
+  focusRing: "#1e3a8a",
+  run: "#4ade80",
+  runSoft: "#14261b",
+  runSoftRaised: "#183820",
+  runBorder: "#166534",
+  acquire: "#fbbf24",
+  acquireSoft: "#2b2111",
+  acquireBorder: "#854d0e",
+  halt: "#d4d4d8",
+  haltSoft: "#27272a",
+  danger: "#f87171",
+  dangerSoft: "#321818",
+  dangerSoftRaised: "#451a1a",
+  dangerBorder: "#7f1d1d",
+  overlay: "rgba(0, 0, 0, 0.58)",
+  legendBg: "rgba(24, 24, 27, 0.92)",
+});
+
+export const darkShadows = stylex.createTheme(shadows, {
+  popover: "0 18px 48px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28)",
+  dialog: "0 24px 72px rgba(0, 0, 0, 0.56)",
 });

@@ -4,7 +4,13 @@ import type { html } from "foldkit/html";
 
 import { colors, shadows } from "./theme.stylex.ts";
 
-type StyleInput = stylex.StyleXStyles | false | null | undefined;
+type StyleInput =
+  | stylex.StyleXStyles
+  | stylex.Theme<typeof colors>
+  | stylex.Theme<typeof shadows>
+  | false
+  | null
+  | undefined;
 type HtmlFactory<Message> = ReturnType<typeof html<Message>>;
 
 const toStyleRecord = (
@@ -34,7 +40,9 @@ export const appStyles = stylex.create({
     color: colors.text,
     fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
     WebkitFontSmoothing: "antialiased",
+    colorScheme: "light",
   },
+  rootDark: { colorScheme: "dark" },
   shell: {
     height: { default: "100vh", "@media (max-width: 760px)": "auto" },
     minHeight: "100vh",
@@ -157,6 +165,7 @@ export const appStyles = stylex.create({
     backgroundColor: colors.panel,
   },
   dockGroup: { display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" },
+  dockSpacer: { flex: 1, minWidth: 8 },
   dockDivider: {
     width: 1,
     minHeight: 24,
@@ -366,6 +375,58 @@ export const appStyles = stylex.create({
     letterSpacing: -0.25,
   },
   helperText: { margin: 0, color: colors.textSoft, fontSize: 11, lineHeight: "16px" },
+  settingsGrid: {
+    minHeight: 0,
+    overflowY: "auto",
+    alignContent: "start",
+    display: "grid",
+    gridTemplateColumns: {
+      default: "repeat(2, minmax(0, 1fr))",
+      "@media (max-width: 760px)": "1fr",
+    },
+    gap: 14,
+    paddingRight: 2,
+  },
+  settingsSection: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+    padding: 14,
+    borderWidth: 1,
+    borderStyle: "solid",
+    borderColor: colors.line,
+    borderRadius: 8,
+    backgroundColor: colors.panelMuted,
+  },
+  settingsSectionTitle: {
+    margin: 0,
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: "18px",
+    fontWeight: 650,
+  },
+  settingsFields: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 10,
+  },
+  checkboxField: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    color: colors.textMuted,
+    fontSize: 12,
+    lineHeight: "16px",
+  },
+  restartNote: {
+    margin: 0,
+    padding: "8px 10px",
+    borderRadius: 6,
+    backgroundColor: colors.acquireSoft,
+    color: colors.acquire,
+    fontSize: 11,
+    lineHeight: "16px",
+  },
   tableWrap: {
     minHeight: 0,
     overflow: "auto",

@@ -1,14 +1,17 @@
 import {
+  DEFAULT_SETTINGS,
   PersistentId,
   RuntimeActiveDevice,
   RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
   RuntimeFramePayload,
   RuntimePortInfo,
+  RuntimeAppDto,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
   SnapshotRecord,
   Timestamp,
+  noRecovery,
 } from "@vscope/shared";
 import { describe, expect, it } from "@effect/vitest";
 import { Option } from "effect";
@@ -16,6 +19,7 @@ import * as Url from "foldkit/url";
 
 import {
   ActiveDeviceChanged,
+  AppChanged,
   DeviceConfigChanged,
   DeviceStatusReceived,
   FrameReceived,
@@ -29,6 +33,10 @@ import {
   SnapshotDeleteConfirmed,
   SnapshotDeleteToggled,
   SnapshotFavoriteChanged,
+  SettingsApplyRequested,
+  SettingsTextChanged,
+  SettingsThemeChanged,
+  SystemThemeChanged,
   SnapshotLabelChanged,
   SnapshotSamplesLoaded,
   SnapshotsChanged,
@@ -40,7 +48,9 @@ import {
   RtValueCommitted,
   TriggerChannelChanged,
   TriggerThresholdChanged,
+  MenuToggled,
   init,
+  resolvedTheme,
   update,
 } from "./model.ts";
 
@@ -259,6 +269,55 @@ describe("@vscope/ui model", () => {
     expect(timingCommands).toHaveLength(0);
     expect(invalidTrigger.error).toBe("Trigger threshold must be a number.");
     expect(triggerCommands).toHaveLength(0);
+  });
+
+  it("validates and applies the complete settings draft through one RPC command", () => {
+    const [model] = init(testUrl);
+    const app = RuntimeAppDto.make({
+      bootedAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      status: "ready",
+      settings: DEFAULT_SETTINGS,
+      settingsRecovery: noRecovery,
+      warnings: [],
+      logs: [],
+    });
+    const [withApp] = update(model, AppChanged({ app }));
+    const [opened] = update(withApp, MenuToggled({ menu: "settings" }));
+    const [dark] = update(opened, SettingsThemeChanged({ theme: "dark" }));
+    const [invalidDraft] = update(dark, SettingsTextChanged({ field: "port", value: "70000" }));
+    const [invalid, invalidCommands] = update(invalidDraft, SettingsApplyRequested());
+    const [validDraft] = update(
+      invalidDraft,
+      SettingsTextChanged({ field: "port", value: "6000" }),
+    );
+    const [saving, commands] = update(validDraft, SettingsApplyRequested());
+
+    expect(opened.settingsDraft.port).toBe("5174");
+    expect(invalid.error).toBe("Network port must be between 1 and 65535.");
+    expect(invalidCommands).toHaveLength(0);
+    expect(saving.busy).toBe("saveSettings");
+    expect(saving.openMenu).toBeNull();
+    expect(commands.map((command) => command.name)).toEqual(["PatchSettings"]);
+  });
+
+  it("resolves system theme changes while explicit preferences stay fixed", () => {
+    const [model] = init(testUrl);
+    const [systemDark] = update(model, SystemThemeChanged({ dark: true }));
+    const app = RuntimeAppDto.make({
+      bootedAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      status: "ready",
+      settings: { ...DEFAULT_SETTINGS, theme: "light" },
+      settingsRecovery: noRecovery,
+      warnings: [],
+      logs: [],
+    });
+    const [explicitLight] = update(systemDark, AppChanged({ app }));
+
+    expect(resolvedTheme(model)).toBe("light");
+    expect(resolvedTheme(systemDark)).toBe("dark");
+    expect(resolvedTheme(explicitLight)).toBe("light");
   });
 
   it("starts sample downloads when the viewer route and records are both known", () => {

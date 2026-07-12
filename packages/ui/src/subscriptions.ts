@@ -9,13 +9,19 @@ import {
   DeviceStatusReceived,
   FrameReceived,
   RuntimeLinkDown,
+  SystemThemeChanged,
+  resolvedTheme,
   SnapshotsChanged,
   type Message,
   type Model,
 } from "./model.ts";
-import { ingestLiveFrame, resetLivePlot } from "./liveplot.ts";
+import { ingestLiveFrame, resetLivePlot, setLivePlotTheme } from "./liveplot.ts";
 import { routeSnapshotIds } from "./route.ts";
-import { configureSnapshotPlots, snapshotChannelLabels } from "./snapshotplot.ts";
+import {
+  configureSnapshotPlots,
+  setSnapshotPlotTheme,
+  snapshotChannelLabels,
+} from "./snapshotplot.ts";
 
 const linkLost = "Runtime facet stream ended";
 
@@ -79,6 +85,34 @@ const liveFacet = <A, E>(
   );
 
 export const subscriptions = Subscription.make<Model, Message, RuntimeClient>()((entry) => ({
+  systemTheme: entry(
+    {},
+    {
+      modelToDependencies: () => ({}),
+      dependenciesToStream: () => {
+        const query = globalThis.matchMedia("(prefers-color-scheme: dark)");
+        return Stream.concat(
+          Stream.make(SystemThemeChanged({ dark: query.matches })),
+          Stream.fromEventListener<MediaQueryListEvent>(query, "change").pipe(
+            Stream.map((event) => SystemThemeChanged({ dark: event.matches })),
+          ),
+        );
+      },
+    },
+  ),
+  plotTheme: entry(
+    { theme: Schema.Literals(["light", "dark"]) },
+    {
+      modelToDependencies: (model) => ({ theme: resolvedTheme(model) }),
+      dependenciesToStream: ({ theme }) =>
+        Stream.fromEffect(
+          Effect.sync(() => {
+            setLivePlotTheme(theme);
+            setSnapshotPlotTheme(theme);
+          }),
+        ).pipe(Stream.drain),
+    },
+  ),
   app: entry(
     {},
     {

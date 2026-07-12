@@ -87,6 +87,8 @@ describe("@vscope/runtime server", () => {
           [1, 2.5],
         ]);
         expect(JSON.stringify(tools)).toContain("vscope_write_config");
+        expect(JSON.stringify(tools)).toContain("vscope_read_settings");
+        expect(JSON.stringify(tools)).toContain("vscope_patch_settings");
         expect(JSON.stringify(tools)).toContain("vscope_read_rt_buffers");
         expect(JSON.stringify(tools)).toContain("vscope_write_rt_buffers");
         expect(JSON.stringify(tools)).toContain("vscope_read_channel_catalog");
@@ -118,6 +120,24 @@ describe("@vscope/runtime server", () => {
         expect(commands).toEqual([
           { type: "snapshots/favorite", id, favorite: true },
           { type: "snapshots/delete", id },
+        ]);
+      }),
+    );
+
+    it.effect("reads and patches settings through MCP", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const readResult = yield* callMcpTool(sessionId, 2, "vscope_read_settings", {});
+        yield* callMcpTool(sessionId, 3, "vscope_patch_settings", { theme: "dark" });
+
+        expect(JSON.stringify(readResult)).toContain('"theme":"system"');
+        expect(commands).toEqual([
+          {
+            type: "settings/patch",
+            patch: { theme: "dark" },
+          },
         ]);
       }),
     );
