@@ -13,10 +13,10 @@ This package owns:
 
 The runtime owns:
 
-- Port filtering, saved-port preference, hot-plug polling, and reconnect policy.
-- UI and MCP command arbitration, rate limits, and permission policy.
-- Periodic live polling schedules and SSE/HTTP fan-out.
-- Persistence of device settings, downloaded snapshots, and comparison metadata.
+- Port listing and the active-device connection lifecycle.
+- UI and MCP command arbitration and permission policy.
+- Periodic status and live-frame polling with WebSocket RPC streams.
+- Persistence of app settings and snapshots as metadata and sample blobs.
 - Mapping serial errors and events into shared runtime/UI/MCP wire contracts.
 
 Device names are display-oriented lookup labels. Paths remain the internal uniqueness key. If multiple opened devices report the same firmware name, name lookup resolves the first matching device; firmware used in multi-device deployments should provide distinct names.
