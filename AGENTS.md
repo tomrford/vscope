@@ -33,6 +33,8 @@ Package boundaries follow runtime concerns: `@vscope/runtime` composes the daemo
 
 The server command layer is the shared contract. UI actions and MCP tools dispatch through the same runtime path, so agent and human control observe the same rules and state transitions.
 
+The runtime owns one active serial device. Connecting a port closes any current device first, and a successful connection persists that exact port path as the next selection. The runtime does not infer device identity from USB metadata.
+
 Snapshot plots are browser routes backed by persisted daemon data. Live scope is lower resolution and optimized for control feedback; high-resolution captures live on the device first, then download into local persistence for later inspection and comparison.
 
 Snapshot capture during a slow sample download is serialized only by the dispatch lock. There is no in-flight pending flag, so the `captureSnapshot` permission stays enabled while a download runs.

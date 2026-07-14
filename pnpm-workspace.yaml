@@ -3,6 +3,8 @@ packages:
 
 saveExact: true
 minimumReleaseAge: 10080
+overrides:
+  undici: 8.7.0
 strictDepBuilds: true
 allowBuilds:
   "@serialport/bindings-cpp": true

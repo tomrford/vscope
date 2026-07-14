@@ -1,4 +1,10 @@
-import { SerialParity, Theme, TriggerMode, type RuntimeDeviceState } from "@vscope/shared";
+import {
+  SerialParity,
+  Theme,
+  TriggerMode,
+  type RuntimeDeviceState,
+  type RuntimePortInfo,
+} from "@vscope/shared";
 import { Effect, Match, Schema } from "effect";
 import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
@@ -175,55 +181,143 @@ const appReadiness = (model: Model): string => {
 
 const viewConnection = (model: Model, h: H): Html => {
   const active = model.activeDevice;
-  if (isConnected(model) && active) {
-    return h.div(
-      [...sx(h, appStyles.cluster)],
-      [
-        h.span([...sx(h, appStyles.miniStatus)], [`${active.deviceName} · ${active.path}`]),
-        viewButton(h, "Disconnect", DisconnectRequested(), {
-          small: true,
-          disabled: isBusy(model),
-        }),
-      ],
-    );
-  }
+  const selectedPort = model.ports.find((port) => port.path === model.selectedPort);
+  const selectedIsActive = active?.path === model.selectedPort;
+  const connectedToSelection = active?.connected === true && selectedIsActive;
+  const actionLabel = connectedToSelection
+    ? "Disconnect"
+    : active && selectedIsActive
+      ? "Reconnect"
+      : "Connect";
+  const action = connectedToSelection ? DisconnectRequested() : ConnectRequested();
+  const selectorLabel = selectedIsActive
+    ? `${active.deviceName} · ${model.selectedPort}`
+    : selectedPort
+      ? portLabel(selectedPort.path, selectedPort.manufacturer)
+      : model.selectedPort || "Select port";
 
   return h.div(
-    [...sx(h, appStyles.cluster)],
+    [...sx(h, appStyles.connectionBlock)],
     [
-      h.select(
+      h.div(
+        [...sx(h, appStyles.cluster)],
         [
-          ...sx(h, appStyles.select, appStyles.portSelect),
-          h.Attribute("value", model.selectedPort),
-          h.OnChange((path) => SelectedPortChanged({ path })),
-          h.Disabled(isBusy(model)),
-        ],
-        [
-          h.option(
-            [h.Attribute("value", ""), h.Selected(model.selectedPort === "")],
-            ["Select port"],
+          h.div(
+            [...sx(h, appStyles.popoverAnchor)],
+            [
+              h.button(
+                [
+                  h.Type("button"),
+                  h.OnClick(MenuToggled({ menu: "ports" })),
+                  h.Disabled(!model.linkUp || isBusy(model)),
+                  h.Title(model.selectedPort || "Select a serial port"),
+                  ...sx(
+                    h,
+                    appStyles.btn,
+                    appStyles.btnSmall,
+                    appStyles.portSelector,
+                    model.openMenu === "ports" && appStyles.btnActive,
+                  ),
+                ],
+                [selectorLabel],
+              ),
+              model.openMenu === "ports" ? viewPortsPopover(model, h) : null,
+            ],
           ),
-          ...model.ports.map((port) =>
-            h.option(
-              [
-                h.Key(port.path),
-                h.Attribute("value", port.path),
-                h.Selected(port.path === model.selectedPort),
-              ],
-              [portLabel(port.path, port.manufacturer)],
-            ),
-          ),
+          viewButton(h, actionLabel, action, {
+            variant: connectedToSelection ? "default" : "primary",
+            small: true,
+            disabled: !model.linkUp || isBusy(model) || model.selectedPort === "",
+          }),
         ],
       ),
-      viewButton(h, "Connect", ConnectRequested(), {
-        variant: "primary",
-        small: true,
-        disabled: !model.linkUp || isBusy(model) || model.selectedPort === "",
-      }),
-      viewButton(h, "Refresh", RefreshPortsRequested(), { small: true, disabled: isBusy(model) }),
+      active?.error ? h.span([...sx(h, appStyles.connectionError)], [active.error]) : null,
     ],
   );
 };
+
+const viewPortsPopover = (model: Model, h: H): Html =>
+  h.div(
+    [...sx(h, appStyles.portsPopover)],
+    [
+      h.div(
+        [...sx(h, appStyles.popoverHeader)],
+        [
+          h.span([...sx(h, appStyles.cardTitle)], ["Available ports"]),
+          viewButton(h, "Refresh", RefreshPortsRequested(), {
+            small: true,
+            disabled: isBusy(model),
+          }),
+        ],
+      ),
+      h.div(
+        [...sx(h, appStyles.portsTableWrap)],
+        [
+          h.table(
+            [...sx(h, appStyles.table, appStyles.portsTable)],
+            [
+              h.thead(
+                [],
+                [
+                  h.tr(
+                    [],
+                    ["Port", "Manufacturer", "USB ID", "Serial"].map((label) =>
+                      h.th([...sx(h, appStyles.tableHead)], [label]),
+                    ),
+                  ),
+                ],
+              ),
+              h.tbody(
+                [],
+                model.ports.length === 0
+                  ? [
+                      h.tr(
+                        [],
+                        [
+                          h.td(
+                            [h.Attribute("colspan", "4"), ...sx(h, appStyles.portsEmpty)],
+                            ["No serial ports found."],
+                          ),
+                        ],
+                      ),
+                    ]
+                  : model.ports.map((port) => viewPortRow(model, port, h)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ],
+  );
+
+const viewPortRow = (model: Model, port: RuntimePortInfo, h: H): Html => {
+  const selected = model.selectedPort === port.path;
+  return h.tr(
+    [h.Key(port.path), ...sx(h, appStyles.tableRow, selected && appStyles.portRowSelected)],
+    [
+      h.td(
+        [...sx(h, appStyles.tableCell)],
+        [
+          h.button(
+            [
+              h.Type("button"),
+              h.OnClick(SelectedPortChanged({ path: port.path })),
+              h.Disabled(isBusy(model)),
+              ...sx(h, appStyles.portChoice, selected && appStyles.portChoiceSelected),
+            ],
+            [port.path],
+          ),
+        ],
+      ),
+      h.td([...sx(h, appStyles.tableCell)], [port.manufacturer ?? "—"]),
+      h.td([...sx(h, appStyles.tableCell)], [usbId(port)]),
+      h.td([...sx(h, appStyles.tableCell)], [port.serialNumber ?? "—"]),
+    ],
+  );
+};
+
+const usbId = (port: RuntimePortInfo): string =>
+  port.vendorId || port.productId ? `${port.vendorId ?? "—"}:${port.productId ?? "—"}` : "—";
 
 type Tone = "run" | "acquire" | "halt" | "fault" | "idle" | "ready";
 

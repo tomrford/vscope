@@ -111,27 +111,41 @@ describe("@vscope/runtime core", () => {
     );
   });
 
-  layer(coreTestLayer(fakeSerialLayer([fakePort, secondPort])))((it) => {
-    it.effect("keeps runtime/core to one active device", () =>
-      Effect.gen(function* () {
-        const core = yield* RuntimeCore;
-        yield* core.dispatch({
-          type: "devices/connect",
-          path: fakePort.path,
-        });
-        const connected = yield* core.readModel;
-        const duplicate = yield* Effect.exit(
-          core.dispatch({
+  {
+    const removedPaths: Array<string> = [];
+    layer(
+      coreTestLayer(
+        fakeSerialLayer([fakePort, secondPort], {
+          onRemove: (path) => removedPaths.push(path),
+        }),
+      ),
+    )((it) => {
+      it.effect("replaces the active device and remembers the successful port", () =>
+        Effect.gen(function* () {
+          removedPaths.length = 0;
+          const core = yield* RuntimeCore;
+          yield* core.dispatch({
             type: "devices/connect",
-            path: "/dev/tty.second",
-          }),
-        );
+            path: fakePort.path,
+          });
+          yield* core.dispatch({
+            type: "devices/connect",
+            path: secondPort.path,
+          });
+          yield* advanceTestClock(80);
+          const connected = yield* core.readModel;
 
-        expect(connected.activeDevice?.path).toBe(fakePort.path);
-        expect(duplicate._tag).toBe("Failure");
-      }),
-    );
-  });
+          expect(connected.activeDevice).toMatchObject({
+            path: secondPort.path,
+            connected: true,
+          });
+          expect(connected.app.settings.lastDevicePath).toBe(secondPort.path);
+          expect(removedPaths).toEqual([fakePort.path]);
+          expect((yield* core.lastFrame)?.[0]).toBeGreaterThan(1);
+        }),
+      );
+    });
+  }
 
   {
     let openedWith: VScopeOpenOptions | null = null;
@@ -199,6 +213,21 @@ describe("@vscope/runtime core", () => {
         expect(triggered?.state).toBe(VScopeState.Acquiring);
         expect(captured?.state).toBe(VScopeState.Halted);
         expect(captured?.snapshotValid).toBe(true);
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
+    it.effect("keeps polling after reconnecting the same path", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({ type: "devices/connect", path: fakePort.path });
+        yield* core.dispatch({ type: "devices/disconnect" });
+        yield* core.dispatch({ type: "devices/connect", path: fakePort.path });
+        yield* advanceTestClock(80);
+
+        expect((yield* core.activeDevice)?.connected).toBe(true);
+        expect((yield* core.lastFrame)?.[0]).toBeGreaterThan(1);
       }),
     );
   });
@@ -472,6 +501,8 @@ function fakePersistenceLayer() {
       Effect.sync(() => {
         settings = Settings.make({
           theme: patch.theme ?? settings.theme,
+          lastDevicePath:
+            patch.lastDevicePath === undefined ? settings.lastDevicePath : patch.lastDevicePath,
           defaultSerialConfig: { ...settings.defaultSerialConfig, ...patch.defaultSerialConfig },
           polling: { ...settings.polling, ...patch.polling },
           snapshots: { ...settings.snapshots, ...patch.snapshots },
@@ -629,6 +660,7 @@ function retentionSnapshotDraft(label: string, createdAt: string): SnapshotDraft
 interface FakeSerialLayerOptions {
   readonly device?: FakeDeviceOptions | undefined;
   readonly onOpen?: ((openOptions: VScopeOpenOptions) => void) | undefined;
+  readonly onRemove?: ((path: string) => void) | undefined;
 }
 
 interface FakeDeviceOptions {
@@ -690,6 +722,7 @@ function fakeSerialLayer(
               return yield* new VScopeDeviceNotFoundError({ identifier });
             }
             devices.delete(device.path);
+            options.onRemove?.(device.path);
             yield* PubSub.publish(events, {
               _tag: "DeviceRemoved",
               device: {

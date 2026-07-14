@@ -32,9 +32,10 @@ import { RuntimeClient, type RuntimeRpc } from "./client.ts";
 import { Route, parseRoute, routeSnapshotIds } from "./route.ts";
 import { loadSnapshotSamples } from "./snapshotplot.ts";
 
-// Which grouped-settings popover is open. Ephemeral view state, but kept in the
+// Which popover or dialog is open. Ephemeral view state, but kept in the
 // Model so open/close is explicit, testable, and survives a render.
 export const MenuId = Schema.Literals([
+  "ports",
   "timing",
   "trigger",
   "channels",
@@ -565,17 +566,9 @@ export const init = (url: Url): UpdateResult => [
 
 const nextSelectedPort = (
   current: string,
-  ports: ReadonlyArray<RuntimePortInfo>,
   activeDevice: RuntimeActiveDevice | null,
-): string => {
-  if (activeDevice?.connected) {
-    return activeDevice.path;
-  }
-  if (ports.some((port) => port.path === current)) {
-    return current;
-  }
-  return ports[0]?.path ?? "";
-};
+  lastDevicePath: string | null,
+): string => activeDevice?.path ?? (current || lastDevicePath || "");
 
 const seedRtValueDrafts = (
   config: RuntimeDeviceConfigPayload | null,
@@ -836,6 +829,11 @@ export const update = (model: Model, message: Message): UpdateResult =>
         {
           ...model,
           app,
+          selectedPort: nextSelectedPort(
+            model.selectedPort,
+            model.activeDevice,
+            app.settings.lastDevicePath,
+          ),
           linkUp: true,
           settingsDraft:
             model.openMenu === "settings" ? model.settingsDraft : settingsDraftFrom(app.settings),
@@ -848,7 +846,11 @@ export const update = (model: Model, message: Message): UpdateResult =>
           {
             ...model,
             ports,
-            selectedPort: nextSelectedPort(model.selectedPort, ports, model.activeDevice),
+            selectedPort: nextSelectedPort(
+              model.selectedPort,
+              model.activeDevice,
+              model.app?.settings.lastDevicePath ?? null,
+            ),
             linkUp: true,
             busy: refreshSettled ? null : model.busy,
             error: refreshSettled ? null : model.error,
@@ -860,7 +862,11 @@ export const update = (model: Model, message: Message): UpdateResult =>
         {
           ...model,
           ports,
-          selectedPort: nextSelectedPort(model.selectedPort, ports, model.activeDevice),
+          selectedPort: nextSelectedPort(
+            model.selectedPort,
+            model.activeDevice,
+            model.app?.settings.lastDevicePath ?? null,
+          ),
           linkUp: true,
         },
         [],
@@ -870,7 +876,7 @@ export const update = (model: Model, message: Message): UpdateResult =>
         const nextModel = {
           ...model,
           activeDevice: device,
-          selectedPort: device?.connected ? device.path : model.selectedPort,
+          selectedPort: device?.path ?? model.selectedPort,
           status: connectionLost ? null : model.status,
           frame: connectionLost ? null : model.frame,
           linkUp: true,
@@ -922,11 +928,17 @@ export const update = (model: Model, message: Message): UpdateResult =>
                 ? settingsDraftFrom(model.app.settings)
                 : model.settingsDraft,
           },
-          [],
+          opening && menu === "ports" ? [RefreshPorts({ foreground: false })] : [],
         ];
       },
       MenuClosed: () => [{ ...model, openMenu: null, snapshotDeleteCandidate: null }, []],
-      SelectedPortChanged: ({ path }) => [{ ...model, selectedPort: path }, []],
+      SelectedPortChanged: ({ path }) =>
+        model.activeDevice?.connected === true && model.activeDevice.path !== path
+          ? [
+              { ...model, selectedPort: path, openMenu: null, busy: "connect", error: null },
+              [ConnectDevice({ path })],
+            ]
+          : [{ ...model, selectedPort: path, openMenu: null }, []],
       TimingTotalChanged: ({ value }) => [{ ...model, timingTotalSecondsDraft: value }, []],
       TimingPreTriggerChanged: ({ value }) => [
         { ...model, timingPreTriggerSecondsDraft: value },
@@ -1020,7 +1032,7 @@ export const update = (model: Model, message: Message): UpdateResult =>
       ConnectRequested: () =>
         model.selectedPort
           ? [
-              { ...model, busy: "connect", error: null },
+              { ...model, openMenu: null, busy: "connect", error: null },
               [ConnectDevice({ path: model.selectedPort })],
             ]
           : failLocal(model, "Select a serial port before connecting."),

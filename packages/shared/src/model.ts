@@ -65,6 +65,9 @@ export class NetworkSettings extends Schema.Class<NetworkSettings>("NetworkSetti
 
 export class Settings extends Schema.Class<Settings>("Settings")({
   theme: Theme,
+  lastDevicePath: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
   defaultSerialConfig: SerialConfig,
   polling: PollingSettings,
   snapshots: SnapshotSettings,
@@ -74,6 +77,7 @@ export class Settings extends Schema.Class<Settings>("Settings")({
 
 export type SettingsPatch = {
   readonly theme?: Theme;
+  readonly lastDevicePath?: string | null;
   readonly defaultSerialConfig?: Partial<SerialConfig>;
   readonly polling?: Partial<PollingSettings>;
   readonly snapshots?: Partial<SnapshotSettings>;
@@ -83,6 +87,7 @@ export type SettingsPatch = {
 
 export const DEFAULT_SETTINGS = Settings.make({
   theme: "system",
+  lastDevicePath: null,
   defaultSerialConfig: DEFAULT_SERIAL_CONFIG,
   polling: PollingSettings.make({
     stateHz: 4,

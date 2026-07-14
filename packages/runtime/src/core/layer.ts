@@ -75,7 +75,10 @@ interface DeviceSession {
   readonly ended: Deferred.Deferred<void, RuntimeDeviceLost>;
 }
 
-type DeviceMonitorFiber = Fiber.Fiber<void, never>;
+interface DeviceMonitor {
+  readonly path: string;
+  readonly fiber: Fiber.Fiber<void, never>;
+}
 
 const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
   const persistence = yield* Persistence;
@@ -87,7 +90,7 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
   const deviceStatusRef = yield* SubscriptionRef.make<VScopeControlStatus | null>(null);
   const deviceConfigRef = yield* SubscriptionRef.make<DeviceConfigState | null>(null);
   const parentScope = yield* Scope.Scope;
-  const monitorFiber = yield* Ref.make<DeviceMonitorFiber | null>(null);
+  const monitorRef = yield* Ref.make<DeviceMonitor | null>(null);
   const sessionRef = yield* Ref.make<DeviceSession | null>(null);
   const dispatchLock = yield* Semaphore.make(1);
 
@@ -176,12 +179,14 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       Effect.flatMap((session) => (session ? finishSession(session, reason) : Effect.void)),
     );
 
-  const interruptMonitor = Effect.gen(function* () {
-    const fiber = yield* Ref.getAndSet(monitorFiber, null);
-    if (fiber) {
-      yield* Fiber.interrupt(fiber).pipe(Effect.asVoid);
+  const interruptMonitor = Effect.fn("RuntimeCore.interruptMonitor")(function* (path?: string) {
+    const monitor = yield* Ref.modify(monitorRef, (current) =>
+      current && (path === undefined || current.path === path) ? [current, null] : [null, current],
+    );
+    if (monitor) {
+      yield* Fiber.interrupt(monitor.fiber).pipe(Effect.asVoid);
     }
-  }).pipe(Effect.withSpan("RuntimeCore.interruptMonitor"));
+  });
 
   const frames: Stream.Stream<ReadonlyArray<number> | null, RuntimeDeviceLost> = Stream.unwrap(
     Ref.get(sessionRef).pipe(
@@ -334,29 +339,52 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
     yield* clearActiveDeviceError(path);
   });
 
+  const handleActiveSerialEvent = Effect.fn("RuntimeCore.handleActiveSerialEvent")(function* (
+    path: string,
+    effect: Effect.Effect<void>,
+  ) {
+    const currentDevice = yield* Effect.option(serial.getDeviceByPath(path));
+    if (Option.isSome(currentDevice)) {
+      return;
+    }
+    const active = yield* SubscriptionRef.get(activeDeviceRef);
+    if (active?.path === path) {
+      yield* effect;
+    }
+  });
+
   const handleSerialEvent = (event: VScopeSerialEvent) => {
     switch (event._tag) {
       case "DeviceOpened":
         return Effect.void;
       case "DeviceRemoved":
-        return interruptMonitor.pipe(
-          Effect.andThen(closeSession(event.device.path, null)),
-          Effect.andThen(applyDisconnectedDevice(event.device)),
+        return handleActiveSerialEvent(
+          event.device.path,
+          interruptMonitor(event.device.path).pipe(
+            Effect.andThen(closeSession(event.device.path, null)),
+            Effect.andThen(applyDisconnectedDevice(event.device)),
+          ),
         );
       case "DeviceLost":
-        return interruptMonitor.pipe(
-          Effect.andThen(
-            closeSession(
-              event.device.path,
-              new RuntimeDeviceLost({ reason: errorReason(event.cause) }),
+        return handleActiveSerialEvent(
+          event.device.path,
+          interruptMonitor(event.device.path).pipe(
+            Effect.andThen(
+              closeSession(
+                event.device.path,
+                new RuntimeDeviceLost({ reason: errorReason(event.cause) }),
+              ),
             ),
+            Effect.andThen(applyLostDevice(event)),
           ),
-          Effect.andThen(applyLostDevice(event)),
         );
     }
   };
 
-  yield* serial.events.pipe(Stream.runForEach(handleSerialEvent), Effect.forkScoped);
+  yield* serial.events.pipe(
+    Stream.runForEach((event) => dispatchLock.withPermit(handleSerialEvent(event))),
+    Effect.forkScoped,
+  );
 
   const connectDevice = Effect.fn("RuntimeCore.connectDevice")(function* (
     command: Extract<CoreCommand, { readonly type: "devices/connect" }>,
@@ -364,13 +392,19 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
     const app = yield* SubscriptionRef.get(appRef);
     const active = yield* SubscriptionRef.get(activeDeviceRef);
     if (active?.connected) {
-      return yield* new RuntimeCorePolicyError({
-        command: command.type,
-        reason: "Disconnect the current device before connecting another one.",
-      });
+      yield* interruptMonitor();
+      yield* closeSession(active.path, null);
+      yield* serial
+        .removeDevice(active.path)
+        .pipe(
+          Effect.mapError(
+            (cause) => new RuntimeCoreSerialError({ operation: "devices/disconnect", cause }),
+          ),
+        );
+      yield* applyDisconnectedDevice(active);
     }
 
-    yield* interruptMonitor;
+    yield* interruptMonitor();
     yield* closeCurrentSession(null);
     const config = command.serialConfig ?? app.settings.defaultSerialConfig;
     const device = yield* serial
@@ -390,13 +424,24 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       ),
       Effect.tapError(() => serial.removeDevice(device.path).pipe(Effect.ignore)),
     );
+    const settingsState = yield* persistence.patchSettings({ lastDevicePath: command.path }).pipe(
+      Effect.mapError(
+        (cause) => new RuntimeCorePersistenceError({ operation: "settings/patch", cause }),
+      ),
+      Effect.tapError(() => serial.removeDevice(device.path).pipe(Effect.ignore)),
+    );
 
+    yield* updateApp((app) => ({
+      ...app,
+      settings: settingsState.settings,
+      settingsRecovery: settingsState.recovery,
+    }));
     yield* applyConnectedDevice(summary, runtimeState);
     const session = yield* openSession(device.path, runtimeState.frame);
     const fiber = yield* monitorDevice(device, session, app.settings.polling).pipe(
       Effect.forkIn(parentScope),
     );
-    yield* Ref.set(monitorFiber, fiber);
+    yield* Ref.set(monitorRef, { path: device.path, fiber });
   });
 
   const disconnectDevice = Effect.fn("RuntimeCore.disconnectDevice")(function* () {
@@ -408,7 +453,7 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       });
     }
 
-    yield* interruptMonitor;
+    yield* interruptMonitor();
     yield* closeSession(active.path, null);
     yield* serial
       .removeDevice(active.path)
@@ -692,7 +737,7 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       ),
     );
 
-  const shutdown = interruptMonitor.pipe(
+  const shutdown = interruptMonitor().pipe(
     Effect.andThen(closeCurrentSession(null)),
     Effect.andThen(
       serial.closeAll.pipe(

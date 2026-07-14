@@ -143,8 +143,12 @@ describe("@vscope/persistence", () => {
             expect(defaults.recovery.pending).toBe(false);
             expect(defaults.recovery.message).toBe(null);
 
-            const settings = yield* persistence.patchSettings({ theme: "dark" });
+            const settings = yield* persistence.patchSettings({
+              theme: "dark",
+              lastDevicePath: "/dev/tty.vscope",
+            });
             expect(settings.settings.theme).toBe("dark");
+            expect(settings.settings.lastDevicePath).toBe("/dev/tty.vscope");
 
             const nested = yield* persistence.patchSettings({ polling: { stateHz: 10 } });
             expect(nested.settings.polling.stateHz).toBe(10);
@@ -177,6 +181,40 @@ describe("@vscope/persistence", () => {
             expect(resetSettings.recovery.message).toBe(null);
           }),
         );
+      }),
+    ),
+  );
+
+  it.effect("adds a missing last-device path without resetting saved settings", () =>
+    withTempPath((path) =>
+      Effect.gen(function* () {
+        yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            yield* persistence.readSettings;
+          }),
+        );
+        yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const { lastDevicePath: _, ...previousSettings } = DEFAULT_SETTINGS;
+            const saved = JSON.stringify({ ...previousSettings, theme: "dark" });
+            yield* sql`UPDATE settings SET data_json = ${saved} WHERE id = 1`;
+          }),
+        );
+
+        const state = yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
+            return yield* persistence.readSettings;
+          }),
+        );
+        expect(state.settings.theme).toBe("dark");
+        expect(state.settings.lastDevicePath).toBeNull();
+        expect(state.recovery.pending).toBe(false);
       }),
     ),
   );

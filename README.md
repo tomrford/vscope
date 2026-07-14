@@ -37,12 +37,14 @@ These files define the firmware protocol expected by this release.
 
 ## Use a device
 
-1. Select the device serial port and connect.
+1. Open the port picker, select the device serial port and select Connect.
 2. Select Run to start live plotting.
 3. Select Trigger while the device is running to acquire a high-resolution capture.
 4. Save the snapshot when the status changes to `Capture ready`.
 
 Timing, trigger and channel mapping changes are available while the device is halted. RT buffer writes, UI actions and MCP tools all go through the daemon.
+
+The last successfully connected port is selected on the next launch. Select Reconnect after a connection error, or select another available port to disconnect the current device and connect the replacement.
 
 The snapshot viewer opens saved captures at `/snapshots?ids=a,b`. It supports shared zoom, pan and cursor interactions across plots.
 

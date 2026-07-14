@@ -24,12 +24,14 @@ import {
   DeviceStatusReceived,
   FrameReceived,
   ChannelMapChanged,
+  ConnectRequested,
   PortsLoaded,
   PortsRescanned,
   PortsRescanFailed,
   RefreshPortsRequested,
   RuntimeLinkDown,
   SaveSnapshotRequested,
+  SelectedPortChanged,
   SnapshotDeleteConfirmed,
   SnapshotDeleteToggled,
   SnapshotFavoriteChanged,
@@ -94,7 +96,7 @@ describe("@vscope/ui model", () => {
     );
     const [offline] = update(withStatus, RuntimeLinkDown());
 
-    expect(withPorts.selectedPort).toBe(port.path);
+    expect(withPorts.selectedPort).toBe("");
     expect(backgroundFailed.busy).toBe("refresh");
     expect(backgroundFailed.error).toBeNull();
     expect(withPorts.busy).toBeNull();
@@ -103,6 +105,32 @@ describe("@vscope/ui model", () => {
     expect(offline.linkUp).toBe(false);
     expect(offline.status?.state).toBe("running");
     expect(offline.ports).toEqual([port]);
+  });
+
+  it("selects the last successful path and switches a connected device on selection", () => {
+    const [model] = init(testUrl);
+    const remembered = RuntimeAppDto.make({
+      bootedAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+      status: "ready",
+      settings: { ...DEFAULT_SETTINGS, lastDevicePath: "/dev/tty.remembered" },
+      settingsRecovery: noRecovery,
+      warnings: [],
+      logs: [],
+    });
+    const [withRemembered] = update(model, AppChanged({ app: remembered }));
+    const [connecting, connectCommands] = update(withRemembered, ConnectRequested());
+    const [connected] = update(connecting, ActiveDeviceChanged({ device: activeDevice(true) }));
+    const [switching, switchCommands] = update(
+      connected,
+      SelectedPortChanged({ path: "/dev/tty.second" }),
+    );
+
+    expect(withRemembered.selectedPort).toBe("/dev/tty.remembered");
+    expect(connectCommands.map((command) => command.name)).toEqual(["ConnectDevice"]);
+    expect(switching.selectedPort).toBe("/dev/tty.second");
+    expect(switching.busy).toBe("connect");
+    expect(switchCommands.map((command) => command.name)).toEqual(["ConnectDevice"]);
   });
 
   it("rescans ports and clears status when a connected device disappears", () => {
