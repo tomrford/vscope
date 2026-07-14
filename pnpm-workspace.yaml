@@ -4,6 +4,8 @@ packages:
 saveExact: true
 minimumReleaseAge: 10080
 overrides:
+  esbuild: 0.28.1
+  hono: 4.12.25
   undici: 8.7.0
 strictDepBuilds: true
 allowBuilds:
