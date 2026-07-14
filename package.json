@@ -24,8 +24,10 @@
   "files": [
     "bin/",
     "dist/",
+    "reference/",
     "README.md",
-    "LICENSE.md"
+    "LICENSE.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
   "publishConfig": {

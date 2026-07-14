@@ -5,8 +5,7 @@
   "description": "Framework-agnostic live plotting engine for vscope",
   "license": "MIT",
   "files": [
-    "src",
-    "THIRD_PARTY.md"
+    "src"
   ],
   "type": "module",
   "sideEffects": false,

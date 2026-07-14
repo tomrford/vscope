@@ -24,6 +24,17 @@ Keep the terminal process running while you use the UI or MCP endpoint. Press `C
 
 `vscope` uses native USB serial and SQLite packages. If you install it and then change Node major versions, reinstall it so those packages match the active Node runtime.
 
+## Add vscope firmware
+
+The package includes the matching firmware reference implementation in [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h). Copy both files into the firmware project, then:
+
+1. Implement `vscopeTxBytes` for the device's USB serial transport.
+2. Pass received serial bytes to `vscopeRxHandler`.
+3. Register acquisition variables and RT buffer values before calling `vscopeInit`.
+4. Call `vscopeAcquire` from the configured timer interrupt.
+
+These files define the firmware protocol expected by this release.
+
 ## Use a device
 
 1. Select the device serial port and connect.
@@ -106,4 +117,4 @@ The `reference/` directory contains the authoritative firmware protocol headers 
 
 ## License
 
-MIT.
+`vscope` is MIT licensed. Attribution and the upstream MIT license for the bundled liveplot code are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
