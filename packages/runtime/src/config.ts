@@ -9,6 +9,7 @@ export const DEFAULT_RUNTIME_HOST = "127.0.0.1";
 export const DEFAULT_RUNTIME_PORT = 5174;
 
 export const RuntimeConfigSchema = Schema.Struct({
+  version: Schema.String.check(Schema.isMinLength(1)),
   host: Schema.String.check(Schema.isMinLength(1)),
   port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
   portOverride: Schema.Boolean,
@@ -29,6 +30,7 @@ export const makeRuntimeConfig = (
   options: Partial<RuntimeConfig> & Pick<RuntimeConfig, "databasePath">,
 ): RuntimeConfig =>
   Schema.decodeUnknownSync(RuntimeConfigSchema)({
+    version: "0.0.0",
     host: DEFAULT_RUNTIME_HOST,
     port: DEFAULT_RUNTIME_PORT,
     portOverride: false,

@@ -7,6 +7,7 @@ import { runtimeServerPort } from "./server";
 describe("@vscope/runtime", () => {
   it("materializes default local runtime config", () => {
     expect(makeRuntimeConfig({ databasePath: "/tmp/vscope.sqlite" })).toEqual({
+      version: "0.0.0",
       host: DEFAULT_RUNTIME_HOST,
       port: DEFAULT_RUNTIME_PORT,
       portOverride: false,
@@ -53,6 +54,7 @@ describe("@vscope/runtime", () => {
         uiDistPath: "/tmp/vscope-ui",
       }),
     ).toEqual({
+      version: "0.0.0",
       host: DEFAULT_RUNTIME_HOST,
       port: DEFAULT_RUNTIME_PORT,
       portOverride: false,

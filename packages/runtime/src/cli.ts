@@ -13,6 +13,7 @@ const PackageJson = Schema.Struct({
 const packageJson = Schema.decodeUnknownSync(PackageJson)(
   JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")),
 );
+const packageVersion = packageJson.version ?? "0.0.0";
 
 const uiDistPath = fileURLToPath(new URL("./ui", import.meta.url));
 
@@ -25,18 +26,19 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
   }
 
   if (parsed.version) {
-    console.log(packageJson.version ?? "0.0.0");
+    console.log(packageVersion);
     return;
   }
 
   const paths = resolveRuntimePaths();
   const config = makeRuntimeConfig({
+    version: packageVersion,
     databasePath: paths.databasePath,
     ...(parsed.port === undefined ? {} : { port: parsed.port, portOverride: true }),
     uiDistPath,
   });
 
-  console.log(`vscope ${packageJson.version ?? "0.0.0"}`);
+  console.log(`vscope ${packageVersion}`);
   if (config.portOverride) {
     console.log(`Runtime: http://${config.host}:${config.port}`);
     console.log(`MCP:     http://${config.host}:${config.port}/mcp`);
@@ -97,7 +99,7 @@ function parsePort(value: string): number {
 }
 
 function printHelp(): void {
-  console.log(`vscope ${packageJson.version ?? "0.0.0"}
+  console.log(`vscope ${packageVersion}
 
 Usage:
   vscope [--port <port>]

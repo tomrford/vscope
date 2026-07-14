@@ -1,12 +1,51 @@
 # vscope
 
-Local daemon + browser UI for the vscope embedded debug interface.
+`vscope` is a local Node daemon and browser UI for debugging embedded devices that include the vscope firmware module.
 
-`vscope` runs one local Node process that owns the device connection, persistence, browser UI assets, app RPC surface, and streamable HTTP MCP endpoint. The browser UI is a Foldkit SPA and never talks to serial devices directly.
+The daemon owns the USB serial connection, device state, polling, settings and saved snapshots. The browser UI and HTTP MCP tools use the same command policy.
 
-`vscope` is a Node CLI and depends on native packages for USB serial and SQLite. Install and run it with the same Node major version. If you change Node versions after installing, reinstall `vscope` so native dependencies are rebuilt for the active Node runtime.
+## Run vscope
 
-The live scope UI supports device connection, run, stop, trigger, timing, trigger settings, channel mapping, RT buffer writes, and snapshot capture. The snapshot viewer compares captures at `/snapshots?ids=a,b` with a shared x-viewport and x-cursor across channel plots. UI actions and MCP tools use the same runtime command layer.
+You need Node.js 24 or later and a vscope-capable device connected over USB.
+
+```bash
+npx vscope
+```
+
+Open the listening URL printed in the terminal. The default is <http://127.0.0.1:5174>.
+
+Use a different port for one run with:
+
+```bash
+npx vscope --port 6000
+```
+
+Keep the terminal process running while you use the UI or MCP endpoint. Press `Ctrl+C` to stop it.
+
+`vscope` uses native USB serial and SQLite packages. If you install it and then change Node major versions, reinstall it so those packages match the active Node runtime.
+
+## Use a device
+
+1. Select the device serial port and connect.
+2. Select Run to start live plotting.
+3. Select Trigger while the device is running to acquire a high-resolution capture.
+4. Save the snapshot when the status changes to `Capture ready`.
+
+Timing, trigger and channel mapping changes are available while the device is halted. RT buffer writes, UI actions and MCP tools all go through the daemon.
+
+The snapshot viewer opens saved captures at `/snapshots?ids=a,b`. It supports shared zoom, pan and cursor interactions across plots.
+
+## Connect an MCP client
+
+Keep `vscope` running and configure the client to use the streamable HTTP endpoint:
+
+```text
+http://127.0.0.1:5174/mcp
+```
+
+The MCP tools can inspect runtime state, list and connect devices, control acquisition, change device configuration and manage snapshots.
+
+The service listens on localhost and has no authentication. Do not expose it outside the local machine.
 
 ## Architecture
 
@@ -16,62 +55,54 @@ bin/vscope.js
        -> @vscope/serial
        -> @vscope/persistence
        -> @vscope/shared
-       -> serves @vscope/ui build
-       -> serves RPC and MCP endpoints
+       -> serves @vscope/ui
 
 @vscope/ui
   -> @vscope/shared
   -> @vscope/liveplot
 ```
 
-Package boundaries:
+The private workspace packages divide the implementation by runtime concern:
 
-| Package               | Role                                                                 |
-| --------------------- | -------------------------------------------------------------------- |
-| `@vscope/shared`      | Effect Schemas for domain and wire data shared by runtime and UI     |
-| `@vscope/serial`      | Raw Effect wrapper around Node `serialport`                          |
-| `@vscope/persistence` | SQLite storage for settings, snapshot metadata, and snapshot samples |
-| `@vscope/liveplot`    | Browser-safe live plotting engine                                    |
-| `@vscope/ui`          | Foldkit SPA, built by Vite                                           |
-| `@vscope/runtime`     | Node composition root for HTTP/RPC, MCP, persistence, and serial I/O |
+| Package               | Role                                       |
+| --------------------- | ------------------------------------------ |
+| `@vscope/runtime`     | daemon, HTTP, RPC and MCP composition      |
+| `@vscope/serial`      | firmware protocol and USB serial transport |
+| `@vscope/persistence` | SQLite settings and snapshot storage       |
+| `@vscope/shared`      | domain and wire schemas                    |
+| `@vscope/liveplot`    | browser-safe plotting primitives           |
+| `@vscope/ui`          | Foldkit browser UI                         |
 
-The runtime is the source of truth. It reads persistence on startup, owns long-lived serial connections, applies user commands, persists settings and snapshots, and emits shared app-state/events to the UI. MCP tools use the same runtime command layer as the UI.
+The UI uses Effect RPC over WebSocket at `/rpc`. Snapshot metadata travels over RPC. Sample data uses the `f32le-interleaved-v1` binary format over plain HTTP.
 
-## Wire Shape
-
-The UI/runtime boundary is typed through `@vscope/shared`. Control and state traffic uses Effect RPC over a WebSocket at `/rpc`, with NDJSON serialization for streaming responses.
-
-Snapshot metadata travels over RPC. Sample data is served from `/snapshots/:id/samples` as `application/octet-stream` in `f32le-interleaved-v1` format. The response headers provide the snapshot ID, sample format, channel count, sample count, and byte length.
-
-Operational endpoints live in `@vscope/runtime`:
+Runtime endpoints:
 
 ```text
 /health
-/rpc                         WebSocket Effect RPC with NDJSON serialization
-/mcp                         streamable HTTP MCP
-/snapshots?ids=a,b           snapshot viewer and comparison UI
-/snapshots/:id/samples       binary snapshot samples with metadata headers
+/rpc
+/mcp
+/snapshots?ids=a,b
+/snapshots/:id/samples
 ```
 
-## Development
+## Develop vscope
+
+Use the repository Nix shell so Node and pnpm match the lockfile:
 
 ```bash
 nix develop -c pnpm install
 nix develop -c pnpm run check
 ```
 
-The Foldkit UI uses Vite for development and production asset builds:
+Run the UI development server with:
 
 ```bash
 nix develop -c pnpm run dev:ui
-nix develop -c pnpm run build:ui
 ```
 
-During UI development, Vite runs on `127.0.0.1:5173`. It proxies `/health`, `/mcp`, the `/rpc` WebSocket, and only paths matching `/snapshots/:id/samples` to the runtime at `127.0.0.1:5174`. The `/snapshots` path remains a UI route. The packaged runtime serves the built UI assets directly.
+Vite listens on `127.0.0.1:5173` and proxies runtime requests to `127.0.0.1:5174`.
 
-## Reference Material
-
-The `reference/` directory contains the authoritative firmware protocol headers and source. The `.repos/` directory is managed by `grepo`; its entries are read-only external reference snapshots.
+The `reference/` directory contains the authoritative firmware protocol headers and source. The `.repos/` directory contains read-only external references managed by `grepo`.
 
 ## License
 

@@ -211,7 +211,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     Layer.provide(
       McpServer.layerHttp({
         name: "vscope",
-        version: "0.0.1",
+        version: config.version,
         path: RuntimeEndpoint.mcp,
       }),
     ),

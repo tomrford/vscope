@@ -65,6 +65,7 @@ describe("@vscope/runtime server", () => {
         const sessionId = yield* Effect.fromOption(
           Headers.get(initialized.headers, "Mcp-Session-Id"),
         );
+        const initializedBody = yield* readJson(initialized);
         const tools = yield* HttpClientRequest.post("/mcp").pipe(
           HttpClientRequest.setHeaders({
             "Mcp-Session-Id": sessionId,
@@ -80,6 +81,7 @@ describe("@vscope/runtime server", () => {
         );
 
         expect(health).toEqual({ status: "ok" });
+        expect(JSON.stringify(initializedBody)).toContain('"version":"0.0.0"');
         expect(rpcState.app.status).toBe("ready");
         expect(rpcState.activeDevice?.deviceName).toBe("fake-scope");
         expect(rpcState.config?.rtValues).toEqual([
