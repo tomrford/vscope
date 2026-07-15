@@ -39,9 +39,10 @@ export const drawCrosshair = (
 
   const rows = [header, ...values.map((v) => `${v.label}: ${formatValue(v.value)}`)];
 
+  const swatchOffset = 12;
   let boxWidth = 0;
-  for (const row of rows) {
-    const w = ctx.measureText(row).width;
+  for (const [index, row] of rows.entries()) {
+    const w = ctx.measureText(row).width + (index > 0 ? swatchOffset : 0);
     if (w > boxWidth) boxWidth = w;
   }
 
@@ -91,7 +92,7 @@ export const drawCrosshair = (
       ctx.fillStyle = swatch.color;
       ctx.fillRect(boxLeft + padX, y - 4, 8, 8);
       ctx.fillStyle = palette.tooltipText;
-      ctx.fillText(rows[i], boxLeft + padX + 12, y);
+      ctx.fillText(rows[i], boxLeft + padX + swatchOffset, y);
     } else {
       ctx.fillText(rows[i], boxLeft + padX, y);
     }

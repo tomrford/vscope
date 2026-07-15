@@ -2,10 +2,11 @@ import {
   SerialParity,
   Theme,
   TriggerMode,
+  type PersistentId,
   type RuntimeDeviceState,
   type RuntimePortInfo,
 } from "@vscope/shared";
-import { Effect, Match, Schema } from "effect";
+import { Effect, Match, Option, Schema } from "effect";
 import type { Document, Html } from "foldkit/html";
 import { html } from "foldkit/html";
 import * as Mount from "foldkit/mount";
@@ -293,7 +294,10 @@ const viewPortsPopover = (model: Model, h: H): Html =>
 const viewPortRow = (model: Model, port: RuntimePortInfo, h: H): Html => {
   const selected = model.selectedPort === port.path;
   return h.tr(
-    [h.Key(port.path), ...sx(h, appStyles.tableRow, selected && appStyles.portRowSelected)],
+    [
+      h.Key(port.path),
+      ...sx(h, appStyles.tableRow, appStyles.portRow, selected && appStyles.portRowSelected),
+    ],
     [
       h.td(
         [...sx(h, appStyles.tableCell)],
@@ -850,8 +854,10 @@ const viewSettingsDialog = (model: Model, h: H): Html => {
   );
 };
 
-const viewSaveSnapshotPopover = (model: Model, h: H): Html =>
-  h.div(
+const viewSaveSnapshotPopover = (model: Model, h: H): Html => {
+  const canSubmit = model.snapshotLabelDraft.trim() !== "" && canSnapshot(model);
+
+  return h.div(
     [...sx(h, appStyles.popoverPanel, appStyles.saveSnapshotPopover)],
     [
       viewPopoverHeader(h, "Save snapshot", "capture ready"),
@@ -859,6 +865,9 @@ const viewSaveSnapshotPopover = (model: Model, h: H): Html =>
         ...sx(h, appStyles.input),
         h.Value(model.snapshotLabelDraft),
         h.OnInput((value) => SnapshotLabelChanged({ value })),
+        h.OnKeyDownPreventDefault((key) =>
+          key === "Enter" && canSubmit ? Option.some(SaveSnapshotRequested()) : Option.none(),
+        ),
         h.Placeholder("Insert name"),
       ]),
       h.div(
@@ -867,12 +876,13 @@ const viewSaveSnapshotPopover = (model: Model, h: H): Html =>
           viewButton(h, "Cancel", MenuClosed()),
           viewButton(h, "OK", SaveSnapshotRequested(), {
             variant: "primary",
-            disabled: model.snapshotLabelDraft.trim() === "" || !canSnapshot(model),
+            disabled: !canSubmit,
           }),
         ],
       ),
     ],
   );
+};
 
 const viewLinkButton = (
   h: H,
@@ -894,6 +904,97 @@ const viewLinkButton = (
     ],
     [label],
   );
+
+const viewFavoriteButton = (
+  h: H,
+  label: string,
+  favorite: boolean,
+  onClick: Message,
+  disabled: boolean,
+): Html => {
+  const actionLabel = favorite ? `Remove ${label} from favourites` : `Add ${label} to favourites`;
+  return h.button(
+    [
+      h.Type("button"),
+      h.OnClick(onClick),
+      h.Disabled(disabled),
+      h.AriaLabel(actionLabel),
+      h.AriaPressed(String(favorite)),
+      h.Title(actionLabel),
+      ...sx(
+        h,
+        appStyles.btn,
+        appStyles.btnSmall,
+        appStyles.iconButton,
+        favorite && appStyles.starred,
+      ),
+    ],
+    [favorite ? "★" : "☆"],
+  );
+};
+
+const viewBinIcon = (h: H): Html =>
+  h.svg(
+    [
+      h.ViewBox("0 0 24 24"),
+      h.Width("15"),
+      h.Height("15"),
+      h.Fill("none"),
+      h.Stroke("currentColor"),
+      h.StrokeWidth("1.8"),
+      h.StrokeLinecap("round"),
+      h.StrokeLinejoin("round"),
+      h.AriaHidden(true),
+    ],
+    [h.path([h.D("M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5")], [])],
+  );
+
+const viewDeleteButton = (model: Model, h: H, id: PersistentId, label: string): Html => {
+  const confirming = model.snapshotDeleteCandidate === id;
+  const actionLabel = `Delete ${label}`;
+
+  return h.div(
+    [...sx(h, appStyles.deleteAnchor)],
+    [
+      h.button(
+        [
+          h.Type("button"),
+          h.OnClick(SnapshotDeleteToggled({ id })),
+          h.Disabled(isBusy(model)),
+          h.AriaLabel(actionLabel),
+          h.AriaExpanded(confirming),
+          h.AriaHasPopup("dialog"),
+          h.Title(actionLabel),
+          ...sx(h, appStyles.btn, appStyles.btnSmall, appStyles.iconButton),
+        ],
+        [viewBinIcon(h)],
+      ),
+      confirming
+        ? h.div(
+            [
+              h.Role("dialog"),
+              h.AriaLabel(`Confirm deletion of ${label}`),
+              ...sx(h, appStyles.deletePopover),
+            ],
+            [
+              h.p([...sx(h, appStyles.deletePrompt)], [`Delete “${label}”?`]),
+              h.div(
+                [...sx(h, appStyles.popoverActions)],
+                [
+                  viewButton(h, "Cancel", SnapshotDeleteToggled({ id }), { small: true }),
+                  viewButton(h, "Delete", SnapshotDeleteConfirmed({ id }), {
+                    variant: "stop",
+                    small: true,
+                    disabled: isBusy(model),
+                  }),
+                ],
+              ),
+            ],
+          )
+        : null,
+    ],
+  );
+};
 
 const viewSnapshotsDialog = (model: Model, h: H): Html =>
   h.section(
@@ -1008,36 +1109,17 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                                   viewLinkButton(h, "View", snapshotsHref([snapshot.id]), {
                                     small: true,
                                   }),
-                                  viewButton(
+                                  viewFavoriteButton(
                                     h,
-                                    snapshot.favorite ? "Unfavourite" : "Favourite",
+                                    snapshot.label,
+                                    snapshot.favorite,
                                     SnapshotFavoriteChanged({
                                       id: snapshot.id,
                                       favorite: !snapshot.favorite,
                                     }),
-                                    { small: true, disabled: isBusy(model) },
+                                    isBusy(model),
                                   ),
-                                  model.snapshotDeleteCandidate === snapshot.id
-                                    ? viewButton(
-                                        h,
-                                        "Confirm delete",
-                                        SnapshotDeleteConfirmed({ id: snapshot.id }),
-                                        { small: true, disabled: isBusy(model) },
-                                      )
-                                    : viewButton(
-                                        h,
-                                        "Delete",
-                                        SnapshotDeleteToggled({ id: snapshot.id }),
-                                        { small: true, disabled: isBusy(model) },
-                                      ),
-                                  model.snapshotDeleteCandidate === snapshot.id
-                                    ? viewButton(
-                                        h,
-                                        "Cancel",
-                                        SnapshotDeleteToggled({ id: snapshot.id }),
-                                        { small: true, disabled: isBusy(model) },
-                                      )
-                                    : null,
+                                  viewDeleteButton(model, h, snapshot.id, snapshot.label),
                                 ],
                               ),
                             ],
