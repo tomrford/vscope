@@ -482,43 +482,31 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
     session: DeviceSession,
     polling: RuntimeAppState["settings"]["polling"],
   ): Effect.Effect<void> => {
-    const statusMonitor = Stream.fromSchedule(
-      Schedule.spaced(`${pollMillis(polling.stateHz)} millis`),
-    ).pipe(
-      Stream.runForEach(() =>
-        device.getStatus({ retryAttempts: 0 }).pipe(
-          Effect.flatMap((status) => publishStatus(device.path, status)),
-          Effect.catch((cause) =>
-            cause instanceof VScopeFrameParseError ? Effect.void : Effect.fail(cause),
-          ),
-          Effect.mapError(
-            (cause) => new RuntimeCoreSerialError({ operation: "devices/status", cause }),
-          ),
-        ),
+    const statusMonitor = device.getStatus({ retryAttempts: 0 }).pipe(
+      Effect.flatMap((status) => publishStatus(device.path, status)),
+      Effect.catch((cause) =>
+        cause instanceof VScopeFrameParseError ? Effect.void : Effect.fail(cause),
       ),
+      Effect.mapError(
+        (cause) => new RuntimeCoreSerialError({ operation: "devices/status", cause }),
+      ),
+      Effect.schedule(Schedule.spaced(`${pollMillis(polling.stateHz)} millis`)),
     );
 
-    const frameMonitor = Stream.fromSchedule(
-      Schedule.spaced(`${pollMillis(polling.frameHz)} millis`),
-    ).pipe(
-      Stream.runForEach(() =>
-        device.getFrame({ retryAttempts: 0 }).pipe(
-          Effect.flatMap((frame) =>
-            Ref.set(session.lastFrame, frame).pipe(
-              Effect.andThen(PubSub.publish(session.frames, frame)),
-              Effect.asVoid,
-            ),
-          ),
-          Effect.catch((cause) =>
-            cause instanceof VScopeFrameParseError
-              ? PubSub.publish(session.frames, null).pipe(Effect.asVoid)
-              : Effect.fail(cause),
-          ),
-          Effect.mapError(
-            (cause) => new RuntimeCoreSerialError({ operation: "devices/frame", cause }),
-          ),
+    const frameMonitor = device.getFrame({ retryAttempts: 0 }).pipe(
+      Effect.flatMap((frame) =>
+        Ref.set(session.lastFrame, frame).pipe(
+          Effect.andThen(PubSub.publish(session.frames, frame)),
+          Effect.asVoid,
         ),
       ),
+      Effect.catch((cause) =>
+        cause instanceof VScopeFrameParseError
+          ? PubSub.publish(session.frames, null).pipe(Effect.asVoid)
+          : Effect.fail(cause),
+      ),
+      Effect.mapError((cause) => new RuntimeCoreSerialError({ operation: "devices/frame", cause })),
+      Effect.schedule(Schedule.spaced(`${pollMillis(polling.frameHz)} millis`)),
     );
 
     return Effect.all([statusMonitor, frameMonitor], {

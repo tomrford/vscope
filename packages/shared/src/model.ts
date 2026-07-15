@@ -14,7 +14,19 @@ export type JsonObject = Schema.Schema.Type<typeof JsonObject>;
 export const PersistentId = NonEmptyString.pipe(Schema.brand("PersistentId"));
 export type PersistentId = Schema.Schema.Type<typeof PersistentId>;
 
-export const Timestamp = NonEmptyString.pipe(Schema.brand("Timestamp"));
+const CanonicalUtcTimestamp = Schema.String.check(
+  Schema.makeFilter(
+    (value) => {
+      const millis = Date.parse(value);
+      return Number.isFinite(millis) && new Date(millis).toISOString() === value
+        ? undefined
+        : "Timestamp must be a canonical UTC ISO 8601 string";
+    },
+    { expected: "a canonical UTC ISO 8601 timestamp" },
+  ),
+);
+
+export const Timestamp = CanonicalUtcTimestamp.pipe(Schema.brand("Timestamp"));
 export type Timestamp = Schema.Schema.Type<typeof Timestamp>;
 
 export const Theme = Schema.Literals(["system", "light", "dark"]);

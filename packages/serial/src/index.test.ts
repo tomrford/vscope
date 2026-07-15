@@ -278,10 +278,14 @@ describe("@vscope/serial device", () => {
 
   it.live("dispatches queued frame reads before the next snapshot chunk", () =>
     Effect.gen(function* () {
+      const snapshotRequested = Promise.withResolvers<void>();
       const firmware = fakeFirmware({
         path: "/dev/tty.vscope-snapshot-fifo",
         deviceName: "scope-snapshot-fifo",
         snapshotResponseDelayMillis: 30,
+        onRequest: (type) => {
+          if (type === VScopeMessageType.GetSnapshotData) snapshotRequested.resolve();
+        },
       });
       const device = yield* openVScopeDevice({
         path: firmware.path,
@@ -293,10 +297,7 @@ describe("@vscope/serial device", () => {
       const baseline = firmware.requestTypes.length;
       const snapshotFiber = yield* device.collectSnapshotBytes({ header }).pipe(Effect.forkChild);
 
-      for (let attempts = 0; attempts < 100; attempts += 1) {
-        if (firmware.requestCount(VScopeMessageType.GetSnapshotData) > 0) break;
-        yield* Effect.sleep("1 millis");
-      }
+      yield* Effect.promise(() => snapshotRequested.promise);
       expect(firmware.requestCount(VScopeMessageType.GetSnapshotData)).toBe(1);
 
       const frameFiber = yield* device.getFrame().pipe(Effect.forkChild);
@@ -397,11 +398,15 @@ describe("@vscope/serial device", () => {
     "fails the device session after a response timeout so late frames cannot poison later requests",
     () =>
       Effect.gen(function* () {
+        const lateFrameEmitted = Promise.withResolvers<void>();
         const driver = fakeDriver([
           fakeFirmware({
             path: "/dev/tty.vscope-timeout",
             deviceName: "scope-timeout",
             frameResponseDelayMillis: 20,
+            onResponseReady: (type) => {
+              if (type === VScopeMessageType.GetFrame) lateFrameEmitted.resolve();
+            },
           }),
         ]);
 
@@ -413,7 +418,7 @@ describe("@vscope/serial device", () => {
         });
 
         const timedOutFrame = yield* Effect.exit(device.getFrame());
-        yield* Effect.sleep("30 millis");
+        yield* Effect.promise(() => lateFrameEmitted.promise);
         const nextRequest = yield* Effect.exit(device.getStatus());
 
         expect(timedOutFrame._tag).toBe("Failure");
@@ -791,9 +796,12 @@ describe("@vscope/serial manager", () => {
 });
 
 interface FakeFirmwareResponse {
+  readonly requestType: VScopeMessageType;
   readonly bytes: Uint8Array;
   readonly delayMillis: number;
 }
+
+type FakeFirmwareResponseBody = Omit<FakeFirmwareResponse, "requestType">;
 
 interface FakeFirmwareOptions {
   readonly path: string;
@@ -812,6 +820,8 @@ interface FakeFirmwareOptions {
   readonly corruptFirstResponsesFor?: ReadonlyArray<VScopeMessageType> | undefined;
   readonly acquisitionStatusReads?: number | undefined;
   readonly snapshotValid?: boolean | undefined;
+  readonly onRequest?: ((type: VScopeMessageType) => void) | undefined;
+  readonly onResponseReady?: ((type: VScopeMessageType) => void) | undefined;
 }
 
 const fakeFirmware = (options: FakeFirmwareOptions): FakeFirmware => new FakeFirmware(options);
@@ -905,6 +915,7 @@ class MemorySerialPort extends EventEmitter implements SerialPortLike {
           if (this.#isOpen) {
             this.emit("data", Buffer.from(response.bytes));
           }
+          this.#firmware.responseReady(response.requestType);
         };
 
         if (response.delayMillis > 0) {
@@ -959,6 +970,8 @@ class FakeFirmware {
   readonly wrongResponseFor: VScopeMessageType | undefined;
   readonly corruptFirstResponsesFor: ReadonlySet<VScopeMessageType>;
   readonly acquisitionStatusReads: number;
+  readonly onRequest: ((type: VScopeMessageType) => void) | undefined;
+  readonly onResponseReady: ((type: VScopeMessageType) => void) | undefined;
   closeAttempts = 0;
   #closeFailures: number;
   timing = { divider: 1, preTrig: 0 };
@@ -995,6 +1008,8 @@ class FakeFirmware {
     this.corruptFirstResponsesFor = new Set(options.corruptFirstResponsesFor ?? []);
     this.acquisitionStatusReads = options.acquisitionStatusReads ?? 1;
     this.snapshotValid = options.snapshotValid ?? true;
+    this.onRequest = options.onRequest;
+    this.onResponseReady = options.onResponseReady;
     this.#closeFailures = options.closeFailures ?? 0;
   }
 
@@ -1009,17 +1024,25 @@ class FakeFirmware {
   }
 
   receive(bytes: Uint8Array): ReadonlyArray<FakeFirmwareResponse> {
-    return this.parser.push(bytes).map((frame) => this.handle(frame.type, frame.payload));
+    return this.parser.push(bytes).map((frame) => ({
+      requestType: frame.type,
+      ...this.handle(frame.type, frame.payload),
+    }));
+  }
+
+  responseReady(type: VScopeMessageType): void {
+    this.onResponseReady?.(type);
   }
 
   requestCount(type: VScopeMessageType): number {
     return this.#requestCounts.get(type) ?? 0;
   }
 
-  private handle(type: VScopeMessageType, payload: Uint8Array): FakeFirmwareResponse {
+  private handle(type: VScopeMessageType, payload: Uint8Array): FakeFirmwareResponseBody {
     const requestCount = this.requestCount(type) + 1;
     this.#requestCounts.set(type, requestCount);
     this.requestTypes.push(type);
+    this.onRequest?.(type);
 
     if (type === this.wrongResponseFor) {
       return this.response(VScopeMessageType.GetStatus, this.statusPayload());
@@ -1106,7 +1129,7 @@ class FakeFirmware {
   private setRequestedState(
     requestedState: VScopeStateValue,
     responseType: VScopeMessageType,
-  ): FakeFirmwareResponse {
+  ): FakeFirmwareResponseBody {
     if (requestedState === VScopeState.Running) {
       if (this.state !== VScopeState.Halted && this.state !== VScopeState.Running) {
         return this.error(VScopeStatus.NotReady);
@@ -1153,7 +1176,7 @@ class FakeFirmware {
     type: VScopeMessageType,
     payload: Uint8Array,
     delayMillis = 0,
-  ): FakeFirmwareResponse {
+  ): FakeFirmwareResponseBody {
     const shouldCorrupt = this.corruptFirstResponsesFor.has(type) && this.requestCount(type) === 1;
     const bytes = Effect.runSync(encodeVScopeFrame({ type, payload }));
     if (shouldCorrupt) {
@@ -1166,7 +1189,7 @@ class FakeFirmware {
     };
   }
 
-  private error(status: VScopeStatus): FakeFirmwareResponse {
+  private error(status: VScopeStatus): FakeFirmwareResponseBody {
     return this.response(VScopeMessageType.Error, Uint8Array.of(status));
   }
 
@@ -1213,7 +1236,7 @@ class FakeFirmware {
     return writer.toUint8Array();
   }
 
-  private snapshotData(payload: Uint8Array): FakeFirmwareResponse {
+  private snapshotData(payload: Uint8Array): FakeFirmwareResponseBody {
     const reader = new ByteReader(payload, this.littleEndian);
     const startSample = reader.u16();
     const count = reader.u8();
@@ -1230,7 +1253,7 @@ class FakeFirmware {
     type: VScopeMessageType,
     names: ReadonlyArray<string>,
     request: Uint8Array,
-  ): FakeFirmwareResponse {
+  ): FakeFirmwareResponseBody {
     const reader = new ByteReader(request, this.littleEndian);
     const start = reader.u8();
     const requested = reader.u8();

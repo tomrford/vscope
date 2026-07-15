@@ -78,7 +78,7 @@ const liveFacet = <A, E>(
     Stream.map(toMessage),
     // A live facet should never complete while the daemon is reachable.
     (stream) => Stream.concat(stream, Stream.fail(linkLost)),
-    Stream.catchCause(() => Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost))),
+    Stream.catch(() => Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost))),
     // SubscriptionRefs replay their current value when this reopens.
     Stream.retry(Schedule.spaced("1 second")),
     Stream.catch(() => Stream.empty),
