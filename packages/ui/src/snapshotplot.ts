@@ -163,15 +163,16 @@ const headerInt = (response: Response, name: string): number => {
   return value;
 };
 
-export const loadSnapshotSamples = (input: {
+export const loadSnapshotSamples = Effect.fn("SnapshotSamples.load")(function* (input: {
   readonly id: string;
   readonly durationSeconds: number;
   readonly sampleRateHz: number | null;
-}): Effect.Effect<void, SnapshotSamplesError> =>
-  Effect.tryPromise({
-    try: async () => {
+}) {
+  yield* Effect.tryPromise({
+    try: async (signal) => {
       const response = await fetch(
         `${RuntimeEndpoint.snapshots}/${encodeURIComponent(input.id)}/samples`,
+        { signal },
       );
       if (!response.ok) {
         throw new SnapshotSamplesError(`Sample download failed (${response.status}).`);
@@ -196,6 +197,7 @@ export const loadSnapshotSamples = (input: {
         ? cause
         : new SnapshotSamplesError(cause instanceof Error ? cause.message : String(cause)),
   });
+});
 
 // --- channel labels -----------------------------------------------------
 

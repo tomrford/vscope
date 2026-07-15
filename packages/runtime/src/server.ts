@@ -398,76 +398,74 @@ function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {
   return new RuntimeApiError({ message: describeRuntimeCoreError(error) });
 }
 
-function writeConfig(
+const writeConfig = Effect.fn("RuntimeMcp.writeConfig")(function* (
   core: RuntimeCoreService,
   patch: RuntimeWriteConfigRequest,
-): Effect.Effect<void, RuntimeCoreError> {
-  return Effect.gen(function* () {
-    if (!patch.timing && !patch.trigger) {
+): Effect.fn.Return<void, RuntimeCoreError> {
+  if (!patch.timing && !patch.trigger) {
+    return yield* invalidMcpWrite(
+      "vscope_write_config",
+      "At least one of timing or trigger is required.",
+    );
+  }
+
+  const config = yield* requireConfig(core, "vscope_write_config");
+  const commands: Array<CoreCommand> = [];
+
+  if (patch.timing) {
+    const totalDurationSeconds =
+      patch.timing.totalDurationSeconds ?? config.timing?.totalDurationSeconds;
+    const preTriggerSeconds = patch.timing.preTriggerSeconds ?? config.timing?.preTriggerSeconds;
+    if (totalDurationSeconds === undefined || preTriggerSeconds === undefined) {
       return yield* invalidMcpWrite(
-        "vscope_write_config",
-        "At least one of timing or trigger is required.",
+        "devices/setTiming",
+        "Timing patches must include totalDurationSeconds and preTriggerSeconds when no current timing is available.",
       );
     }
-
-    const config = yield* requireConfig(core, "vscope_write_config");
-    const commands: Array<CoreCommand> = [];
-
-    if (patch.timing) {
-      const totalDurationSeconds =
-        patch.timing.totalDurationSeconds ?? config.timing?.totalDurationSeconds;
-      const preTriggerSeconds = patch.timing.preTriggerSeconds ?? config.timing?.preTriggerSeconds;
-      if (totalDurationSeconds === undefined || preTriggerSeconds === undefined) {
-        return yield* invalidMcpWrite(
-          "devices/setTiming",
-          "Timing patches must include totalDurationSeconds and preTriggerSeconds when no current timing is available.",
-        );
-      }
-      if (
-        config.timing?.totalDurationSeconds !== totalDurationSeconds ||
-        config.timing.preTriggerSeconds !== preTriggerSeconds
-      ) {
-        commands.push({
-          type: "devices/setTiming",
-          timing: { totalDurationSeconds, preTriggerSeconds },
-        });
-      }
+    if (
+      config.timing?.totalDurationSeconds !== totalDurationSeconds ||
+      config.timing.preTriggerSeconds !== preTriggerSeconds
+    ) {
+      commands.push({
+        type: "devices/setTiming",
+        timing: { totalDurationSeconds, preTriggerSeconds },
+      });
     }
+  }
 
-    if (patch.trigger) {
-      const threshold = patch.trigger.threshold ?? config.trigger?.threshold;
-      const channel = patch.trigger.channel ?? config.trigger?.channel;
-      const mode = patch.trigger.mode ?? config.trigger?.mode;
-      if (threshold === undefined || channel === undefined || mode === undefined) {
-        return yield* invalidMcpWrite(
-          "devices/setTrigger",
-          "Trigger patches must include threshold, channel, and mode when no current trigger is available.",
-        );
-      }
-      if (
-        config.trigger?.threshold !== threshold ||
-        config.trigger.channel !== channel ||
-        config.trigger.mode !== mode
-      ) {
-        commands.push({
-          type: "devices/setTrigger",
-          trigger: { threshold, channel, mode },
-        });
-      }
-    }
-
-    if (commands.length === 0) {
+  if (patch.trigger) {
+    const threshold = patch.trigger.threshold ?? config.trigger?.threshold;
+    const channel = patch.trigger.channel ?? config.trigger?.channel;
+    const mode = patch.trigger.mode ?? config.trigger?.mode;
+    if (threshold === undefined || channel === undefined || mode === undefined) {
       return yield* invalidMcpWrite(
-        "vscope_write_config",
-        "Patch did not change device configuration.",
+        "devices/setTrigger",
+        "Trigger patches must include threshold, channel, and mode when no current trigger is available.",
       );
     }
-
-    for (const command of commands) {
-      yield* core.dispatch(command);
+    if (
+      config.trigger?.threshold !== threshold ||
+      config.trigger.channel !== channel ||
+      config.trigger.mode !== mode
+    ) {
+      commands.push({
+        type: "devices/setTrigger",
+        trigger: { threshold, channel, mode },
+      });
     }
-  });
-}
+  }
+
+  if (commands.length === 0) {
+    return yield* invalidMcpWrite(
+      "vscope_write_config",
+      "Patch did not change device configuration.",
+    );
+  }
+
+  for (const command of commands) {
+    yield* core.dispatch(command);
+  }
+});
 
 function requireConfig(
   core: RuntimeCoreService,
@@ -532,49 +530,47 @@ function readRtBuffers(core: RuntimeCoreService): Effect.Effect<RuntimeRtBuffers
   });
 }
 
-function writeRtBuffers(
+const writeRtBuffers = Effect.fn("RuntimeMcp.writeRtBuffers")(function* (
   core: RuntimeCoreService,
   request: RuntimeWriteRtBuffersMcpRequest,
-): Effect.Effect<void, RuntimeCoreError> {
-  return Effect.gen(function* () {
-    const entries = Object.entries(request.values);
-    if (entries.length === 0) {
+): Effect.fn.Return<void, RuntimeCoreError> {
+  const entries = Object.entries(request.values);
+  if (entries.length === 0) {
+    return yield* invalidMcpWrite(
+      "vscope_write_rt_buffers",
+      "values must contain at least one RT buffer assignment.",
+    );
+  }
+
+  const config = yield* requireConfig(core, "vscope_write_rt_buffers");
+  const device = yield* requireActiveDevice(core, "vscope_write_rt_buffers");
+  const currentRtValues = new Map(config.rtValues);
+  const commands: Array<CoreCommand> = [];
+  for (const [key, value] of entries) {
+    const index = yield* parseIndexKey("vscope_write_rt_buffers", key, "RT buffer");
+    const rtCount = device.info?.rtCount ?? device.rtLabels.length;
+    if (index >= rtCount) {
       return yield* invalidMcpWrite(
         "vscope_write_rt_buffers",
-        "values must contain at least one RT buffer assignment.",
+        `RT buffer index ${index} is outside the active device RT buffer range.`,
       );
     }
-
-    const config = yield* requireConfig(core, "vscope_write_rt_buffers");
-    const device = yield* requireActiveDevice(core, "vscope_write_rt_buffers");
-    const currentRtValues = new Map(config.rtValues);
-    const commands: Array<CoreCommand> = [];
-    for (const [key, value] of entries) {
-      const index = yield* parseIndexKey("vscope_write_rt_buffers", key, "RT buffer");
-      const rtCount = device.info?.rtCount ?? device.rtLabels.length;
-      if (index >= rtCount) {
-        return yield* invalidMcpWrite(
-          "vscope_write_rt_buffers",
-          `RT buffer index ${index} is outside the active device RT buffer range.`,
-        );
-      }
-      if (currentRtValues.get(index) !== value) {
-        commands.push({ type: "devices/setRtValue", index, value });
-      }
+    if (currentRtValues.get(index) !== value) {
+      commands.push({ type: "devices/setRtValue", index, value });
     }
+  }
 
-    if (commands.length === 0) {
-      return yield* invalidMcpWrite(
-        "vscope_write_rt_buffers",
-        "RT buffer patch did not change device configuration.",
-      );
-    }
+  if (commands.length === 0) {
+    return yield* invalidMcpWrite(
+      "vscope_write_rt_buffers",
+      "RT buffer patch did not change device configuration.",
+    );
+  }
 
-    for (const command of commands) {
-      yield* core.dispatch(command);
-    }
-  });
-}
+  for (const command of commands) {
+    yield* core.dispatch(command);
+  }
+});
 
 function readChannelCatalog(
   core: RuntimeCoreService,
@@ -613,53 +609,51 @@ function readChannelMap(core: RuntimeCoreService): Effect.Effect<RuntimeChannelM
   });
 }
 
-function writeChannelMap(
+const writeChannelMap = Effect.fn("RuntimeMcp.writeChannelMap")(function* (
   core: RuntimeCoreService,
   request: RuntimeWriteChannelMapMcpRequest,
-): Effect.Effect<void, RuntimeCoreError> {
-  return Effect.gen(function* () {
-    const entries = Object.entries(request.channels);
-    if (entries.length === 0) {
+): Effect.fn.Return<void, RuntimeCoreError> {
+  const entries = Object.entries(request.channels);
+  if (entries.length === 0) {
+    return yield* invalidMcpWrite(
+      "vscope_write_channel_map",
+      "channels must contain at least one channel assignment.",
+    );
+  }
+
+  const config = yield* requireConfig(core, "vscope_write_channel_map");
+  const device = yield* requireActiveDevice(core, "vscope_write_channel_map");
+  const commands: Array<CoreCommand> = [];
+  for (const [key, variable] of entries) {
+    const channel = yield* parseIndexKey("vscope_write_channel_map", key, "channel");
+    if (channel >= config.channelMap.length) {
       return yield* invalidMcpWrite(
         "vscope_write_channel_map",
-        "channels must contain at least one channel assignment.",
+        `Channel index ${channel} is outside the active device channel range.`,
       );
     }
-
-    const config = yield* requireConfig(core, "vscope_write_channel_map");
-    const device = yield* requireActiveDevice(core, "vscope_write_channel_map");
-    const commands: Array<CoreCommand> = [];
-    for (const [key, variable] of entries) {
-      const channel = yield* parseIndexKey("vscope_write_channel_map", key, "channel");
-      if (channel >= config.channelMap.length) {
-        return yield* invalidMcpWrite(
-          "vscope_write_channel_map",
-          `Channel index ${channel} is outside the active device channel range.`,
-        );
-      }
-      if (variable >= device.variables.length) {
-        return yield* invalidMcpWrite(
-          "vscope_write_channel_map",
-          `Catalog index ${variable} is outside the active device variable catalog range.`,
-        );
-      }
-      if (config.channelMap[channel] !== variable) {
-        commands.push({ type: "devices/setChannelMap", channel, variable });
-      }
-    }
-
-    if (commands.length === 0) {
+    if (variable >= device.variables.length) {
       return yield* invalidMcpWrite(
         "vscope_write_channel_map",
-        "Channel map patch did not change device configuration.",
+        `Catalog index ${variable} is outside the active device variable catalog range.`,
       );
     }
-
-    for (const command of commands) {
-      yield* core.dispatch(command);
+    if (config.channelMap[channel] !== variable) {
+      commands.push({ type: "devices/setChannelMap", channel, variable });
     }
-  });
-}
+  }
+
+  if (commands.length === 0) {
+    return yield* invalidMcpWrite(
+      "vscope_write_channel_map",
+      "Channel map patch did not change device configuration.",
+    );
+  }
+
+  for (const command of commands) {
+    yield* core.dispatch(command);
+  }
+});
 
 function requireActiveDevice(core: RuntimeCoreService, command: string) {
   return core.activeDevice.pipe(
