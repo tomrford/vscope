@@ -34,6 +34,7 @@ import {
   HttpMiddleware,
   HttpRouter,
   HttpServer,
+  HttpServerRequest,
   HttpServerResponse,
   HttpStaticServer,
 } from "effect/unstable/http";
@@ -68,6 +69,27 @@ const JsonContent = {
 } as const;
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+
+const acceptEmptyMcpNotifications = HttpMiddleware.make((httpApp) =>
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const response = yield* httpApp;
+    if (
+      request.method === "POST" &&
+      request.url === RuntimeEndpoint.mcp &&
+      response.status === 200 &&
+      response.body._tag === "Uint8Array" &&
+      response.body.contentLength === 0
+    ) {
+      return HttpServerResponse.empty({
+        status: 202,
+        headers: response.headers,
+        cookies: response.cookies,
+      });
+    }
+    return response;
+  }),
+);
 
 class RuntimeWriteConfigRequest extends Schema.Class<RuntimeWriteConfigRequest>(
   "RuntimeWriteConfigRequest",
@@ -230,9 +252,17 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
       })
     : Layer.empty;
 
-  return Layer.mergeAll(apiRoutes, rpcRoutes, mcpRoutes, staticRoutes).pipe(
-    Layer.provide(apiLayer),
-  );
+  const mcpNotificationResponses = HttpRouter.middleware(acceptEmptyMcpNotifications, {
+    global: true,
+  });
+
+  return Layer.mergeAll(
+    apiRoutes,
+    rpcRoutes,
+    mcpRoutes,
+    staticRoutes,
+    mcpNotificationResponses,
+  ).pipe(Layer.provide(apiLayer));
 }
 
 export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never, unknown> {
@@ -705,13 +735,13 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_patch_settings", {
     description: "Patch persisted runtime settings. Network port changes apply after restart.",
-    parameters: RuntimeSettingsPatchRequest,
+    parameters: Schema.Struct(RuntimeSettingsPatchRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
   Tool.make("vscope_list_ports", {
     description: "List available serial ports.",
-    parameters: RuntimeListPortsMcpRequest,
+    parameters: Schema.Struct(RuntimeListPortsMcpRequest.fields),
     success: Schema.Array(RuntimePortInfo),
     failure: RuntimeApiError,
   })
@@ -729,7 +759,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_connect_device", {
     description: "Connect to a vscope device.",
-    parameters: RuntimeConnectRequest,
+    parameters: Schema.Struct(RuntimeConnectRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
@@ -771,7 +801,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_write_config", {
     description: "Patch editable timing and trigger configuration while halted.",
-    parameters: RuntimeWriteConfigRequest,
+    parameters: Schema.Struct(RuntimeWriteConfigRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
@@ -786,7 +816,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_write_rt_buffers", {
     description: "Patch RT buffer values by numeric RT buffer index while halted.",
-    parameters: RuntimeWriteRtBuffersMcpRequest,
+    parameters: Schema.Struct(RuntimeWriteRtBuffersMcpRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
@@ -810,7 +840,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_write_channel_map", {
     description: "Patch channel-to-catalog assignments by channel index while halted.",
-    parameters: RuntimeWriteChannelMapMcpRequest,
+    parameters: Schema.Struct(RuntimeWriteChannelMapMcpRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
@@ -824,7 +854,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_save_snapshot", {
     description: "Save a ready vscope snapshot.",
-    parameters: RuntimeSnapshotCaptureRequest,
+    parameters: Schema.Struct(RuntimeSnapshotCaptureRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   }),
@@ -839,7 +869,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_delete_snapshot", {
     description: "Delete a saved snapshot and its samples.",
-    parameters: RuntimeSnapshotIdRequest,
+    parameters: Schema.Struct(RuntimeSnapshotIdRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   })
@@ -849,7 +879,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_set_snapshot_favorite", {
     description: "Set whether a saved snapshot is retained as a favorite.",
-    parameters: RuntimeSnapshotFavoriteRequest,
+    parameters: Schema.Struct(RuntimeSnapshotFavoriteRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
   })

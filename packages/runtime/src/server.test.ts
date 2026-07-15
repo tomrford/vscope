@@ -10,7 +10,7 @@ import {
   runtimeRpcSocketUrl,
   type SnapshotRecord,
 } from "@vscope/shared";
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer, Schema, Stream } from "effect";
 import {
   Headers,
   HttpBody,
@@ -75,6 +75,16 @@ describe("@vscope/runtime server", () => {
           Headers.get(initialized.headers, "Mcp-Session-Id"),
         );
         const initializedBody = yield* readJson(initialized);
+        const initializedNotification = yield* HttpClientRequest.post("/mcp").pipe(
+          HttpClientRequest.setHeaders({
+            "Mcp-Session-Id": sessionId,
+          }),
+          HttpClientRequest.bodyJsonUnsafe({
+            jsonrpc: "2.0",
+            method: "notifications/initialized",
+          }),
+          HttpClient.execute,
+        );
         const tools = yield* HttpClientRequest.post("/mcp").pipe(
           HttpClientRequest.setHeaders({
             "Mcp-Session-Id": sessionId,
@@ -88,30 +98,49 @@ describe("@vscope/runtime server", () => {
           HttpClient.execute,
           Effect.flatMap(readJson),
         );
+        const toolList = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            result: Schema.Struct({
+              tools: Schema.Array(
+                Schema.Struct({
+                  name: Schema.String,
+                  inputSchema: Schema.Struct({
+                    type: Schema.String,
+                  }),
+                }),
+              ),
+            }),
+          }),
+        )(tools);
+        const toolNames = toolList.result.tools.map((tool) => tool.name);
 
         expect(health).toEqual({ status: "ok" });
         expect(JSON.stringify(initializedBody)).toContain('"version":"0.0.0"');
+        expect(initializedNotification.status).toBe(202);
         expect(rpcState.app.status).toBe("ready");
         expect(rpcState.activeDevice?.deviceName).toBe("fake-scope");
         expect(rpcState.config?.rtValues).toEqual([
           [0, 1.5],
           [1, 2.5],
         ]);
-        expect(JSON.stringify(tools)).toContain("vscope_write_config");
-        expect(JSON.stringify(tools)).toContain("vscope_read_settings");
-        expect(JSON.stringify(tools)).toContain("vscope_patch_settings");
-        expect(JSON.stringify(tools)).toContain("vscope_read_activity");
-        expect(JSON.stringify(tools)).toContain("vscope_clear_activity");
-        expect(JSON.stringify(tools)).toContain("vscope_read_rt_buffers");
-        expect(JSON.stringify(tools)).toContain("vscope_write_rt_buffers");
-        expect(JSON.stringify(tools)).toContain("vscope_read_channel_catalog");
-        expect(JSON.stringify(tools)).toContain("vscope_read_channel_map");
-        expect(JSON.stringify(tools)).toContain("vscope_write_channel_map");
-        expect(JSON.stringify(tools)).not.toContain("vscope_set_rt_value");
-        expect(JSON.stringify(tools)).toContain("vscope_save_snapshot");
-        expect(JSON.stringify(tools)).toContain("vscope_delete_snapshot");
-        expect(JSON.stringify(tools)).toContain("vscope_set_snapshot_favorite");
-        expect(JSON.stringify(tools)).not.toContain("vscope_capture_snapshot");
+        expect(toolList.result.tools.every((tool) => tool.inputSchema.type === "object")).toBe(
+          true,
+        );
+        expect(toolNames).toContain("vscope_write_config");
+        expect(toolNames).toContain("vscope_read_settings");
+        expect(toolNames).toContain("vscope_patch_settings");
+        expect(toolNames).toContain("vscope_read_activity");
+        expect(toolNames).toContain("vscope_clear_activity");
+        expect(toolNames).toContain("vscope_read_rt_buffers");
+        expect(toolNames).toContain("vscope_write_rt_buffers");
+        expect(toolNames).toContain("vscope_read_channel_catalog");
+        expect(toolNames).toContain("vscope_read_channel_map");
+        expect(toolNames).toContain("vscope_write_channel_map");
+        expect(toolNames).not.toContain("vscope_set_rt_value");
+        expect(toolNames).toContain("vscope_save_snapshot");
+        expect(toolNames).toContain("vscope_delete_snapshot");
+        expect(toolNames).toContain("vscope_set_snapshot_favorite");
+        expect(toolNames).not.toContain("vscope_capture_snapshot");
       }),
     );
   });
