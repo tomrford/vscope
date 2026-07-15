@@ -32,9 +32,9 @@ const program: MakeRuntimeReturn = {
           onUrlRequest: (request) => UrlRequested({ request }),
           onUrlChange: (url) => RouteChanged({ url }),
         },
-        // Lets DevTools (and its MCP bridge) decode and dispatch Messages,
-        // e.g. driving the UI without a physical device attached.
-        devTools: { Message, excludeFromHistory: ["FrameReceived"] },
+        // Lets DevTools (and its MCP bridge) decode and dispatch Messages in
+        // development, without carrying that control surface into releases.
+        devTools: import.meta.env.DEV ? { Message, excludeFromHistory: ["FrameReceived"] } : false,
         // Foldkit provides this layer separately to commands and subscriptions,
         // so the effectful socket acquisition stays outside the program runtime.
         resources: Layer.succeed(RuntimeClient, client),

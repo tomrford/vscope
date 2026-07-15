@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   root: import.meta.dirname,
   build: {
-    emptyOutDir: false,
+    emptyOutDir: true,
     outDir: "../../dist",
     rollupOptions: {
       external: [

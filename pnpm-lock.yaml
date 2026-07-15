@@ -13,9 +13,6 @@ importers:
 
   .:
     dependencies:
-      '@effect/platform-browser':
-        specifier: 4.0.0-beta.78
-        version: 4.0.0-beta.78(effect@4.0.0-beta.78)
       '@effect/platform-node':
         specifier: 4.0.0-beta.78
         version: 4.0.0-beta.78(effect@4.0.0-beta.78)(ioredis@5.11.1)
@@ -28,9 +25,6 @@ importers:
       effect:
         specifier: 4.0.0-beta.78
         version: 4.0.0-beta.78
-      foldkit:
-        specifier: 0.106.0
-        version: 0.106.0(@effect/platform-browser@4.0.0-beta.78(effect@4.0.0-beta.78))(effect@4.0.0-beta.78)
       serialport:
         specifier: 13.0.0
         version: 13.0.0

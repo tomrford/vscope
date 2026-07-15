@@ -36,7 +36,7 @@
   "scripts": {
     "build:runtime": "vite build --config packages/runtime/vite.config.ts",
     "build:ui": "pnpm --filter @vscope/ui build",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build:runtime && pnpm run build:ui && pnpm run format:check && node bin/vscope.js --help > /dev/null && node bin/vscope.js --version > /dev/null",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build:runtime && pnpm run build:ui && pnpm run release:check && pnpm run format:check && node bin/vscope.js --help > /dev/null && node bin/vscope.js --version > /dev/null",
     "dev:ui": "pnpm --filter @vscope/ui dev",
     "effect:diagnostics": "effect-language-service diagnostics --project tsconfig.json --format text",
     "format": "oxfmt .",
@@ -44,16 +44,15 @@
     "lint": "oxlint . --deny-warnings --no-error-on-unmatched-pattern && pnpm run effect:diagnostics",
     "pack:dry": "pnpm pack --dry-run",
     "prepublishOnly": "pnpm run check && pnpm run pack:dry",
+    "release:check": "node scripts/check-release.mjs",
     "test": "pnpm -r test",
     "typecheck": "tsc --project tsconfig.json --noEmit && tsc --project packages/liveplot/tsconfig.json --noEmit && tsc --project packages/ui/tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@effect/platform-browser": "4.0.0-beta.78",
     "@effect/platform-node": "4.0.0-beta.78",
     "@effect/platform-node-shared": "4.0.0-beta.78",
     "@effect/sql-sqlite-node": "4.0.0-beta.78",
     "effect": "4.0.0-beta.78",
-    "foldkit": "0.106.0",
     "serialport": "13.0.0"
   },
   "devDependencies": {

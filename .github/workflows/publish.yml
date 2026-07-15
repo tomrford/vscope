@@ -49,5 +49,5 @@ jobs:
             exit 1
           fi
 
-      - run: pnpm run check
-      - run: npm publish
+      - name: Publish package
+        run: npm publish
