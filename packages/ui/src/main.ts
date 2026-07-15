@@ -12,6 +12,7 @@ import { html } from "foldkit/html";
 import * as Mount from "foldkit/mount";
 
 import {
+  ActivityClearRequested,
   ChannelMapChanged,
   ConnectRequested,
   DisconnectRequested,
@@ -198,41 +199,35 @@ const viewConnection = (model: Model, h: H): Html => {
       : model.selectedPort || "Select port";
 
   return h.div(
-    [...sx(h, appStyles.connectionBlock)],
+    [...sx(h, appStyles.cluster)],
     [
       h.div(
-        [...sx(h, appStyles.cluster)],
+        [...sx(h, appStyles.popoverAnchor)],
         [
-          h.div(
-            [...sx(h, appStyles.popoverAnchor)],
+          h.button(
             [
-              h.button(
-                [
-                  h.Type("button"),
-                  h.OnClick(MenuToggled({ menu: "ports" })),
-                  h.Disabled(!model.linkUp || isBusy(model)),
-                  h.Title(model.selectedPort || "Select a serial port"),
-                  ...sx(
-                    h,
-                    appStyles.btn,
-                    appStyles.btnSmall,
-                    appStyles.portSelector,
-                    model.openMenu === "ports" && appStyles.btnActive,
-                  ),
-                ],
-                [selectorLabel],
+              h.Type("button"),
+              h.OnClick(MenuToggled({ menu: "ports" })),
+              h.Disabled(!model.linkUp || isBusy(model)),
+              h.Title(model.selectedPort || "Select a serial port"),
+              ...sx(
+                h,
+                appStyles.btn,
+                appStyles.btnSmall,
+                appStyles.portSelector,
+                model.openMenu === "ports" && appStyles.btnActive,
               ),
-              model.openMenu === "ports" ? viewPortsPopover(model, h) : null,
             ],
+            [selectorLabel],
           ),
-          viewButton(h, actionLabel, action, {
-            variant: connectedToSelection ? "default" : "primary",
-            small: true,
-            disabled: !model.linkUp || isBusy(model) || model.selectedPort === "",
-          }),
+          model.openMenu === "ports" ? viewPortsPopover(model, h) : null,
         ],
       ),
-      active?.error ? h.span([...sx(h, appStyles.connectionError)], [active.error]) : null,
+      viewButton(h, actionLabel, action, {
+        variant: connectedToSelection ? "default" : "primary",
+        small: true,
+        disabled: !model.linkUp || isBusy(model) || model.selectedPort === "",
+      }),
     ],
   );
 };
@@ -403,6 +398,113 @@ const viewScreen = (model: Model, h: H): Html => {
   );
 };
 
+const viewActivityPopover = (model: Model, h: H): Html => {
+  const activity = model.app?.activity ?? [];
+  return h.div(
+    [
+      h.Role("dialog"),
+      h.AriaLabel("Runtime activity"),
+      ...sx(h, appStyles.popoverPanel, appStyles.activityPopover),
+    ],
+    [
+      h.div(
+        [...sx(h, appStyles.popoverHeader)],
+        [
+          h.div(
+            [],
+            [
+              h.span([...sx(h, appStyles.cardTitle)], ["Activity"]),
+              h.p(
+                [...sx(h, appStyles.activityHint)],
+                ["Runtime warnings and errors · newest first"],
+              ),
+            ],
+          ),
+          viewButton(h, "Clear", ActivityClearRequested(), {
+            small: true,
+            disabled: activity.length === 0 || isBusy(model),
+          }),
+        ],
+      ),
+      activity.length === 0
+        ? h.div([...sx(h, appStyles.activityEmpty)], ["No warnings or errors."])
+        : h.div(
+            [h.Role("list"), ...sx(h, appStyles.activityList)],
+            activity.map((entry) =>
+              h.div(
+                [h.Key(entry.id), h.Role("listitem"), ...sx(h, appStyles.activityEntry)],
+                [
+                  h.div(
+                    [...sx(h, appStyles.activityEntryHeader)],
+                    [
+                      h.span(
+                        [
+                          ...sx(
+                            h,
+                            appStyles.activityLevel,
+                            entry.level === "error"
+                              ? appStyles.activityLevelError
+                              : appStyles.activityLevelWarning,
+                          ),
+                        ],
+                        [entry.level],
+                      ),
+                      h.time(
+                        [h.Datetime(entry.createdAt), ...sx(h, appStyles.activityTime)],
+                        [formatDate(entry.createdAt)],
+                      ),
+                    ],
+                  ),
+                  h.p([...sx(h, appStyles.activityMessage)], [entry.message]),
+                ],
+              ),
+            ),
+          ),
+    ],
+  );
+};
+
+const viewActivityMenuButton = (model: Model, h: H): Html => {
+  const activity = model.app?.activity ?? [];
+  const count = activity.length;
+  const open = model.openMenu === "activity";
+  const label = count === 0 ? "Activity" : `Activity, ${count} ${count === 1 ? "event" : "events"}`;
+  return h.div(
+    [...sx(h, appStyles.popoverAnchor)],
+    [
+      h.button(
+        [
+          h.Type("button"),
+          h.OnClick(MenuToggled({ menu: "activity" })),
+          h.AriaLabel(label),
+          h.AriaExpanded(open),
+          h.AriaHasPopup("dialog"),
+          h.Title(label),
+          ...sx(h, appStyles.btn, open && appStyles.btnActive, appStyles.activityButton),
+        ],
+        [
+          "Activity",
+          count > 0
+            ? h.span(
+                [
+                  ...sx(
+                    h,
+                    appStyles.activityBadge,
+                    activity.some((entry) => entry.level === "error")
+                      ? null
+                      : appStyles.activityBadgeWarning,
+                  ),
+                ],
+                [count > 99 ? "99+" : String(count)],
+              )
+            : null,
+        ],
+      ),
+      open ? viewActivityPopover(model, h) : null,
+    ],
+  );
+};
+
 const viewDock = (model: Model, h: H): Html =>
   h.div(
     [...sx(h, appStyles.dock)],
@@ -446,6 +548,7 @@ const viewDock = (model: Model, h: H): Html =>
         ],
       ),
       h.div([...sx(h, appStyles.dockSpacer)], []),
+      viewActivityMenuButton(model, h),
       viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, false),
     ],
   );
@@ -1273,16 +1376,10 @@ const viewLiveContent = (model: Model, h: H): ReadonlyArray<Html | null> => [
     [...sx(h, appStyles.shell)],
     [
       viewHeader(model, h),
-      h.main(
-        [...sx(h, appStyles.body)],
-        [
-          viewScreen(model, h),
-          model.error ? h.div([...sx(h, appStyles.errorBanner)], [model.error]) : null,
-          viewDock(model, h),
-        ],
-      ),
+      h.main([...sx(h, appStyles.body)], [viewScreen(model, h), viewDock(model, h)]),
     ],
   ),
+  model.error ? h.div([h.Role("alert"), ...sx(h, appStyles.localErrorToast)], [model.error]) : null,
   model.openMenu
     ? h.button(
         [

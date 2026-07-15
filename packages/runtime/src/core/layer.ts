@@ -15,6 +15,7 @@ import {
   SubscriptionRef,
 } from "effect";
 import {
+  type RuntimeActivityLevel,
   RuntimeDeviceLost,
   type PersistentId,
   SNAPSHOT_SAMPLE_FORMAT,
@@ -42,6 +43,7 @@ import type {
 
 import {
   type RuntimeCoreError,
+  describeRuntimeCoreError,
   RuntimeCorePersistenceError,
   RuntimeCorePolicyError,
   RuntimeCoreSerialError,
@@ -51,16 +53,16 @@ import type {
   CoreCommand,
   DeviceConfigState,
   DeviceControlCommand,
+  RuntimeActivityEntry,
   RuntimeLogEntry,
   RuntimeAppState,
-  RuntimeWarning,
   SnapshotCaptureCommand,
 } from "./model";
 import { canCaptureSnapshot, decideDeviceControl } from "./policy";
 import { RuntimeCore } from "./service";
 
 const MAX_LOG_ENTRIES = 100;
-const MAX_WARNINGS = 32;
+const MAX_ACTIVITY_ENTRIES = 32;
 
 interface DeviceRuntimeState {
   readonly status: VScopeControlStatus;
@@ -92,6 +94,7 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
   const parentScope = yield* Scope.Scope;
   const monitorRef = yield* Ref.make<DeviceMonitor | null>(null);
   const sessionRef = yield* Ref.make<DeviceSession | null>(null);
+  const activitySequenceRef = yield* Ref.make(0);
   const dispatchLock = yield* Semaphore.make(1);
 
   const refreshSnapshots = Effect.fn("RuntimeCore.refreshSnapshots")(function* (
@@ -117,15 +120,23 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
       return { ...app, logs: appendLog(app.logs, message, now) };
     });
 
-  const warnApp = (message: string) =>
-    updateApp((app) => {
+  const recordActivity = Effect.fn("RuntimeCore.recordActivity")(function* (
+    level: RuntimeActivityLevel,
+    message: string,
+  ) {
+    const sequence = yield* Ref.updateAndGet(activitySequenceRef, (value) => value + 1);
+    yield* updateApp((app) => {
       const now = timestamp();
       return {
         ...app,
-        warnings: appendWarning(app.warnings, message, now),
+        activity: appendActivity(app.activity, level, message, now, sequence),
         logs: appendLog(app.logs, message, now),
       };
     });
+  });
+
+  const warnApp = (message: string) => recordActivity("warning", message);
+  const errorApp = (message: string) => recordActivity("error", message);
 
   const updateActiveDevice = (
     path: string,
@@ -661,8 +672,8 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
 
   const dispatchUnlocked = (command: CoreCommand): Effect.Effect<void, RuntimeCoreError> => {
     switch (command.type) {
-      case "warnings/clear":
-        return updateApp((app) => ({ ...app, warnings: [] })).pipe(Effect.asVoid);
+      case "activity/clear":
+        return updateApp((app) => ({ ...app, activity: [] })).pipe(Effect.asVoid);
       case "settings/patch":
         return Effect.gen(function* () {
           const stateResult = yield* persistence
@@ -719,10 +730,19 @@ const makeRuntimeCore = Effect.fn("RuntimeCore.make")(function* () {
   };
 
   const dispatch = (command: CoreCommand): Effect.Effect<void, RuntimeCoreError> =>
-    dispatchLock.withPermit(dispatchUnlocked(command));
+    dispatchLock.withPermit(
+      dispatchUnlocked(command).pipe(
+        Effect.tapError((error) =>
+          command.type === "activity/clear"
+            ? Effect.void
+            : errorApp(describeRuntimeCoreError(error)),
+        ),
+      ),
+    );
 
   const listPorts = serial.listPorts.pipe(
     Effect.mapError((cause) => new RuntimeCoreSerialError({ operation: "ports/list", cause })),
+    Effect.tapError((error) => errorApp(describeRuntimeCoreError(error))),
   );
 
   const listSnapshots = SubscriptionRef.get(snapshotsRef);
@@ -810,7 +830,7 @@ const hydrateInitialStores = Effect.fn("RuntimeCore.hydrateInitialStores")(funct
       status: "ready",
       settings: settingsState.settings,
       settingsRecovery: settingsState.recovery,
-      warnings: [],
+      activity: [],
       logs: [],
     }),
     snapshots,
@@ -842,7 +862,7 @@ function finalizeApp(app: RuntimeAppState): RuntimeAppState {
   return {
     ...app,
     updatedAt: timestamp(),
-    status: app.warnings.length > 0 ? "degraded" : "ready",
+    status: app.activity.length > 0 ? "degraded" : "ready",
   };
 }
 
@@ -958,15 +978,22 @@ function snapshotDraftFromCapture(options: {
   });
 }
 
-function appendWarning(warnings: ReadonlyArray<RuntimeWarning>, message: string, now: string) {
+function appendActivity(
+  activity: ReadonlyArray<RuntimeActivityEntry>,
+  level: RuntimeActivityLevel,
+  message: string,
+  now: string,
+  sequence: number,
+) {
   return [
     {
-      id: `${now}:warning:${warnings.length}`,
+      id: `${now}:activity:${sequence}`,
+      level,
       message,
       createdAt: now,
     },
-    ...warnings,
-  ].slice(0, MAX_WARNINGS);
+    ...activity,
+  ].slice(0, MAX_ACTIVITY_ENTRIES);
 }
 
 function appendLog(logs: ReadonlyArray<RuntimeLogEntry>, message: string, now: string) {

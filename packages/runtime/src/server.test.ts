@@ -32,6 +32,15 @@ import { RuntimeCore } from "./core/service";
 import type { RuntimeCoreService } from "./core/service";
 import { makeRuntimeHttpLayer } from "./server";
 
+const testActivity: RuntimeAppState["activity"] = [
+  {
+    id: "activity:1",
+    level: "error",
+    message: "devices/connect: timed out",
+    createdAt: "2026-07-15T08:00:00.000Z",
+  },
+];
+
 describe("@vscope/runtime server", () => {
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
     it.effect("serves health, NDJSON RPC, and MCP tool listing", () =>
@@ -91,6 +100,8 @@ describe("@vscope/runtime server", () => {
         expect(JSON.stringify(tools)).toContain("vscope_write_config");
         expect(JSON.stringify(tools)).toContain("vscope_read_settings");
         expect(JSON.stringify(tools)).toContain("vscope_patch_settings");
+        expect(JSON.stringify(tools)).toContain("vscope_read_activity");
+        expect(JSON.stringify(tools)).toContain("vscope_clear_activity");
         expect(JSON.stringify(tools)).toContain("vscope_read_rt_buffers");
         expect(JSON.stringify(tools)).toContain("vscope_write_rt_buffers");
         expect(JSON.stringify(tools)).toContain("vscope_read_channel_catalog");
@@ -105,7 +116,7 @@ describe("@vscope/runtime server", () => {
     );
   });
 
-  layer(testServerLayer(), { excludeTestServices: true })((it) => {
+  layer(testServerLayer(testActivity), { excludeTestServices: true })((it) => {
     it.effect("mutates snapshot lifecycle through RPC core commands", () =>
       Effect.gen(function* () {
         const commands = activeCommands();
@@ -114,12 +125,14 @@ describe("@vscope/runtime server", () => {
         yield* Effect.scoped(
           Effect.gen(function* () {
             const rpc = yield* makeRuntimeRpcClient(yield* testRuntimeRpcUrl);
+            yield* rpc["activity.clear"]();
             yield* rpc["snapshots.favorite"]({ id, favorite: true });
             yield* rpc["snapshots.delete"]({ id });
           }),
         );
 
         expect(commands).toEqual([
+          { type: "activity/clear" },
           { type: "snapshots/favorite", id, favorite: true },
           { type: "snapshots/delete", id },
         ]);
@@ -143,6 +156,20 @@ describe("@vscope/runtime server", () => {
             patch: { polling: { stateHz: 10 } },
           },
         ]);
+      }),
+    );
+
+    it.effect("reads and clears runtime activity through MCP", () =>
+      Effect.gen(function* () {
+        const commands = activeCommands();
+        const sessionId = yield* initializeMcp();
+
+        const readResult = yield* callMcpTool(sessionId, 2, "vscope_read_activity", {});
+        yield* callMcpTool(sessionId, 3, "vscope_clear_activity", {});
+
+        expect(JSON.stringify(readResult)).toContain('"level":"error"');
+        expect(JSON.stringify(readResult)).toContain("devices/connect: timed out");
+        expect(commands).toEqual([{ type: "activity/clear" }]);
       }),
     );
 
@@ -423,19 +450,22 @@ const testRuntimeRpcUrl = Effect.gen(function* () {
   return runtimeRpcSocketUrl(`http://${hostname}:${address.port}`);
 });
 
-function testServerLayer() {
+function testServerLayer(activity: RuntimeAppState["activity"] = []) {
   currentCommands = [];
   return HttpRouter.serve(makeRuntimeHttpLayer(makeRuntimeConfig({ databasePath: ":memory:" })), {
     disableListenLog: true,
     disableLogger: true,
   }).pipe(
     Layer.provideMerge(NodeHttpServer.layerTest),
-    Layer.provide(Layer.succeed(RuntimeCore, fakeCore(currentCommands))),
+    Layer.provide(Layer.succeed(RuntimeCore, fakeCore(currentCommands, activity))),
   );
 }
 
-function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
-  const app = initialApp();
+function fakeCore(
+  commands: Array<CoreCommand>,
+  activity: RuntimeAppState["activity"],
+): RuntimeCoreService {
+  const app = initialApp(activity);
   const activeDevice = initialActiveDevice();
   const status = {
     state: VScopeState.Halted,
@@ -474,14 +504,14 @@ function fakeCore(commands: Array<CoreCommand>): RuntimeCoreService {
   };
 }
 
-function initialApp(): RuntimeAppState {
+function initialApp(activity: RuntimeAppState["activity"]): RuntimeAppState {
   return {
     bootedAt: "2026-06-16T00:00:00.000Z",
     updatedAt: "2026-06-16T00:00:00.000Z",
     status: "ready",
     settings: DEFAULT_SETTINGS,
     settingsRecovery: noRecovery,
-    warnings: [],
+    activity,
     logs: [],
   };
 }

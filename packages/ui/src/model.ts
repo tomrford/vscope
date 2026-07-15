@@ -6,6 +6,7 @@ import {
   PersistentId,
   RuntimeActiveDevice,
   RuntimeAppDto,
+  RuntimeApiError,
   RuntimeControlStatus,
   RuntimeDeviceConfigPayload,
   RuntimeFramePayload,
@@ -42,6 +43,7 @@ export const MenuId = Schema.Literals([
   "rt",
   "snapshots",
   "saveSnapshot",
+  "activity",
   "settings",
 ]);
 export type MenuId = Schema.Schema.Type<typeof MenuId>;
@@ -59,6 +61,7 @@ export const ControlAction = Schema.Literals([
   "setChannelMap",
   "deleteSnapshot",
   "favoriteSnapshot",
+  "clearActivity",
   "saveSettings",
 ]);
 export type ControlAction = Schema.Schema.Type<typeof ControlAction>;
@@ -199,17 +202,18 @@ export const SystemThemeChanged = m("SystemThemeChanged", {
 export const CommandSettled = m("CommandSettled");
 export const RtWriteSettled = m("RtWriteSettled");
 export const RtWriteFailed = m("RtWriteFailed", {
-  message: Schema.String,
+  message: Schema.NullOr(Schema.String),
 });
 export const RefreshPortsFailed = m("RefreshPortsFailed", {
-  message: Schema.String,
+  message: Schema.NullOr(Schema.String),
 });
 export const PortsRescanFailed = m("PortsRescanFailed", {
-  message: Schema.String,
+  message: Schema.NullOr(Schema.String),
 });
 export const RuntimeCommandFailed = m("RuntimeCommandFailed", {
-  message: Schema.String,
+  message: Schema.NullOr(Schema.String),
 });
+export const ActivityClearRequested = m("ActivityClearRequested");
 export const MenuToggled = m("MenuToggled", {
   menu: MenuId,
 });
@@ -301,6 +305,7 @@ export const Message = Schema.Union([
   RefreshPortsFailed,
   PortsRescanFailed,
   RuntimeCommandFailed,
+  ActivityClearRequested,
   MenuToggled,
   MenuClosed,
   SelectedPortChanged,
@@ -341,17 +346,20 @@ type UpdateResult = readonly [Model, ReadonlyArray<UiCommand>];
 const runtimeCommand: <A>(
   run: RuntimeOperation<A>,
   onSuccess: (value: A) => Message,
-  onFailure: (message: string) => Message,
+  onFailure: (message: string | null) => Message,
 ) => Effect.Effect<Message, never, RuntimeClient> = Effect.fn("ui.runtimeCommand")(function* <A>(
   run: RuntimeOperation<A>,
   onSuccess: (value: A) => Message,
-  onFailure: (message: string) => Message,
+  onFailure: (message: string | null) => Message,
 ) {
   const rpc = yield* RuntimeClient;
   return yield* run(rpc).pipe(
     Effect.timeout("15 seconds"),
     Effect.matchCause({
-      onFailure: (cause) => onFailure(errorReason(Cause.squash(cause))),
+      onFailure: (cause) => {
+        const error = Cause.squash(cause);
+        return onFailure(error instanceof RuntimeApiError ? null : errorReason(error));
+      },
       onSuccess,
     }),
   );
@@ -514,6 +522,11 @@ const PatchSettings = Command.define(
   { patch: RuntimeSettingsPatchRequest },
   Message,
 )(({ patch }) => settledCommand((rpc) => rpc["settings.patch"](patch)));
+
+const ClearActivity = Command.define(
+  "ClearActivity",
+  Message,
+)(settledCommand((rpc) => rpc["activity.clear"]()));
 
 const settingsDraftFrom = (settings: Settings): SettingsDraft => ({
   theme: settings.theme,
@@ -916,6 +929,10 @@ export const update = (model: Model, message: Message): UpdateResult =>
       PortsRescanFailed: ({ message }) =>
         model.busy === null ? [{ ...model, error: message }, []] : [model, []],
       RuntimeCommandFailed: ({ message }) => [{ ...model, busy: null, error: message }, []],
+      ActivityClearRequested: () => [
+        { ...model, busy: "clearActivity", error: null },
+        [ClearActivity()],
+      ],
       MenuToggled: ({ menu }) => {
         const opening = model.openMenu !== menu;
         return [

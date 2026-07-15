@@ -2,8 +2,8 @@ import type { Schema } from "effect";
 import type {
   PersistentId,
   RecoveryState,
+  RuntimeActivityEntryDto,
   RuntimeLogEntryDto,
-  RuntimeWarningDto,
   SerialConfig,
   Settings,
   SettingsPatch,
@@ -18,7 +18,7 @@ import type {
 
 export type RuntimeStatus = "ready" | "degraded";
 
-export type RuntimeWarning = Schema.Schema.Type<typeof RuntimeWarningDto>;
+export type RuntimeActivityEntry = Schema.Schema.Type<typeof RuntimeActivityEntryDto>;
 export type RuntimeLogEntry = Schema.Schema.Type<typeof RuntimeLogEntryDto>;
 
 export interface RuntimeAppState {
@@ -27,7 +27,7 @@ export interface RuntimeAppState {
   readonly status: RuntimeStatus;
   readonly settings: Settings;
   readonly settingsRecovery: RecoveryState;
-  readonly warnings: ReadonlyArray<RuntimeWarning>;
+  readonly activity: ReadonlyArray<RuntimeActivityEntry>;
   readonly logs: ReadonlyArray<RuntimeLogEntry>;
 }
 
@@ -103,7 +103,7 @@ export type DeviceControlCommand =
 
 export type CoreCommand =
   | {
-      readonly type: "warnings/clear";
+      readonly type: "activity/clear";
     }
   | {
       readonly type: "settings/patch";

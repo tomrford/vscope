@@ -1,4 +1,4 @@
-import { describe, expect, layer } from "@effect/vitest";
+import { describe, expect, it, layer } from "@effect/vitest";
 import { Persistence, type PersistenceService } from "@vscope/persistence";
 import {
   DEFAULT_SETTINGS,
@@ -38,9 +38,11 @@ import {
   type VScopeTiming,
   type VScopeTrigger,
 } from "@vscope/serial";
-import { VScopeInvalidArgumentError } from "../../serial/src/errors";
+import { VScopeInvalidArgumentError, VScopeTransportError } from "../../serial/src/errors";
+import { SerialReadError } from "../../serial/src/transport";
 
 import { RuntimeCore, RuntimeCoreLive } from ".";
+import { describeRuntimeCoreError, RuntimeCoreSerialError } from "./core/errors";
 
 const fakePort: SerialPortInfo = {
   path: "/dev/tty.vscope",
@@ -98,6 +100,23 @@ const testSettings = Settings.make({
 });
 
 describe("@vscope/runtime core", () => {
+  it("includes non-enumerable tagged error causes in descriptions", () => {
+    const error = new RuntimeCoreSerialError({
+      operation: "devices/run",
+      cause: new VScopeTransportError({
+        path: "/dev/tty.vscope",
+        cause: new SerialReadError({
+          path: "/dev/tty.vscope",
+          cause: new Error("read failed"),
+        }),
+      }),
+    });
+
+    expect(describeRuntimeCoreError(error)).toContain(
+      'VScopeTransportError: path="/dev/tty.vscope", cause=SerialReadError: path="/dev/tty.vscope", cause=read failed',
+    );
+  });
+
   layer(coreTestLayer())((it) => {
     it.effect("hydrates persistent state and lists ports through the serial service", () =>
       Effect.gen(function* () {
@@ -261,6 +280,29 @@ describe("@vscope/runtime core", () => {
         expect(exit._tag).toBe("Failure");
       }),
     );
+
+    it.effect("records failed commands as activity and clears them idempotently", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        const exit = yield* core.dispatch({ type: "devices/run" }).pipe(Effect.exit);
+        const failed = yield* core.app;
+
+        expect(exit._tag).toBe("Failure");
+        expect(failed.status).toBe("degraded");
+        expect(failed.activity).toHaveLength(1);
+        expect(failed.activity[0]).toMatchObject({
+          level: "error",
+          message: "devices/run: No connected device is available.",
+        });
+
+        yield* core.dispatch({ type: "activity/clear" });
+        yield* core.dispatch({ type: "activity/clear" });
+        const cleared = yield* core.app;
+
+        expect(cleared.status).toBe("ready");
+        expect(cleared.activity).toEqual([]);
+      }),
+    );
   });
 
   layer(coreTestLayer())((it) => {
@@ -299,7 +341,7 @@ describe("@vscope/runtime core", () => {
           expect(initialFrame?.[0]).toBe(1);
           expect(activeDevice?.connected).toBe(true);
           expect(heldFrame?.[0]).toBe(1);
-          expect(app.warnings).toEqual([]);
+          expect(app.activity).toEqual([]);
         }),
     );
   });

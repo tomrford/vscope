@@ -39,13 +39,6 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
   });
 
   console.log(`vscope ${packageVersion}`);
-  if (config.portOverride) {
-    console.log(`Runtime: http://${config.host}:${config.port}`);
-    console.log(`MCP:     http://${config.host}:${config.port}/mcp`);
-  } else {
-    console.log(`Runtime: http://${config.host}:<persisted>`);
-    console.log(`MCP:     http://${config.host}:<persisted>/mcp`);
-  }
   console.log(`Data:    ${paths.dataDir}`);
 
   await Effect.runPromise(runRuntimeServer(config));

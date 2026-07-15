@@ -48,6 +48,8 @@ The last successfully connected port is selected on the next launch. Select Reco
 
 The snapshot viewer opens saved captures at `/snapshots?ids=a,b`. It supports shared zoom, pan and cursor interactions across plots.
 
+The dock Activity button shows a badge for outstanding runtime warnings and errors. Its popover lists entries newest first, and Clear removes them. The app status reads `degraded` while entries remain.
+
 ## Connect an MCP client
 
 Keep `vscope` running and configure the client to use the streamable HTTP endpoint:
@@ -55,6 +57,8 @@ Keep `vscope` running and configure the client to use the streamable HTTP endpoi
 ```text
 http://127.0.0.1:5174/mcp
 ```
+
+The endpoint port follows the Network port setting; `5174` is the default.
 
 The MCP tools can inspect runtime state, list and connect devices, control acquisition, change device configuration and manage snapshots.
 

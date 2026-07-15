@@ -5,6 +5,7 @@ import { makePersistenceLayer } from "@vscope/persistence";
 import { VScopeSerialLayer } from "@vscope/serial";
 import {
   RuntimeActiveDevice,
+  RuntimeActivityEntryDto,
   RuntimeAppDto,
   RuntimeConnectRequest,
   RuntimeApiError,
@@ -50,7 +51,11 @@ import {
 } from "./api";
 import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
-import { RuntimeCorePolicyError, type RuntimeCoreError } from "./core/errors";
+import {
+  describeRuntimeCoreError,
+  RuntimeCorePolicyError,
+  type RuntimeCoreError,
+} from "./core/errors";
 import type { CoreCommand } from "./core/model";
 import type { RuntimeCoreService } from "./core/service";
 
@@ -163,6 +168,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
       return RuntimeRpcs.of({
         "runtime.getApp": () => api.rpc.getApp,
         "runtime.app": () => api.subscriptions.app,
+        "activity.clear": () => api.rpc.clearActivity.pipe(Effect.mapError(runtimeApiError)),
         "settings.patch": (patch) =>
           api.rpc.patchSettings(patch).pipe(Effect.mapError(runtimeApiError)),
         "ports.list": () => api.rpc.listPorts.pipe(Effect.mapError(runtimeApiError)),
@@ -235,12 +241,19 @@ export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never
       const core = yield* RuntimeCore;
       const appState = yield* core.app;
       const port = runtimeServerPort(config, appState.settings);
-      return Layer.unwrap(
+      const server = Layer.unwrap(
         HttpRouter.toHttpEffect(makeRuntimeHttpLayer(config)).pipe(
           Effect.map((handler) => HttpServer.serve(handler, HttpMiddleware.cors())),
         ),
+      );
+      return Layer.effectDiscard(
+        HttpServer.addressFormattedWith((address) =>
+          Effect.log(`Runtime: ${address}`).pipe(
+            Effect.andThen(Effect.log(`MCP:     ${address}/mcp`)),
+          ),
+        ),
       ).pipe(
-        HttpServer.withLogAddress,
+        Layer.provideMerge(server),
         Layer.provide(NodeHttpServer.layer(createServer, { host: config.host, port })),
       );
     }),
@@ -353,17 +366,6 @@ function describeErrorField(value: unknown): string {
 
 function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {
   return new RuntimeApiError({ message: describeRuntimeCoreError(error) });
-}
-
-function describeRuntimeCoreError(error: RuntimeCoreError): string {
-  switch (error._tag) {
-    case "RuntimeCorePersistenceError":
-      return `${error.operation}: ${describeError(error.cause)}`;
-    case "RuntimeCorePolicyError":
-      return `${error.command}: ${error.reason}`;
-    case "RuntimeCoreSerialError":
-      return `${error.operation}: ${describeError(error.cause)}`;
-  }
 }
 
 function writeConfig(
@@ -669,11 +671,28 @@ function matchesPortFilters(port: RuntimePortInfo, filters: RuntimeListPortsMcpR
 
 const RuntimeMcpToolkit = Toolkit.make(
   Tool.make("vscope_get_app", {
-    description: "Read runtime app settings, warnings, and logs.",
+    description: "Read runtime app state, settings, activity, and lifecycle logs.",
     success: RuntimeAppDto,
   })
     .annotate(Tool.Readonly, true)
     .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_read_activity", {
+    description: "Read recent runtime warnings and errors, newest first.",
+    success: Schema.Array(RuntimeActivityEntryDto),
+  })
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true)
+    .annotate(Tool.OpenWorld, false),
+  Tool.make("vscope_clear_activity", {
+    description: "Clear all runtime warnings and errors.",
+    success: Schema.String,
+    failure: RuntimeApiError,
+  })
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, true)
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_read_settings", {
@@ -845,6 +864,14 @@ const makeRuntimeMcpToolkitLayer = RuntimeMcpToolkit.toLayer(
     const core = yield* RuntimeCore;
     return RuntimeMcpToolkit.of({
       vscope_get_app: () => core.app.pipe(Effect.map(appDto)),
+      vscope_read_activity: () =>
+        core.app.pipe(
+          Effect.map((app) => app.activity.map((entry) => RuntimeActivityEntryDto.make(entry))),
+        ),
+      vscope_clear_activity: () =>
+        core
+          .dispatch({ type: "activity/clear" })
+          .pipe(Effect.as("ok"), Effect.mapError(runtimeApiError)),
       vscope_read_settings: () => core.app.pipe(Effect.map((app) => app.settings)),
       vscope_patch_settings: (patch) =>
         core

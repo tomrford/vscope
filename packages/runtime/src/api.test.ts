@@ -40,6 +40,17 @@ describe("@vscope/runtime api", () => {
       });
     }),
   );
+
+  it.effect("clears activity through the core command boundary", () =>
+    Effect.gen(function* () {
+      const commands: Array<CoreCommand> = [];
+      const api = makeRuntimeApi(fakeCore(initialStores(), commands));
+
+      yield* api.rpc.clearActivity;
+
+      expect(commands).toEqual([{ type: "activity/clear" }]);
+    }),
+  );
 });
 
 interface FakeStores {
@@ -134,7 +145,7 @@ function initialStores(): FakeStores {
       status: "ready",
       settings: DEFAULT_SETTINGS,
       settingsRecovery: noRecovery,
-      warnings: [],
+      activity: [],
       logs: [],
     },
     activeDevice: {

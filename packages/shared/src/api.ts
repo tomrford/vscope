@@ -222,8 +222,14 @@ export class RuntimeDeviceConfigPayload extends Schema.Class<RuntimeDeviceConfig
   rtValues: Schema.Array(Schema.Tuple([NonNegativeInt, Schema.Finite])),
 }) {}
 
-export class RuntimeWarningDto extends Schema.Class<RuntimeWarningDto>("RuntimeWarningDto")({
+export const RuntimeActivityLevel = Schema.Literals(["warning", "error"]);
+export type RuntimeActivityLevel = Schema.Schema.Type<typeof RuntimeActivityLevel>;
+
+export class RuntimeActivityEntryDto extends Schema.Class<RuntimeActivityEntryDto>(
+  "RuntimeActivityEntryDto",
+)({
   id: Schema.String,
+  level: RuntimeActivityLevel,
   message: Schema.String,
   createdAt: Schema.String,
 }) {}
@@ -240,7 +246,7 @@ export class RuntimeAppDto extends Schema.Class<RuntimeAppDto>("RuntimeAppDto")(
   status: Schema.Literals(["ready", "degraded"]),
   settings: Settings,
   settingsRecovery: RecoveryState,
-  warnings: Schema.Array(RuntimeWarningDto),
+  activity: Schema.Array(RuntimeActivityEntryDto),
   logs: Schema.Array(RuntimeLogEntryDto),
 }) {}
 
@@ -251,6 +257,9 @@ export class RuntimeRpcs extends RpcGroup.make(
   }),
   Rpc.make("runtime.app", {
     success: RpcSchema.Stream(RuntimeAppDto, Schema.Never),
+  }),
+  Rpc.make("activity.clear", {
+    error: RuntimeApiError,
   }),
   Rpc.make("settings.patch", {
     payload: RuntimeSettingsPatchRequest,

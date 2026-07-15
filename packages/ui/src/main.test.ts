@@ -18,6 +18,7 @@ import { Option } from "effect";
 import * as Url from "foldkit/url";
 
 import {
+  ActivityClearRequested,
   ActiveDeviceChanged,
   AppChanged,
   DeviceConfigChanged,
@@ -30,6 +31,7 @@ import {
   PortsRescanFailed,
   RefreshPortsRequested,
   RuntimeLinkDown,
+  RuntimeCommandFailed,
   SaveSnapshotRequested,
   SelectedPortChanged,
   SnapshotDeleteConfirmed,
@@ -79,6 +81,43 @@ describe("@vscope/ui model", () => {
     expect(commands.map((command) => command.name)).toEqual(["RefreshPorts"]);
   });
 
+  it("keeps recorded failures in Activity and surfaces client-side command failures", () => {
+    const [model] = init(testUrl);
+    const app = RuntimeAppDto.make({
+      bootedAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:01.000Z",
+      status: "degraded",
+      settings: DEFAULT_SETTINGS,
+      settingsRecovery: noRecovery,
+      activity: [
+        {
+          id: "activity:1",
+          level: "error",
+          message: "devices/connect: timed out",
+          createdAt: "2026-07-12T00:00:01.000Z",
+        },
+      ],
+      logs: [],
+    });
+    const [withActivity] = update(model, AppChanged({ app }));
+    const [opened] = update(withActivity, MenuToggled({ menu: "activity" }));
+    const [clearing, commands] = update(opened, ActivityClearRequested());
+    const [recordedFailure] = update(clearing, RuntimeCommandFailed({ message: null }));
+    const [clientFailure] = update(
+      clearing,
+      RuntimeCommandFailed({ message: "activity clear request timed out" }),
+    );
+
+    expect(opened.openMenu).toBe("activity");
+    expect(opened.app?.activity).toHaveLength(1);
+    expect(clearing.busy).toBe("clearActivity");
+    expect(commands.map((command) => command.name)).toEqual(["ClearActivity"]);
+    expect(recordedFailure.busy).toBeNull();
+    expect(recordedFailure.error).toBeNull();
+    expect(clientFailure.busy).toBeNull();
+    expect(clientFailure.error).toBe("activity clear request timed out");
+  });
+
   it("folds facet values independently and keeps stale data on link loss", () => {
     const [model] = init(testUrl);
     const port = RuntimePortInfo.make({ path: "/dev/tty.test" });
@@ -115,7 +154,7 @@ describe("@vscope/ui model", () => {
       status: "ready",
       settings: { ...DEFAULT_SETTINGS, lastDevicePath: "/dev/tty.remembered" },
       settingsRecovery: noRecovery,
-      warnings: [],
+      activity: [],
       logs: [],
     });
     const [withRemembered] = update(model, AppChanged({ app: remembered }));
@@ -307,7 +346,7 @@ describe("@vscope/ui model", () => {
       status: "ready",
       settings: DEFAULT_SETTINGS,
       settingsRecovery: noRecovery,
-      warnings: [],
+      activity: [],
       logs: [],
     });
     const [withApp] = update(model, AppChanged({ app }));
@@ -338,7 +377,7 @@ describe("@vscope/ui model", () => {
       status: "ready",
       settings: { ...DEFAULT_SETTINGS, theme: "light" },
       settingsRecovery: noRecovery,
-      warnings: [],
+      activity: [],
       logs: [],
     });
     const [explicitLight] = update(systemDark, AppChanged({ app }));

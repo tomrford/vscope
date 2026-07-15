@@ -2,6 +2,7 @@ import { Effect, Stream } from "effect";
 import {
   PersistentId,
   RuntimeActiveDevice,
+  RuntimeActivityEntryDto,
   RuntimeAppDto,
   RuntimeControlStatus,
   RuntimeDeviceInfo,
@@ -11,7 +12,6 @@ import {
   RuntimePortInfo,
   RuntimeSetTimingRequest,
   RuntimeSetTriggerRequest,
-  RuntimeWarningDto,
   type RuntimeDeviceLost,
   type RuntimeSettingsPatchRequest,
   type SnapshotRecord,
@@ -32,6 +32,7 @@ import type { RuntimeCoreService } from "./core/service";
 
 export interface RuntimeRpcHandlers {
   readonly getApp: Effect.Effect<RuntimeAppDto>;
+  readonly clearActivity: Effect.Effect<void, RuntimeCoreError>;
   readonly patchSettings: (
     patch: RuntimeSettingsPatchRequest,
   ) => Effect.Effect<void, RuntimeCoreError>;
@@ -90,6 +91,7 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
 
   const rpc: RuntimeRpcHandlers = {
     getApp: core.app.pipe(Effect.map(appDto)),
+    clearActivity: dispatch({ type: "activity/clear" }),
     patchSettings: (patch) => dispatch({ type: "settings/patch", patch }),
     listPorts: core.listPorts.pipe(Effect.map((ports) => ports.map(runtimePortInfo))),
     getActiveDevice: core.activeDevice.pipe(Effect.map(activeDeviceDto)),
@@ -131,7 +133,7 @@ export function makeRuntimeApi(core: RuntimeCoreService): RuntimeApi {
 export function appDto(app: RuntimeAppState): RuntimeAppDto {
   return RuntimeAppDto.make({
     ...app,
-    warnings: app.warnings.map((warning) => RuntimeWarningDto.make(warning)),
+    activity: app.activity.map((entry) => RuntimeActivityEntryDto.make(entry)),
     logs: app.logs.map((entry) => RuntimeLogEntryDto.make(entry)),
   });
 }
