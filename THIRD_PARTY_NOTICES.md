@@ -2,10 +2,9 @@
 
 ## liveline
 
-`@vscope/liveplot` contains code adapted from the [`liveline`](https://github.com/benjitaylor/liveline) project and its v2scope fork.
+`@vscope/liveplot` contains code adapted from the [`liveline`](https://github.com/benjitaylor/liveline) project.
 
 - Upstream snapshot: `069899598a11e00094ea1eb6b838404825f828be` (`liveline` 0.0.7)
-- v2scope fork base: `a913578832784bb6abdb148b6af9cf1739be2759`
 - License: MIT
 
 The local implementation provides a framework-independent engine, multiseries rendering, shared scrub crosshairs and history helpers.

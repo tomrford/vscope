@@ -1,126 +1,99 @@
 # vscope
 
-`vscope` is a local Node daemon and browser UI for debugging embedded devices that include the vscope firmware module.
+`vscope` is a local browser-based oscilloscope for embedded firmware. One Node.js process manages the USB serial connection, browser UI, settings, snapshots and MCP tools.
 
-The daemon owns the USB serial connection, device state, polling, settings and saved snapshots. The browser UI and HTTP MCP tools use the same command policy.
+## Requirements
 
-## Run vscope
+You need:
 
-You need Node.js 24 or later and a vscope-capable device connected over USB.
+- Node.js 24 or later
+- a USB serial device running the matching vscope firmware
+
+## Start vscope
+
+Run:
 
 ```bash
 npx vscope
 ```
 
-Open the listening URL printed in the terminal. The default is <http://127.0.0.1:5174>.
+Open the URL shown in the terminal. The default is <http://127.0.0.1:5174>.
 
-Use a different port for one run with:
+To use another port for one run:
 
 ```bash
 npx vscope --port 6000
 ```
 
-Keep the terminal process running while you use the UI or MCP endpoint. Press `Ctrl+C` to stop it.
+Keep the terminal open while you use vscope. Press `Ctrl+C` to stop it.
 
-`vscope` uses native USB serial and SQLite packages. If you install it and then change Node major versions, reinstall it so those packages match the active Node runtime.
+vscope stores settings and snapshots in your operating system's application data directory. It uses native USB serial and SQLite packages. Reinstall vscope after changing your Node.js major version so these packages match the active runtime.
 
-## Add vscope firmware
+## Add the firmware
 
-The package includes the matching firmware reference implementation in [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h). Copy both files into the firmware project, then:
+The npm package includes the matching [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h) files. Add both files to your firmware project.
 
-1. Implement `vscopeTxBytes` for the device's USB serial transport.
-2. Pass received serial bytes to `vscopeRxHandler`.
-3. Register acquisition variables and RT buffer values before calling `vscopeInit`.
-4. Call `vscopeAcquire` from the configured timer interrupt.
+1. Implement `vscopeTxBytes` for your USB serial transport.
+2. Register acquisition variables with `vscopeRegisterVar`. Register writable real-time values with `vscopeRegisterRtBuffer` if you need them.
+3. Call `vscopeInit` once after registering variables.
+4. Pass received serial bytes and a microsecond timestamp to `vscopeRxHandler`.
+5. Call `vscopeAcquire` from a timer interrupt at the rate passed to `vscopeInit`.
 
-These files define the firmware protocol expected by this release.
+These files define the firmware protocol for this release.
 
-## Use a device
+## Work with a device
 
-1. Open the port picker, select the device serial port and select Connect.
+1. Open the port picker, choose a serial port and select Connect.
 2. Select Run to start live plotting.
-3. Select Trigger while the device is running to acquire a high-resolution capture.
-4. Save the snapshot when the status changes to `Capture ready`.
+3. Stop the device before changing the timebase, trigger settings or channel map.
+4. Select Force trigger while the device is running to acquire a high-resolution capture.
+5. Select Save snapshot when the status changes to `Capture ready`.
 
-Timing, trigger and channel mapping changes are available while the device is halted. RT buffer writes, UI actions and MCP tools all go through the daemon.
+vscope selects the last successfully connected port when it starts. You can reconnect after a connection error or choose another port.
 
-The last successfully connected port is selected on the next launch. Select Reconnect after a connection error, or select another available port to disconnect the current device and connect the replacement.
+Open saved captures from Snapshots. You can select several captures to compare them with shared zoom, pan and cursor controls.
 
-The snapshot viewer opens saved captures at `/snapshots?ids=a,b`. It supports shared zoom, pan and cursor interactions across plots.
-
-The dock Activity button shows a badge for outstanding runtime warnings and errors. Its popover lists entries newest first, and Clear removes them. The app status reads `degraded` while entries remain.
+Activity lists runtime warnings and errors. Clear the list after you have dealt with them.
 
 ## Connect an MCP client
 
-Keep `vscope` running and configure the client to use the streamable HTTP endpoint:
+Keep vscope running and configure your MCP client to use:
 
 ```text
 http://127.0.0.1:5174/mcp
 ```
 
-The endpoint port follows the Network port setting; `5174` is the default.
+The endpoint uses the same port as the browser UI. MCP tools can inspect runtime state, manage the device connection, control acquisition, change device settings and manage snapshots.
 
-The MCP tools can inspect runtime state, list and connect devices, control acquisition, change device configuration and manage snapshots.
-
-The service listens on localhost and has no authentication. Do not expose it outside the local machine.
-
-## Architecture
-
-```text
-bin/vscope.js
-  -> @vscope/runtime
-       -> @vscope/serial
-       -> @vscope/persistence
-       -> @vscope/shared
-       -> serves @vscope/ui
-
-@vscope/ui
-  -> @vscope/shared
-  -> @vscope/liveplot
-```
-
-The private workspace packages divide the implementation by runtime concern:
-
-| Package               | Role                                       |
-| --------------------- | ------------------------------------------ |
-| `@vscope/runtime`     | daemon, HTTP, RPC and MCP composition      |
-| `@vscope/serial`      | firmware protocol and USB serial transport |
-| `@vscope/persistence` | SQLite settings and snapshot storage       |
-| `@vscope/shared`      | domain and wire schemas                    |
-| `@vscope/liveplot`    | browser-safe plotting primitives           |
-| `@vscope/ui`          | Foldkit browser UI                         |
-
-The UI uses Effect RPC over WebSocket at `/rpc`. Snapshot metadata travels over RPC. Sample data uses the `f32le-interleaved-v1` binary format over plain HTTP.
-
-Runtime endpoints:
-
-```text
-/health
-/rpc
-/mcp
-/snapshots?ids=a,b
-/snapshots/:id/samples
-```
+vscope listens only on localhost and does not use authentication. Do not expose it outside your local machine.
 
 ## Develop vscope
 
-Use the repository Nix shell so Node and pnpm match the lockfile:
+Use the Nix development shell so Node.js and pnpm match the repository:
 
 ```bash
 nix develop -c pnpm install
 nix develop -c pnpm run check
 ```
 
-Run the UI development server with:
+After the check has built the runtime, start it in one terminal:
+
+```bash
+nix develop -c node bin/vscope.js
+```
+
+Start the UI development server in another terminal:
 
 ```bash
 nix develop -c pnpm run dev:ui
 ```
 
-Vite listens on `127.0.0.1:5173` and proxies runtime requests to `127.0.0.1:5174`.
+The development UI runs at <http://127.0.0.1:5173> and connects to the runtime at <http://127.0.0.1:5174>.
 
-The `reference/` directory contains the authoritative firmware protocol headers and source. The `.repos/` directory contains read-only external references managed by `grepo`.
+## Earlier implementation
+
+An earlier Python implementation is available at [`tomrford/vscope_py`](https://github.com/tomrford/vscope_py).
 
 ## License
 
-`vscope` is MIT licensed. Attribution and the upstream MIT license for the bundled liveplot code are in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+vscope is MIT licensed. Attribution for adapted plotting code is in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
