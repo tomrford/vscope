@@ -306,6 +306,26 @@ describe("@vscope/runtime core", () => {
   });
 
   layer(coreTestLayer())((it) => {
+    it.effect("updates trigger configuration while the device is running", () =>
+      Effect.gen(function* () {
+        const core = yield* RuntimeCore;
+        yield* core.dispatch({ type: "devices/connect", path: fakePort.path });
+        yield* core.dispatch({ type: "devices/run" });
+        yield* core.dispatch({
+          type: "devices/setTrigger",
+          trigger: { channel: 1, threshold: 0.25, mode: "falling" },
+        });
+
+        const status = yield* core.deviceStatus;
+        const config = yield* core.deviceConfig;
+
+        expect(status?.state).toBe(VScopeState.Running);
+        expect(config?.trigger).toEqual({ channel: 1, threshold: 0.25, mode: "falling" });
+      }),
+    );
+  });
+
+  layer(coreTestLayer())((it) => {
     it.effect("writes RT values while the device is running", () =>
       Effect.gen(function* () {
         const core = yield* RuntimeCore;

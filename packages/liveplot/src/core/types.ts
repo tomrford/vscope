@@ -43,6 +43,8 @@ export type LiveChartInput = {
   loading: boolean;
   emptyText?: string;
   scrubTime?: number | null;
+  markerTime?: number | null;
+  markerLabel?: string;
   domain?: TimeDomain | null;
   /** Full data extent. Together with `onDomainChange` this enables the
    *  engine's pan/zoom gestures (wheel, drag, double-click reset). */
@@ -88,6 +90,7 @@ export type LiveChartPalette = {
   axisText: string;
   gridLine: string;
   crosshair: string;
+  marker: string;
   tooltipBg: string;
   tooltipBorder: string;
   tooltipText: string;

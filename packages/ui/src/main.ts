@@ -57,7 +57,12 @@ import {
 import type { MenuId, Message } from "./model.ts";
 import { acquireLivePlot, channelColor, releaseLivePlot } from "./liveplot.ts";
 import { liveHref, routeSnapshotIds, snapshotsHref, type SnapshotsRoute } from "./route.ts";
-import { acquireSnapshotPlot, releaseSnapshotPlot, snapshotChannelLabels } from "./snapshotplot.ts";
+import {
+  acquireSnapshotPlot,
+  releaseSnapshotPlot,
+  snapshotChannelLabels,
+  snapshotsCompatible,
+} from "./snapshotplot.ts";
 import { appStyles, sx } from "./styles.ts";
 import { darkColors, darkShadows } from "./theme.stylex.ts";
 
@@ -66,6 +71,15 @@ export type { Message };
 
 type H = ReturnType<typeof html<Message>>;
 type ButtonVariant = "default" | "primary" | "run" | "stop" | "active";
+type ControlWidth =
+  | "runStop"
+  | "triggerAction"
+  | "timebase"
+  | "trigger"
+  | "channels"
+  | "rt"
+  | "snapshots"
+  | "save";
 
 const triggerModes: ReadonlyArray<TriggerMode> = TriggerMode.literals;
 const themes: ReadonlyArray<Theme> = Theme.literals;
@@ -109,9 +123,32 @@ const canTrigger = (model: Model): boolean =>
   isConnected(model) && deviceState(model) === "running" && !isBusy(model);
 const canConfigure = (model: Model): boolean =>
   isConnected(model) && deviceState(model) === "halted" && !isBusy(model);
+const canConfigureTrigger = (model: Model): boolean => {
+  const state = deviceState(model);
+  return isConnected(model) && (state === "halted" || state === "running") && !isBusy(model);
+};
 const canWriteRt = (model: Model): boolean => isConnected(model) && !isBusy(model);
 const canSnapshot = (model: Model): boolean =>
   isConnected(model) && model.status?.snapshotValid === true && !isBusy(model);
+
+const controlWidthStyle = (width: ControlWidth | undefined) =>
+  width === "runStop"
+    ? appStyles.controlRunStop
+    : width === "triggerAction"
+      ? appStyles.controlTriggerAction
+      : width === "timebase"
+        ? appStyles.controlTimebase
+        : width === "trigger"
+          ? appStyles.controlTrigger
+          : width === "channels"
+            ? appStyles.controlChannels
+            : width === "rt"
+              ? appStyles.controlRt
+              : width === "snapshots"
+                ? appStyles.controlSnapshots
+                : width === "save"
+                  ? appStyles.controlSave
+                  : null;
 
 const viewButton = (
   h: H,
@@ -122,6 +159,9 @@ const viewButton = (
     readonly disabled?: boolean;
     readonly small?: boolean;
     readonly title?: string;
+    readonly width?: ControlWidth | undefined;
+    readonly leading?: Html | undefined;
+    readonly busy?: boolean;
   } = {},
 ): Html =>
   h.button(
@@ -129,18 +169,21 @@ const viewButton = (
       h.Type("button"),
       h.OnClick(onClick),
       h.Disabled(options.disabled ?? false),
+      ...(options.busy ? [h.Attribute("aria-busy", "true")] : []),
       ...(options.title ? [h.Title(options.title)] : []),
       ...sx(
         h,
+        appStyles.controlShape,
         appStyles.btn,
         options.small && appStyles.btnSmall,
         options.variant === "primary" && appStyles.btnPrimary,
         options.variant === "run" && appStyles.btnRun,
         options.variant === "stop" && appStyles.btnStop,
         options.variant === "active" && appStyles.btnActive,
+        controlWidthStyle(options.width),
       ),
     ],
-    [label],
+    [options.leading ?? null, label],
   );
 
 const viewField = (
@@ -156,7 +199,7 @@ const viewField = (
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.input([
         h.Attribute("type", "number"),
-        ...sx(h, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(value),
         h.OnInput(onInput),
         h.Disabled(options.disabled ?? false),
@@ -169,17 +212,13 @@ const viewHeader = (model: Model, h: H): Html =>
   h.header(
     [...sx(h, appStyles.header)],
     [
-      viewBrand(h, appReadiness(model)),
+      viewLiveBrand(model, h),
       h.div([...sx(h, appStyles.spacer)], []),
       viewConnection(model, h),
-      viewStateBadge(model, h),
+      viewActivityMenuButton(model, h),
+      viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, false),
     ],
   );
-
-const appReadiness = (model: Model): string => {
-  const busy = model.busy ? ` · ${model.busy}…` : "";
-  return `${model.app?.status ?? "connecting"}${busy}`;
-};
 
 const viewConnection = (model: Model, h: H): Html => {
   const active = model.activeDevice;
@@ -212,6 +251,7 @@ const viewConnection = (model: Model, h: H): Html => {
               h.Title(model.selectedPort || "Select a serial port"),
               ...sx(
                 h,
+                appStyles.controlShape,
                 appStyles.btn,
                 appStyles.btnSmall,
                 appStyles.portSelector,
@@ -302,7 +342,12 @@ const viewPortRow = (model: Model, port: RuntimePortInfo, h: H): Html => {
               h.Type("button"),
               h.OnClick(SelectedPortChanged({ path: port.path })),
               h.Disabled(isBusy(model)),
-              ...sx(h, appStyles.portChoice, selected && appStyles.portChoiceSelected),
+              ...sx(
+                h,
+                appStyles.controlShape,
+                appStyles.portChoice,
+                selected && appStyles.portChoiceSelected,
+              ),
             ],
             [port.path],
           ),
@@ -318,16 +363,12 @@ const viewPortRow = (model: Model, port: RuntimePortInfo, h: H): Html => {
 const usbId = (port: RuntimePortInfo): string =>
   port.vendorId || port.productId ? `${port.vendorId ?? "—"}:${port.productId ?? "—"}` : "—";
 
-type Tone = "run" | "acquire" | "halt" | "fault" | "idle" | "ready";
+type Tone = "run" | "acquire" | "halt" | "fault" | "idle";
 
 const stateDescriptor = (model: Model): { readonly label: string; readonly tone: Tone } => {
-  if (!model.linkUp) return { label: "Runtime offline", tone: "fault" };
-  if (!isConnected(model)) return { label: "No link", tone: "idle" };
-  if (model.status?.snapshotValid === true && deviceState(model) === "halted") {
-    return { label: "Capture ready", tone: "ready" };
-  }
+  if (!model.linkUp || !isConnected(model)) return { label: "Disconnected", tone: "idle" };
   const state = deviceState(model);
-  if (state === null) return { label: "Linking", tone: "idle" };
+  if (state === null) return { label: "Connecting", tone: "idle" };
   return Match.value(state).pipe(
     Match.withReturnType<{ readonly label: string; readonly tone: Tone }>(),
     Match.when("running", () => ({ label: "Running", tone: "run" })),
@@ -338,24 +379,16 @@ const stateDescriptor = (model: Model): { readonly label: string; readonly tone:
   );
 };
 
-const viewStateBadge = (model: Model, h: H): Html => {
-  const descriptor = stateDescriptor(model);
-  return h.span(
-    [...sx(h, appStyles.stateBadge, toneBadgeStyle(descriptor.tone))],
-    [h.span([...sx(h, appStyles.dot)], []), descriptor.label],
-  );
-};
-
-const toneBadgeStyle = (tone: Tone) =>
+const toneStyle = (tone: Tone) =>
   tone === "run"
     ? appStyles.stateRun
     : tone === "acquire"
       ? appStyles.stateAcquire
       : tone === "fault"
         ? appStyles.stateFault
-        : tone === "ready"
-          ? appStyles.stateReady
-          : appStyles.stateHalt;
+        : tone === "halt"
+          ? appStyles.stateHalt
+          : appStyles.stateIdle;
 
 const viewScreen = (model: Model, h: H): Html => {
   const channelMap = model.config?.channelMap ?? [];
@@ -480,7 +513,13 @@ const viewActivityMenuButton = (model: Model, h: H): Html => {
           h.AriaExpanded(open),
           h.AriaHasPopup("dialog"),
           h.Title(label),
-          ...sx(h, appStyles.btn, open && appStyles.btnActive, appStyles.activityButton),
+          ...sx(
+            h,
+            appStyles.controlShape,
+            appStyles.btn,
+            open && appStyles.btnActive,
+            appStyles.activityButton,
+          ),
         ],
         [
           "Activity",
@@ -505,6 +544,22 @@ const viewActivityMenuButton = (model: Model, h: H): Html => {
   );
 };
 
+const viewRunStopButton = (model: Model, h: H): Html => {
+  const state = deviceState(model);
+  const stopsDevice = state === "running" || state === "acquiring";
+  return stopsDevice
+    ? viewButton(h, "Stop", StopRequested(), {
+        variant: "stop",
+        disabled: !canStop(model),
+        width: "runStop",
+      })
+    : viewButton(h, "Run", RunRequested(), {
+        variant: "run",
+        disabled: !canRun(model),
+        width: "runStop",
+      });
+};
+
 const viewDock = (model: Model, h: H): Html =>
   h.div(
     [...sx(h, appStyles.dock)],
@@ -512,11 +567,11 @@ const viewDock = (model: Model, h: H): Html =>
       h.div(
         [...sx(h, appStyles.dockGroup)],
         [
-          viewButton(h, "Run", RunRequested(), { variant: "run", disabled: !canRun(model) }),
-          viewButton(h, "Stop", StopRequested(), { variant: "stop", disabled: !canStop(model) }),
-          viewButton(h, "Force trigger", TriggerRequested(), {
+          viewRunStopButton(model, h),
+          viewButton(h, "Trigger", TriggerRequested(), {
             disabled: !canTrigger(model),
             title: "Force a capture while running",
+            width: "triggerAction",
           }),
         ],
       ),
@@ -524,32 +579,63 @@ const viewDock = (model: Model, h: H): Html =>
       h.div(
         [...sx(h, appStyles.dockGroup)],
         [
-          viewMenuButton(model, h, "timing", timebaseButtonLabel(model), viewTimingPopover),
-          viewMenuButton(model, h, "trigger", triggerButtonLabel(model), viewTriggerPopover),
-          viewMenuButton(model, h, "channels", "Channels", viewChannelsPopover),
-          viewMenuButton(model, h, "rt", "RT buffers", viewRtDialog),
+          viewMenuButton(
+            model,
+            h,
+            "timing",
+            timebaseButtonLabel(model),
+            viewTimingPopover,
+            true,
+            !canConfigure(model),
+            "timebase",
+          ),
+          viewMenuButton(
+            model,
+            h,
+            "trigger",
+            triggerButtonLabel(model),
+            viewTriggerPopover,
+            true,
+            !canConfigureTrigger(model),
+            "trigger",
+          ),
+          viewMenuButton(
+            model,
+            h,
+            "channels",
+            "Channels",
+            viewChannelsPopover,
+            true,
+            !canConfigure(model),
+            "channels",
+          ),
+          viewMenuButton(model, h, "rt", "RT buffers", viewRtDialog, true, false, "rt"),
           viewMenuButton(
             model,
             h,
             "snapshots",
-            `Snapshots (${model.snapshots.length})`,
+            "Snapshots",
             viewSnapshotsDialog,
             false,
+            false,
+            "snapshots",
           ),
           viewMenuButton(
             model,
             h,
             "saveSnapshot",
-            "Save snapshot",
+            model.busy === "saveSnapshot" ? "Saving…" : "Save snapshot",
             viewSaveSnapshotPopover,
             true,
             !canSnapshot(model),
+            "save",
+            model.busy === "saveSnapshot"
+              ? h.span([h.Attribute("aria-hidden", "true"), ...sx(h, appStyles.spinner)], [])
+              : undefined,
+            model.busy === "saveSnapshot",
           ),
         ],
       ),
-      h.div([...sx(h, appStyles.dockSpacer)], []),
-      viewActivityMenuButton(model, h),
-      viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, false),
     ],
   );
 
@@ -561,6 +647,9 @@ const viewMenuButton = (
   panel: (model: Model, h: H) => Html,
   requiresDevice = true,
   disabled = false,
+  width?: ControlWidth,
+  leading?: Html,
+  busy = false,
 ): Html =>
   h.div(
     [...sx(h, appStyles.popoverAnchor)],
@@ -568,6 +657,9 @@ const viewMenuButton = (
       viewButton(h, label, MenuToggled({ menu }), {
         variant: model.openMenu === menu ? "active" : "default",
         disabled: disabled || (requiresDevice && !isConnected(model)),
+        width,
+        leading,
+        busy,
       }),
       model.openMenu === menu ? panel(model, h) : null,
     ],
@@ -619,7 +711,7 @@ const viewTriggerPopover = (model: Model, h: H): Html => {
           h.span([...sx(h, appStyles.fieldLabel)], ["Channel"]),
           h.select(
             [
-              ...sx(h, appStyles.select),
+              ...sx(h, appStyles.controlShape, appStyles.select),
               h.Attribute("value", model.triggerChannelDraft),
               h.OnChange((value) => TriggerChannelChanged({ value })),
             ],
@@ -645,7 +737,7 @@ const viewTriggerPopover = (model: Model, h: H): Html => {
           h.span([...sx(h, appStyles.fieldLabel)], ["Mode"]),
           h.select(
             [
-              ...sx(h, appStyles.select),
+              ...sx(h, appStyles.controlShape, appStyles.select),
               h.Attribute("value", model.triggerModeDraft),
               h.OnChange((mode) => TriggerModeChanged({ mode: parseTriggerMode(mode) })),
             ],
@@ -664,8 +756,8 @@ const viewTriggerPopover = (model: Model, h: H): Html => {
       ),
       viewButton(h, "Apply", SetTriggerRequested(), {
         variant: "primary",
-        disabled: !canConfigure(model),
-        title: "Editable while halted",
+        disabled: !canConfigureTrigger(model),
+        title: "Editable while halted or running",
       }),
     ],
   );
@@ -686,7 +778,7 @@ const viewChannelsPopover = (model: Model, h: H): Html => {
               h.span([...sx(h, appStyles.mappingIndex)], [`Channel ${channel + 1}`]),
               h.select(
                 [
-                  ...sx(h, appStyles.select),
+                  ...sx(h, appStyles.controlShape, appStyles.select),
                   h.Attribute("value", value),
                   h.OnChange((next) => ChannelMapChanged({ channel, value: next })),
                   h.Disabled(!canConfigure(model)),
@@ -746,7 +838,7 @@ const viewRtDialog = (model: Model, h: H): Html => {
                   h.span([...sx(h, appStyles.fieldLabel)], [labels[index] || `RT ${index + 1}`]),
                   h.input([
                     h.Attribute("type", "number"),
-                    ...sx(h, appStyles.input),
+                    ...sx(h, appStyles.controlShape, appStyles.input),
                     h.Value(value),
                     h.OnInput((next) => RtValueChanged({ index, value: next })),
                     h.OnChange((next) => RtValueCommitted({ index, value: next })),
@@ -772,7 +864,11 @@ const viewSettingsSelect = (
     [
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.select(
-        [...sx(h, appStyles.select), h.Attribute("value", value), h.OnChange(onChange)],
+        [
+          ...sx(h, appStyles.controlShape, appStyles.select),
+          h.Attribute("value", value),
+          h.OnChange(onChange),
+        ],
         options.map((option) =>
           h.option(
             [
@@ -800,7 +896,7 @@ const viewSettingsTextField = (
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.input([
         h.Attribute("type", type),
-        ...sx(h, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(value),
         h.OnInput((next) => SettingsTextChanged({ field, value: next })),
       ]),
@@ -965,7 +1061,7 @@ const viewSaveSnapshotPopover = (model: Model, h: H): Html => {
     [
       viewPopoverHeader(h, "Save snapshot", "capture ready"),
       h.input([
-        ...sx(h, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(model.snapshotLabelDraft),
         h.OnInput((value) => SnapshotLabelChanged({ value })),
         h.OnKeyDownPreventDefault((key) =>
@@ -999,6 +1095,7 @@ const viewLinkButton = (
       h.Target("_blank"),
       ...sx(
         h,
+        appStyles.controlShape,
         appStyles.btn,
         appStyles.linkBtn,
         options.small && appStyles.btnSmall,
@@ -1026,6 +1123,7 @@ const viewFavoriteButton = (
       h.Title(actionLabel),
       ...sx(
         h,
+        appStyles.controlShape,
         appStyles.btn,
         appStyles.btnSmall,
         appStyles.iconButton,
@@ -1068,7 +1166,7 @@ const viewDeleteButton = (model: Model, h: H, id: PersistentId, label: string): 
           h.AriaExpanded(confirming),
           h.AriaHasPopup("dialog"),
           h.Title(actionLabel),
-          ...sx(h, appStyles.btn, appStyles.btnSmall, appStyles.iconButton),
+          ...sx(h, appStyles.controlShape, appStyles.btn, appStyles.btnSmall, appStyles.iconButton),
         ],
         [viewBinIcon(h)],
       ),
@@ -1112,7 +1210,9 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
               h.h2([...sx(h, appStyles.dialogTitle)], ["Snapshots"]),
               h.p(
                 [...sx(h, appStyles.helperText)],
-                ["Saved high-resolution captures · select two or more to compare"],
+                [
+                  "Saved high-resolution captures · comparisons require matching timing and channel labels",
+                ],
               ),
             ],
           ),
@@ -1152,7 +1252,18 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                       "Duration",
                       "Created",
                       "Actions",
-                    ].map((label) => h.th([...sx(h, appStyles.tableHead)], [label])),
+                    ].map((label) =>
+                      h.th(
+                        [
+                          ...sx(
+                            h,
+                            appStyles.tableHead,
+                            label === "Actions" && appStyles.tableActions,
+                          ),
+                        ],
+                        [label],
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1170,8 +1281,14 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                         ],
                       ),
                     ]
-                  : model.snapshots.map((snapshot) =>
-                      h.tr(
+                  : model.snapshots.map((snapshot) => {
+                      const selected = model.compareSelection.includes(snapshot.id);
+                      const anchor = model.snapshots.find(
+                        (entry) => entry.id === model.compareSelection[0],
+                      );
+                      const compatible =
+                        selected || !anchor || snapshotsCompatible(anchor, snapshot);
+                      return h.tr(
                         [h.Key(snapshot.id), ...sx(h, appStyles.tableRow)],
                         [
                           h.td(
@@ -1179,8 +1296,14 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                             [
                               h.input([
                                 h.Attribute("type", "checkbox"),
-                                h.Checked(model.compareSelection.includes(snapshot.id)),
+                                h.Checked(selected),
+                                h.Disabled(!compatible),
                                 h.OnClick(SnapshotCompareToggled({ id: snapshot.id })),
+                                h.Title(
+                                  compatible
+                                    ? `Select ${snapshot.label} for comparison`
+                                    : "Timing or channel labels do not match the selected capture",
+                                ),
                                 h.AriaLabel(`Select ${snapshot.label} for comparison`),
                               ]),
                             ],
@@ -1204,10 +1327,10 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                           ),
                           h.td([...sx(h, appStyles.tableCell)], [formatDate(snapshot.createdAt)]),
                           h.td(
-                            [...sx(h, appStyles.tableCell)],
+                            [...sx(h, appStyles.tableCell, appStyles.tableActions)],
                             [
                               h.div(
-                                [...sx(h, appStyles.cluster)],
+                                [...sx(h, appStyles.cluster, appStyles.tableActionsCluster)],
                                 [
                                   viewLinkButton(h, "View", snapshotsHref([snapshot.id]), {
                                     small: true,
@@ -1228,8 +1351,8 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
                             ],
                           ),
                         ],
-                      ),
-                    ),
+                      );
+                    }),
               ),
             ],
           ),
@@ -1238,16 +1361,21 @@ const viewSnapshotsDialog = (model: Model, h: H): Html =>
     ],
   );
 
-const viewBrand = (h: H, subtitle: string): Html =>
+const viewLiveBrand = (model: Model, h: H): Html => {
+  const descriptor = stateDescriptor(model);
+  return viewBrand(h, descriptor.label, descriptor.tone);
+};
+
+const viewBrand = (h: H, subtitle: string, tone?: Tone): Html =>
   h.div(
     [...sx(h, appStyles.brand)],
     [
-      h.div([...sx(h, appStyles.brandMark)], []),
+      h.div([...sx(h, appStyles.brandMark, tone ? toneStyle(tone) : null)], []),
       h.div(
-        [],
+        [...sx(h, appStyles.brandCopy)],
         [
           h.h1([...sx(h, appStyles.brandName)], ["vscope"]),
-          h.p([...sx(h, appStyles.brandSub)], [subtitle]),
+          h.p([...sx(h, appStyles.brandSub, tone ? toneStyle(tone) : null)], [subtitle]),
         ],
       ),
     ],
@@ -1261,7 +1389,10 @@ const viewViewerHeader = (h: H, subtitle: string, meta: string): Html =>
       h.div([...sx(h, appStyles.spacer)], []),
       h.span([...sx(h, appStyles.miniStatus)], [meta]),
       h.a(
-        [h.Href(liveHref()), ...sx(h, appStyles.btn, appStyles.btnSmall, appStyles.linkBtn)],
+        [
+          h.Href(liveHref()),
+          ...sx(h, appStyles.controlShape, appStyles.btn, appStyles.btnSmall, appStyles.linkBtn),
+        ],
         ["Live scope"],
       ),
     ],

@@ -794,7 +794,8 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_write_config", {
-    description: "Patch editable timing and trigger configuration while halted.",
+    description:
+      "Patch timing while halted, or patch trigger configuration while halted or running.",
     parameters: Schema.Struct(RuntimeWriteConfigRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
@@ -809,7 +810,7 @@ const RuntimeMcpToolkit = Toolkit.make(
     .annotate(Tool.Idempotent, true)
     .annotate(Tool.OpenWorld, false),
   Tool.make("vscope_write_rt_buffers", {
-    description: "Patch RT buffer values by numeric RT buffer index while halted.",
+    description: "Patch RT buffer values by numeric RT buffer index while connected.",
     parameters: Schema.Struct(RuntimeWriteRtBuffersMcpRequest.fields),
     success: Schema.String,
     failure: RuntimeApiError,
