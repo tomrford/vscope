@@ -819,18 +819,14 @@ export const update = (model: Model, message: Message): UpdateResult =>
             [],
           ];
         }
+        // The view disables incompatible checkboxes, so this guard only holds
+        // the invariant; an incompatible id is a no-op rather than an error.
         const candidate = model.snapshots.find((snapshot) => snapshot.id === id);
         const anchor = model.snapshots.find(
           (snapshot) => snapshot.id === model.compareSelection[0],
         );
         return !candidate || (anchor && !snapshotsCompatible(anchor, candidate))
-          ? [
-              {
-                ...model,
-                error: "Comparisons require matching timing and channel labels.",
-              },
-              [],
-            ]
+          ? [model, []]
           : [{ ...model, compareSelection: [...model.compareSelection, id] }, []];
       },
       SnapshotDeleteToggled: ({ id }) => [

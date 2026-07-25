@@ -205,6 +205,9 @@ export const appStyles = stylex.create({
     borderRadius: 6,
     whiteSpace: "nowrap",
   },
+  // Device-derived labels vary in length; clip them rather than let a long
+  // label spill over the neighbouring control.
+  controlLabel: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" },
   controlRunStop: { width: 64, flex: "0 0 64px" },
   controlTriggerAction: { width: 74, flex: "0 0 74px" },
   controlTimebase: { width: 72, flex: "0 0 72px" },

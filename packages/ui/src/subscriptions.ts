@@ -83,6 +83,8 @@ const liveFacet = <A, E>(
     Stream.catch(() => Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost))),
     // SubscriptionRefs replay their current value when this reopens.
     Stream.retry(Schedule.spaced("1 second")),
+    // Unreachable at runtime: the retry schedule never gives up. Kept because
+    // it is what discharges the error channel to `never`.
     Stream.catch(() => Stream.empty),
   );
 

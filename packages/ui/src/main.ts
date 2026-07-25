@@ -71,15 +71,7 @@ export type { Message };
 
 type H = ReturnType<typeof html<Message>>;
 type ButtonVariant = "default" | "primary" | "run" | "stop" | "active";
-type ControlWidth =
-  | "runStop"
-  | "triggerAction"
-  | "timebase"
-  | "trigger"
-  | "channels"
-  | "rt"
-  | "snapshots"
-  | "save";
+type ControlWidth = keyof typeof controlWidths;
 
 const triggerModes: ReadonlyArray<TriggerMode> = TriggerMode.literals;
 const themes: ReadonlyArray<Theme> = Theme.literals;
@@ -131,24 +123,17 @@ const canWriteRt = (model: Model): boolean => isConnected(model) && !isBusy(mode
 const canSnapshot = (model: Model): boolean =>
   isConnected(model) && model.status?.snapshotValid === true && !isBusy(model);
 
-const controlWidthStyle = (width: ControlWidth | undefined) =>
-  width === "runStop"
-    ? appStyles.controlRunStop
-    : width === "triggerAction"
-      ? appStyles.controlTriggerAction
-      : width === "timebase"
-        ? appStyles.controlTimebase
-        : width === "trigger"
-          ? appStyles.controlTrigger
-          : width === "channels"
-            ? appStyles.controlChannels
-            : width === "rt"
-              ? appStyles.controlRt
-              : width === "snapshots"
-                ? appStyles.controlSnapshots
-                : width === "save"
-                  ? appStyles.controlSave
-                  : null;
+// Fixed widths keep the dock from reflowing as device-derived labels change.
+const controlWidths = {
+  runStop: appStyles.controlRunStop,
+  triggerAction: appStyles.controlTriggerAction,
+  timebase: appStyles.controlTimebase,
+  trigger: appStyles.controlTrigger,
+  channels: appStyles.controlChannels,
+  rt: appStyles.controlRt,
+  snapshots: appStyles.controlSnapshots,
+  save: appStyles.controlSave,
+} as const;
 
 const viewButton = (
   h: H,
@@ -180,10 +165,10 @@ const viewButton = (
         options.variant === "run" && appStyles.btnRun,
         options.variant === "stop" && appStyles.btnStop,
         options.variant === "active" && appStyles.btnActive,
-        controlWidthStyle(options.width),
+        options.width ? controlWidths[options.width] : null,
       ),
     ],
-    [options.leading ?? null, label],
+    [options.leading ?? null, h.span([...sx(h, appStyles.controlLabel)], [label])],
   );
 
 const viewField = (
@@ -216,7 +201,9 @@ const viewHeader = (model: Model, h: H): Html =>
       h.div([...sx(h, appStyles.spacer)], []),
       viewConnection(model, h),
       viewActivityMenuButton(model, h),
-      viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, false),
+      viewMenuButton(model, h, "settings", "Settings", viewSettingsDialog, {
+        requiresDevice: false,
+      }),
     ],
   );
 
@@ -579,60 +566,38 @@ const viewDock = (model: Model, h: H): Html =>
       h.div(
         [...sx(h, appStyles.dockGroup)],
         [
-          viewMenuButton(
-            model,
-            h,
-            "timing",
-            timebaseButtonLabel(model),
-            viewTimingPopover,
-            true,
-            !canConfigure(model),
-            "timebase",
-          ),
-          viewMenuButton(
-            model,
-            h,
-            "trigger",
-            triggerButtonLabel(model),
-            viewTriggerPopover,
-            true,
-            !canConfigureTrigger(model),
-            "trigger",
-          ),
-          viewMenuButton(
-            model,
-            h,
-            "channels",
-            "Channels",
-            viewChannelsPopover,
-            true,
-            !canConfigure(model),
-            "channels",
-          ),
-          viewMenuButton(model, h, "rt", "RT buffers", viewRtDialog, true, false, "rt"),
-          viewMenuButton(
-            model,
-            h,
-            "snapshots",
-            "Snapshots",
-            viewSnapshotsDialog,
-            false,
-            false,
-            "snapshots",
-          ),
+          viewMenuButton(model, h, "timing", timebaseButtonLabel(model), viewTimingPopover, {
+            disabled: !canConfigure(model),
+            width: "timebase",
+          }),
+          viewMenuButton(model, h, "trigger", triggerButtonLabel(model), viewTriggerPopover, {
+            disabled: !canConfigureTrigger(model),
+            width: "trigger",
+          }),
+          viewMenuButton(model, h, "channels", "Channels", viewChannelsPopover, {
+            disabled: !canConfigure(model),
+            width: "channels",
+          }),
+          viewMenuButton(model, h, "rt", "RT buffers", viewRtDialog, { width: "rt" }),
+          viewMenuButton(model, h, "snapshots", "Snapshots", viewSnapshotsDialog, {
+            requiresDevice: false,
+            width: "snapshots",
+          }),
           viewMenuButton(
             model,
             h,
             "saveSnapshot",
             model.busy === "saveSnapshot" ? "Saving…" : "Save snapshot",
             viewSaveSnapshotPopover,
-            true,
-            !canSnapshot(model),
-            "save",
-            model.busy === "saveSnapshot"
-              ? h.span([h.Attribute("aria-hidden", "true"), ...sx(h, appStyles.spinner)], [])
-              : undefined,
-            model.busy === "saveSnapshot",
+            {
+              disabled: !canSnapshot(model),
+              width: "save",
+              leading:
+                model.busy === "saveSnapshot"
+                  ? h.span([h.Attribute("aria-hidden", "true"), ...sx(h, appStyles.spinner)], [])
+                  : undefined,
+              busy: model.busy === "saveSnapshot",
+            },
           ),
         ],
       ),
@@ -645,25 +610,29 @@ const viewMenuButton = (
   menu: MenuId,
   label: string,
   panel: (model: Model, h: H) => Html,
-  requiresDevice = true,
-  disabled = false,
-  width?: ControlWidth,
-  leading?: Html,
-  busy = false,
-): Html =>
-  h.div(
+  options: {
+    readonly requiresDevice?: boolean;
+    readonly disabled?: boolean;
+    readonly width?: ControlWidth;
+    readonly leading?: Html;
+    readonly busy?: boolean;
+  } = {},
+): Html => {
+  const requiresDevice = options.requiresDevice ?? true;
+  return h.div(
     [...sx(h, appStyles.popoverAnchor)],
     [
       viewButton(h, label, MenuToggled({ menu }), {
         variant: model.openMenu === menu ? "active" : "default",
-        disabled: disabled || (requiresDevice && !isConnected(model)),
-        width,
-        leading,
-        busy,
+        disabled: (options.disabled ?? false) || (requiresDevice && !isConnected(model)),
+        width: options.width,
+        leading: options.leading,
+        busy: options.busy ?? false,
       }),
       model.openMenu === menu ? panel(model, h) : null,
     ],
   );
+};
 
 const viewPopoverHeader = (h: H, title: string, meta: string): Html =>
   h.div(
@@ -1568,8 +1537,14 @@ const triggerButtonLabel = (model: Model): string => {
   return trigger ? `${trigger.mode} · channel ${trigger.channel + 1}` : "Trigger settings";
 };
 
-const formatNumber = (value: number): string =>
-  Number.isInteger(value) ? String(value) : String(Number(value.toPrecision(6)));
+// Durations read in milliseconds or larger, so three decimals keep the dock
+// labels short. Values below that fall back to significant digits rather than
+// rounding away to zero.
+const formatNumber = (value: number): string => {
+  if (Number.isInteger(value)) return String(value);
+  const rounded = Number(value.toFixed(3));
+  return String(rounded === 0 ? Number(value.toPrecision(2)) : rounded);
+};
 
 const portLabel = (path: string, manufacturer: string | undefined): string =>
   manufacturer ? `${path} · ${manufacturer}` : path;

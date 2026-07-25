@@ -7,3 +7,4 @@ out/
 .repos/*
 !.repos/.lock
 grepo/*
+.claude/settings.local.json

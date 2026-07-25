@@ -498,8 +498,6 @@ describe("@vscope/ui model", () => {
     expect(selectedPair.compareSelection).toEqual([first.id, compatible.id]);
     expect(timingRejected.compareSelection).toEqual(selectedPair.compareSelection);
     expect(channelsRejected.compareSelection).toEqual(selectedPair.compareSelection);
-    expect(timingRejected.error).toBe("Comparisons require matching timing and channel labels.");
-    expect(channelsRejected.error).toBe("Comparisons require matching timing and channel labels.");
   });
 
   it("confirms deletion and toggles favorites through runtime commands", () => {
