@@ -107,11 +107,26 @@ static uint32_t vscope_acq_time;
 static uint32_t vscope_index;
 static uint32_t vscope_first_element;
 
-// Trigger configuration
+// Trigger configuration. Owned by ISR context: vscopeAcquire is the only
+// writer, so vscope_check_trigger always samples one coherent set.
 static float vscope_trigger_threshold;
 static uint8_t vscope_trigger_channel;
 static VscopeTriggerMode vscope_trigger_mode;
 static bool trigger_invalid;
+
+// Trigger update handover, and the record of the requested configuration.
+// Trigger is the only multi-field configuration that may be written while the
+// ISR is consuming it, so the handover is a sequence protocol rather than a
+// plain flag: the RX context brackets its writes with an odd sequence value,
+// and the ISR installs the set only if the sequence is unchanged across its
+// read. That holds whichever context can preempt the other. Keep these the only
+// route into the live fields above, otherwise a read back can report a
+// configuration that was never requested.
+static volatile float trigger_stage_threshold;
+static volatile uint8_t trigger_stage_channel;
+static volatile uint8_t trigger_stage_mode;
+static volatile uint8_t trigger_seq;
+static uint8_t trigger_applied_seq;
 
 // Variable registry + channel map
 static VscopeVar var_catalog[VSCOPE_MAX_VARIABLES];
@@ -649,16 +664,21 @@ static void vscope_handle_set_rt_buffer(const uint8_t* payload, uint16_t payload
 
 // TRIGGER
 
-static void vscope_send_trigger(uint8_t type) {
+static void vscope_send_trigger(uint8_t type, float threshold, uint8_t channel, uint8_t mode) {
     uint8_t data[6];
-    vscope_write_f32(&data[0], vscope_trigger_threshold);
-    data[4] = vscope_trigger_channel;
-    data[5] = (uint8_t)vscope_trigger_mode;
+    vscope_write_f32(&data[0], threshold);
+    data[4] = channel;
+    data[5] = mode;
     vscope_send_payload(type, data, sizeof(data));
 }
 
+// The staging fields are the requested configuration: equal to the live one,
+// or newer while an update is pending. Reporting them always means a read back
+// straight after a write never contradicts the write echo. Safe to read
+// unsynchronized because the RX context is their only writer.
 static void vscope_handle_get_trigger(void) {
-    vscope_send_trigger(VSCOPE_MSG_GET_TRIGGER);
+    vscope_send_trigger(VSCOPE_MSG_GET_TRIGGER, trigger_stage_threshold, trigger_stage_channel,
+                        trigger_stage_mode);
 }
 
 static void vscope_handle_set_trigger(const uint8_t* payload, uint16_t payload_len) {
@@ -676,11 +696,15 @@ static void vscope_handle_set_trigger(const uint8_t* payload, uint16_t payload_l
         return;
     }
 
-    vscope_trigger_threshold = threshold;
-    vscope_trigger_channel = channel;
-    vscope_trigger_mode = (VscopeTriggerMode)mode;
-    trigger_invalid = true;
-    vscope_send_trigger(VSCOPE_MSG_SET_TRIGGER);
+    // Odd sequence marks the update in progress, even marks it published. An
+    // update not yet installed is simply superseded by this one.
+    trigger_seq = (uint8_t)(trigger_seq + 1U);
+    trigger_stage_threshold = threshold;
+    trigger_stage_channel = channel;
+    trigger_stage_mode = mode;
+    trigger_seq = (uint8_t)(trigger_seq + 1U);
+
+    vscope_send_trigger(VSCOPE_MSG_SET_TRIGGER, threshold, channel, mode);
 }
 
 // MESSAGE HANDLER
@@ -884,6 +908,11 @@ void vscopeInit(const char* device_name, uint16_t isr_khz, uint8_t endianness) {
     vscope_trigger_channel = 0U;
     vscope_trigger_mode = VSCOPE_TRG_DISABLED;
     trigger_invalid = true;
+    trigger_stage_threshold = 0.0f;
+    trigger_stage_channel = 0U;
+    trigger_stage_mode = (uint8_t)VSCOPE_TRG_DISABLED;
+    trigger_seq = 0U;
+    trigger_applied_seq = 0U;
 
     // Variable registry + channel map
     memset(vscope_frame, 0, sizeof(vscope_frame));
@@ -915,6 +944,32 @@ static void vscope_save_frame(void) {
     if (vscope_index >= (uint32_t)VSCOPE_BUFFER_SIZE) {
         vscope_index = 0U;
     }
+}
+
+// Installs a published trigger update. The live fields are ISR-owned, so the
+// configuration lands between samples and trigger_invalid is always set
+// together with the configuration it belongs to. A write that starts or
+// finishes during the read leaves the sequence changed, so this pass installs
+// nothing and the next one picks up the newer values.
+static void vscope_apply_trigger_update(void) {
+    uint8_t seq = trigger_seq;
+    if (((seq & 1U) != 0U) || (seq == trigger_applied_seq)) {
+        return;
+    }
+
+    float threshold = trigger_stage_threshold;
+    uint8_t channel = trigger_stage_channel;
+    uint8_t mode = trigger_stage_mode;
+
+    if (trigger_seq != seq) {
+        return;
+    }
+
+    vscope_trigger_threshold = threshold;
+    vscope_trigger_channel = channel;
+    vscope_trigger_mode = (VscopeTriggerMode)mode;
+    trigger_invalid = true;
+    trigger_applied_seq = seq;
 }
 
 static void vscope_check_trigger(void) {
@@ -966,6 +1021,10 @@ void vscopeAcquire(void) {
     if (vscope_state == VSCOPE_MISCONFIGURED) {
         return;
     }
+
+    // Every state, not only RUNNING: a trigger written while halted must be in
+    // effect before the next run starts.
+    vscope_apply_trigger_update();
 
     switch (vscope_state) {
         case VSCOPE_HALTED:

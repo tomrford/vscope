@@ -9,6 +9,7 @@ import { drawCrosshair, formatTimeAgoLabel } from "./draw/crosshair";
 import { drawEmpty } from "./draw/empty";
 import { buildDomainTicks, buildRelativeTicks, drawGrid } from "./draw/grid";
 import { drawLoading } from "./draw/loading";
+import { drawMarker } from "./draw/marker";
 import { drawMultiSeries, type VisibleSeries } from "./draw/line-multiseries";
 import { panDomain, zoomDomain } from "./math/domain";
 import { interpolateAtTime } from "./math/interpolate";
@@ -426,6 +427,11 @@ export const createLivePlotEngine = (
     }
 
     drawMultiSeries(ctx, layout, visibleSeries, config.showFill, state.chartReveal, nowMs);
+
+    const markerTime = config.markerTime ?? null;
+    if (markerTime !== null) {
+      drawMarker(ctx, layout, palette, markerTime, config.markerLabel ?? "Marker");
+    }
 
     if (state.chartReveal < 0.99 && !config.loading) {
       drawEmpty(

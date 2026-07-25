@@ -36,6 +36,7 @@ import {
   SelectedPortChanged,
   SnapshotDeleteConfirmed,
   SnapshotDeleteToggled,
+  SnapshotCompareToggled,
   SnapshotFavoriteChanged,
   SettingsApplyRequested,
   SettingsTextChanged,
@@ -69,6 +70,36 @@ const activeDevice = (connected: boolean) =>
     variables: ["a", "b", "c"],
     rtLabels: [],
     error: null,
+  });
+
+const comparisonSnapshot = (
+  id: string,
+  options: {
+    readonly totalDurationSeconds?: number;
+    readonly variables?: ReadonlyArray<string>;
+  } = {},
+) =>
+  SnapshotRecord.make({
+    id: PersistentId.make(id),
+    label: id,
+    device: { name: "test-device" },
+    sample: {
+      format: "f32le-interleaved-v1",
+      channelCount: 2,
+      sampleCount: 1000,
+      byteLength: 8000,
+      stored: true,
+    },
+    sampleRateHz: 10_000,
+    totalDurationSeconds: options.totalDurationSeconds ?? 0.1,
+    preTriggerSeconds: 0.025,
+    channelMap: [0, 1],
+    trigger: { threshold: 0.5, channel: 0, mode: "rising" },
+    rtValues: [],
+    metadata: { variables: options.variables ?? ["voltage", "current"] },
+    favorite: false,
+    createdAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
+    updatedAt: Timestamp.make("2026-07-12T00:00:00.000Z"),
   });
 
 describe("@vscope/ui model", () => {
@@ -442,6 +473,31 @@ describe("@vscope/ui model", () => {
     expect(blankCommands).toHaveLength(0);
     expect(saving.busy).toBe("saveSnapshot");
     expect(saveCommands.map((command) => command.name)).toEqual(["SaveSnapshot"]);
+  });
+
+  it("allows only snapshots with matching timing and channel labels into a comparison", () => {
+    const [model] = init(testUrl);
+    const first = comparisonSnapshot("first");
+    const compatible = comparisonSnapshot("compatible");
+    const wrongTiming = comparisonSnapshot("wrong-timing", { totalDurationSeconds: 0.2 });
+    const wrongChannels = comparisonSnapshot("wrong-channels", {
+      variables: ["voltage", "temperature"],
+    });
+    const [withSnapshots] = update(
+      model,
+      SnapshotsChanged({ snapshots: [first, compatible, wrongTiming, wrongChannels] }),
+    );
+    const [selectedFirst] = update(withSnapshots, SnapshotCompareToggled({ id: first.id }));
+    const [selectedPair] = update(selectedFirst, SnapshotCompareToggled({ id: compatible.id }));
+    const [timingRejected] = update(selectedPair, SnapshotCompareToggled({ id: wrongTiming.id }));
+    const [channelsRejected] = update(
+      selectedPair,
+      SnapshotCompareToggled({ id: wrongChannels.id }),
+    );
+
+    expect(selectedPair.compareSelection).toEqual([first.id, compatible.id]);
+    expect(timingRejected.compareSelection).toEqual(selectedPair.compareSelection);
+    expect(channelsRejected.compareSelection).toEqual(selectedPair.compareSelection);
   });
 
   it("confirms deletion and toggles favorites through runtime commands", () => {

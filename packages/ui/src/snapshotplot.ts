@@ -19,6 +19,7 @@ export interface SnapshotViewEntry {
   readonly id: string;
   readonly label: string;
   readonly durationSeconds: number;
+  readonly triggerTimeSeconds: number;
   readonly sampleRateHz: number | null;
   readonly channelCount: number;
   readonly channelLabels: ReadonlyArray<string>;
@@ -100,6 +101,8 @@ const configFor = (channel: number) => {
     domainBounds: fullDomain(),
     onDomainChange,
     scrubTime: cursor !== null && cursor.channel !== channel ? cursor.time : null,
+    markerTime: viewEntries[0]?.triggerTimeSeconds ?? null,
+    markerLabel: "Trigger",
     onHover: onHoverFor(channel),
   };
 };
@@ -215,6 +218,50 @@ export const snapshotChannelLabels = (record: SnapshotRecord): ReadonlyArray<str
     const label = variable === undefined ? "" : (variables[variable] ?? "");
     return label || `CH${channel + 1}`;
   });
+};
+
+export const snapshotsCompatible = (left: SnapshotRecord, right: SnapshotRecord): boolean => {
+  if (
+    left.sample.format !== right.sample.format ||
+    left.sample.channelCount !== right.sample.channelCount ||
+    left.sample.sampleCount !== right.sample.sampleCount ||
+    left.sampleRateHz !== right.sampleRateHz ||
+    left.totalDurationSeconds !== right.totalDurationSeconds ||
+    left.preTriggerSeconds !== right.preTriggerSeconds
+  ) {
+    return false;
+  }
+
+  const leftLabels = snapshotChannelLabels(left);
+  const rightLabels = snapshotChannelLabels(right);
+  return (
+    leftLabels.length === rightLabels.length &&
+    leftLabels.every((label, index) => label === rightLabels[index])
+  );
+};
+
+// A comparison shares one time axis, one set of channel labels and one trigger
+// marker, all taken from the leading capture. Snapshot routes are raw input, so
+// the set is filtered here as well as in the picker.
+export const partitionByCompatibility = (
+  records: ReadonlyArray<SnapshotRecord>,
+): {
+  readonly compatible: ReadonlyArray<SnapshotRecord>;
+  readonly incompatible: ReadonlyArray<SnapshotRecord>;
+} => {
+  const anchor = records[0];
+  if (!anchor) return { compatible: [], incompatible: [] };
+
+  const compatible: Array<SnapshotRecord> = [];
+  const incompatible: Array<SnapshotRecord> = [];
+  for (const record of records) {
+    if (snapshotsCompatible(anchor, record)) {
+      compatible.push(record);
+    } else {
+      incompatible.push(record);
+    }
+  }
+  return { compatible, incompatible };
 };
 
 // --- mount ----------------------------------------------------------------

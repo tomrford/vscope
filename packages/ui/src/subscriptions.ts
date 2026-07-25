@@ -1,4 +1,4 @@
-import { Effect, Schedule, Schema, Stream } from "effect";
+import { Cause, Effect, Schedule, Schema, Stream } from "effect";
 import * as Subscription from "foldkit/subscription";
 
 import { RuntimeClient, type RuntimeRpc } from "./client.ts";
@@ -19,6 +19,7 @@ import { ingestLiveFrame, resetLivePlot, setLivePlotTheme } from "./liveplot.ts"
 import { routeSnapshotIds } from "./route.ts";
 import {
   configureSnapshotPlots,
+  partitionByCompatibility,
   setSnapshotPlotTheme,
   snapshotChannelLabels,
 } from "./snapshotplot.ts";
@@ -45,30 +46,32 @@ const SnapshotViewDependency = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   durationSeconds: Schema.Finite,
+  triggerTimeSeconds: Schema.Finite,
   sampleRateHz: Schema.NullOr(Schema.Finite),
   channelCount: Schema.Int,
   channelLabels: Schema.Array(Schema.String),
 });
 
-const snapshotViewDependencies = (model: Model) => ({
-  entries:
-    model.route._tag === "SnapshotsRoute"
-      ? routeSnapshotIds(model.route).flatMap((id) => {
-          const record = model.snapshots.find((snapshot) => snapshot.id === id);
-          if (!record) return [];
-          return [
-            {
-              id,
-              label: record.label,
-              durationSeconds: record.totalDurationSeconds,
-              sampleRateHz: record.sampleRateHz,
-              channelCount: record.sample.channelCount,
-              channelLabels: snapshotChannelLabels(record),
-            },
-          ];
-        })
-      : [],
-});
+const snapshotViewDependencies = (model: Model) => {
+  if (model.route._tag !== "SnapshotsRoute") return { entries: [] };
+
+  const records = routeSnapshotIds(model.route).flatMap((id) => {
+    const record = model.snapshots.find((snapshot) => snapshot.id === id);
+    return record ? [record] : [];
+  });
+
+  return {
+    entries: partitionByCompatibility(records).compatible.map((record) => ({
+      id: record.id,
+      label: record.label,
+      durationSeconds: record.totalDurationSeconds,
+      triggerTimeSeconds: record.preTriggerSeconds,
+      sampleRateHz: record.sampleRateHz,
+      channelCount: record.sample.channelCount,
+      channelLabels: snapshotChannelLabels(record),
+    })),
+  };
+};
 
 const liveFacet = <A, E>(
   open: (rpc: RuntimeRpc) => Stream.Stream<A, E, never>,
@@ -78,9 +81,18 @@ const liveFacet = <A, E>(
     Stream.map(toMessage),
     // A live facet should never complete while the daemon is reachable.
     (stream) => Stream.concat(stream, Stream.fail(linkLost)),
-    Stream.catch(() => Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost))),
+    // Defects must reach the reconnect path too, or a facet dies silently and
+    // the UI keeps rendering stale device state. Interruption is teardown
+    // (switchMap swapping dependencies, unmount) and has to pass through.
+    Stream.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Stream.failCause(cause)
+        : Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost)),
+    ),
     // SubscriptionRefs replay their current value when this reopens.
     Stream.retry(Schedule.spaced("1 second")),
+    // Unreachable at runtime: the retry schedule never gives up. Kept because
+    // it is what discharges the error channel to `never`.
     Stream.catch(() => Stream.empty),
   );
 

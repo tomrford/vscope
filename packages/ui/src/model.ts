@@ -31,7 +31,7 @@ import { Url } from "foldkit/url";
 
 import { RuntimeClient, type RuntimeRpc } from "./client.ts";
 import { Route, parseRoute, routeSnapshotIds } from "./route.ts";
-import { loadSnapshotSamples } from "./snapshotplot.ts";
+import { loadSnapshotSamples, snapshotsCompatible } from "./snapshotplot.ts";
 
 // Which popover or dialog is open. Ephemeral view state, but kept in the
 // Model so open/close is explicit, testable, and survives a render.
@@ -809,15 +809,26 @@ export const update = (model: Model, message: Message): UpdateResult =>
         },
         [],
       ],
-      SnapshotCompareToggled: ({ id }) => [
-        {
-          ...model,
-          compareSelection: model.compareSelection.includes(id)
-            ? model.compareSelection.filter((entry) => entry !== id)
-            : [...model.compareSelection, id],
-        },
-        [],
-      ],
+      SnapshotCompareToggled: ({ id }) => {
+        if (model.compareSelection.includes(id)) {
+          return [
+            {
+              ...model,
+              compareSelection: model.compareSelection.filter((entry) => entry !== id),
+            },
+            [],
+          ];
+        }
+        // The view disables incompatible checkboxes, so this guard only holds
+        // the invariant; an incompatible id is a no-op rather than an error.
+        const candidate = model.snapshots.find((snapshot) => snapshot.id === id);
+        const anchor = model.snapshots.find(
+          (snapshot) => snapshot.id === model.compareSelection[0],
+        );
+        return !candidate || (anchor && !snapshotsCompatible(anchor, candidate))
+          ? [model, []]
+          : [{ ...model, compareSelection: [...model.compareSelection, id] }, []];
+      },
       SnapshotDeleteToggled: ({ id }) => [
         {
           ...model,

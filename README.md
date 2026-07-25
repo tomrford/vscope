@@ -45,9 +45,10 @@ These files define the firmware protocol for this release.
 
 1. Open the port picker, choose a serial port and select Connect.
 2. Select Run to start live plotting.
-3. Stop the device before changing the timebase, trigger settings or channel map.
-4. Select Force trigger while the device is running to acquire a high-resolution capture.
-5. Select Save snapshot when the status changes to `Capture ready`.
+3. Stop the device before changing the timebase or channel map. Trigger settings remain editable
+   while the device is running.
+4. Select Trigger while the device is running to acquire a high-resolution capture.
+5. Select Save snapshot. It becomes available when the device holds a new capture.
 
 vscope selects the last successfully connected port when it starts. You can reconnect after a connection error or choose another port.
 
