@@ -240,6 +240,30 @@ export const snapshotsCompatible = (left: SnapshotRecord, right: SnapshotRecord)
   );
 };
 
+// A comparison shares one time axis, one set of channel labels and one trigger
+// marker, all taken from the leading capture. Snapshot routes are raw input, so
+// the set is filtered here as well as in the picker.
+export const partitionByCompatibility = (
+  records: ReadonlyArray<SnapshotRecord>,
+): {
+  readonly compatible: ReadonlyArray<SnapshotRecord>;
+  readonly incompatible: ReadonlyArray<SnapshotRecord>;
+} => {
+  const anchor = records[0];
+  if (!anchor) return { compatible: [], incompatible: [] };
+
+  const compatible: Array<SnapshotRecord> = [];
+  const incompatible: Array<SnapshotRecord> = [];
+  for (const record of records) {
+    if (snapshotsCompatible(anchor, record)) {
+      compatible.push(record);
+    } else {
+      incompatible.push(record);
+    }
+  }
+  return { compatible, incompatible };
+};
+
 // --- mount ----------------------------------------------------------------
 
 export const acquireSnapshotPlot = (

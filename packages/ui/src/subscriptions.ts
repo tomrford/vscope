@@ -19,6 +19,7 @@ import { ingestLiveFrame, resetLivePlot, setLivePlotTheme } from "./liveplot.ts"
 import { routeSnapshotIds } from "./route.ts";
 import {
   configureSnapshotPlots,
+  partitionByCompatibility,
   setSnapshotPlotTheme,
   snapshotChannelLabels,
 } from "./snapshotplot.ts";
@@ -51,26 +52,26 @@ const SnapshotViewDependency = Schema.Struct({
   channelLabels: Schema.Array(Schema.String),
 });
 
-const snapshotViewDependencies = (model: Model) => ({
-  entries:
-    model.route._tag === "SnapshotsRoute"
-      ? routeSnapshotIds(model.route).flatMap((id) => {
-          const record = model.snapshots.find((snapshot) => snapshot.id === id);
-          if (!record) return [];
-          return [
-            {
-              id,
-              label: record.label,
-              durationSeconds: record.totalDurationSeconds,
-              triggerTimeSeconds: record.preTriggerSeconds,
-              sampleRateHz: record.sampleRateHz,
-              channelCount: record.sample.channelCount,
-              channelLabels: snapshotChannelLabels(record),
-            },
-          ];
-        })
-      : [],
-});
+const snapshotViewDependencies = (model: Model) => {
+  if (model.route._tag !== "SnapshotsRoute") return { entries: [] };
+
+  const records = routeSnapshotIds(model.route).flatMap((id) => {
+    const record = model.snapshots.find((snapshot) => snapshot.id === id);
+    return record ? [record] : [];
+  });
+
+  return {
+    entries: partitionByCompatibility(records).compatible.map((record) => ({
+      id: record.id,
+      label: record.label,
+      durationSeconds: record.totalDurationSeconds,
+      triggerTimeSeconds: record.preTriggerSeconds,
+      sampleRateHz: record.sampleRateHz,
+      channelCount: record.sample.channelCount,
+      channelLabels: snapshotChannelLabels(record),
+    })),
+  };
+};
 
 const liveFacet = <A, E>(
   open: (rpc: RuntimeRpc) => Stream.Stream<A, E, never>,

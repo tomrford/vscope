@@ -5,6 +5,7 @@ import {
   type PersistentId,
   type RuntimeDeviceState,
   type RuntimePortInfo,
+  type SnapshotRecord,
 } from "@vscope/shared";
 import { Effect, Match, Option, Schema } from "effect";
 import type { Document, Html } from "foldkit/html";
@@ -59,6 +60,7 @@ import { acquireLivePlot, channelColor, releaseLivePlot } from "./liveplot.ts";
 import { liveHref, routeSnapshotIds, snapshotsHref, type SnapshotsRoute } from "./route.ts";
 import {
   acquireSnapshotPlot,
+  partitionByCompatibility,
   releaseSnapshotPlot,
   snapshotChannelLabels,
   snapshotsCompatible,
@@ -1367,7 +1369,11 @@ const viewViewerHeader = (h: H, subtitle: string, meta: string): Html =>
     ],
   );
 
-const viewerIssues = (model: Model, ids: ReadonlyArray<string>): ReadonlyArray<string> => {
+const viewerIssues = (
+  model: Model,
+  ids: ReadonlyArray<string>,
+  incompatible: ReadonlyArray<SnapshotRecord>,
+): ReadonlyArray<string> => {
   const missing =
     model.snapshots.length === 0
       ? []
@@ -1380,7 +1386,10 @@ const viewerIssues = (model: Model, ids: ReadonlyArray<string>): ReadonlyArray<s
     const label = model.snapshots.find((snapshot) => snapshot.id === id)?.label ?? id;
     return [`${label}: ${load.message ?? "sample download failed"}`];
   });
-  return [...missing, ...failed];
+  const mismatched = incompatible.map(
+    (record) => `${record.label}: timing or channel labels do not match the first capture`,
+  );
+  return [...missing, ...failed, ...mismatched];
 };
 
 const viewerEmptyText = (model: Model, ids: ReadonlyArray<string>): string => {
@@ -1396,17 +1405,20 @@ const viewSnapshotViewer = (model: Model, route: SnapshotsRoute, h: H): Html => 
     const record = model.snapshots.find((snapshot) => snapshot.id === id);
     return record ? [record] : [];
   });
-  const channelCount = records.reduce(
+  // A route can name captures the picker would have refused, so the viewer
+  // draws only the set that shares the leading capture's axis and labels.
+  const { compatible, incompatible } = partitionByCompatibility(records);
+  const channelCount = compatible.reduce(
     (max, record) => Math.max(max, record.sample.channelCount),
     0,
   );
-  const labels = records[0] ? snapshotChannelLabels(records[0]) : [];
-  const issues = viewerIssues(model, ids);
+  const labels = compatible[0] ? snapshotChannelLabels(compatible[0]) : [];
+  const issues = viewerIssues(model, ids, incompatible);
 
   return h.div(
     [...sx(h, appStyles.shell)],
     [
-      viewViewerHeader(h, "snapshot viewer", records.map((record) => record.label).join(" · ")),
+      viewViewerHeader(h, "snapshot viewer", compatible.map((record) => record.label).join(" · ")),
       h.main(
         [...sx(h, appStyles.body)],
         [
@@ -1448,7 +1460,7 @@ const viewSnapshotViewer = (model: Model, route: SnapshotsRoute, h: H): Html => 
           h.p(
             [...sx(h, appStyles.viewerHint)],
             [
-              records.length > 1
+              compatible.length > 1
                 ? "Scroll to zoom · drag to pan · double-click to reset · later captures draw dimmed"
                 : "Scroll to zoom · drag to pan · double-click to reset",
             ],
