@@ -1,4 +1,4 @@
-import { Effect, Schedule, Schema, Stream } from "effect";
+import { Cause, Effect, Schedule, Schema, Stream } from "effect";
 import * as Subscription from "foldkit/subscription";
 
 import { RuntimeClient, type RuntimeRpc } from "./client.ts";
@@ -80,7 +80,14 @@ const liveFacet = <A, E>(
     Stream.map(toMessage),
     // A live facet should never complete while the daemon is reachable.
     (stream) => Stream.concat(stream, Stream.fail(linkLost)),
-    Stream.catch(() => Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost))),
+    // Defects must reach the reconnect path too, or a facet dies silently and
+    // the UI keeps rendering stale device state. Interruption is teardown
+    // (switchMap swapping dependencies, unmount) and has to pass through.
+    Stream.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Stream.failCause(cause)
+        : Stream.concat(Stream.make(RuntimeLinkDown()), Stream.fail(linkLost)),
+    ),
     // SubscriptionRefs replay their current value when this reopens.
     Stream.retry(Schedule.spaced("1 second")),
     // Unreachable at runtime: the retry schedule never gives up. Kept because
