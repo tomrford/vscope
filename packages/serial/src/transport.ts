@@ -2,6 +2,18 @@ import { Buffer } from "node:buffer";
 import { Cause, Data, Effect, Exit, Queue, Schema, Semaphore } from "effect";
 import { SerialPort } from "serialport";
 
+const [nodeMajor = 0, nodeMinor = 0] = process.versions.node.split(".").map(Number);
+const needsSerialCallbackWakeup = nodeMajor > 26 || (nodeMajor === 26 && nodeMinor >= 4);
+
+// serialport 13 invokes JavaScript from its raw libuv callbacks without
+// napi_make_callback. Node 26.4's native-immediate fast path can therefore
+// leave stream work pending until another Node callback runs. Keep one
+// unreferenced callback active until serialport fixes its callback context.
+// https://github.com/serialport/node-serialport/issues/3148
+if (needsSerialCallbackWakeup) {
+  setInterval(() => undefined, 16).unref();
+}
+
 export type SerialBytes = Uint8Array | Buffer;
 
 export class SerialPortInfo extends Schema.Class<SerialPortInfo>("SerialPortInfo")({

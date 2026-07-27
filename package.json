@@ -36,7 +36,7 @@
   "scripts": {
     "build:runtime": "vite build --config packages/runtime/vite.config.ts",
     "build:ui": "pnpm --filter @vscope/ui build",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build:runtime && pnpm run build:ui && pnpm run release:check && pnpm run format:check && node bin/vscope.js --help > /dev/null && node bin/vscope.js --version > /dev/null",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build:runtime && pnpm run build:ui && pnpm run release:check && pnpm run format:check && node bin/vscope.js --help && node bin/vscope.js --version",
     "dev:ui": "pnpm --filter @vscope/ui dev",
     "effect:diagnostics": "effect-language-service diagnostics --project tsconfig.json --format text",
     "format": "oxfmt .",
