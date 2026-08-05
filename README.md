@@ -6,8 +6,16 @@
 
 You need:
 
-- Node.js 24 or later
+- Node.js 24
 - a USB serial device running the matching vscope firmware
+
+> [!WARNING]
+> Use Node.js 24 for now. Node.js 26.4 and later can stall `serialport@13.0.0` callbacks,
+> especially on Windows. Affected sessions can time out while connecting or leave **Save
+> snapshot** at **Saving…** indefinitely. The native callback issue is tracked in [serialport
+> issue #3148](https://github.com/serialport/node-serialport/issues/3148). After changing Node.js
+> major versions, reinstall vscope or its dependencies so the native serial and SQLite bindings
+> match the active runtime.
 
 ## Start vscope
 
@@ -27,7 +35,7 @@ npx vscope --port 6000
 
 Keep the terminal open while you use vscope. Press `Ctrl+C` to stop it.
 
-vscope stores settings and snapshots in your operating system's application data directory. It uses native USB serial and SQLite packages. Reinstall vscope after changing your Node.js major version so these packages match the active runtime.
+vscope stores settings and snapshots in your operating system's application data directory. It uses native USB serial and SQLite packages.
 
 ## Add the firmware
 
