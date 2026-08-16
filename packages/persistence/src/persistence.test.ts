@@ -426,7 +426,7 @@ describe("@vscope/persistence", () => {
             mode: "edge",
           }),
         );
-        expect(triggerModeError._tag).toBe("ParseError");
+        expect(triggerModeError._tag).toBe("SchemaError");
 
         yield* runWithPersistence(
           path,
