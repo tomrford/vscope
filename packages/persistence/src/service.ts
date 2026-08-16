@@ -27,6 +27,7 @@ import {
 import {
   SingletonRow,
   SnapshotRow,
+  SnapshotRowId,
   SnapshotSampleRow,
   createId,
   createTimestamp,
@@ -34,7 +35,6 @@ import {
   decodeWith,
   runSql,
   stringifyJson,
-  stringProperty,
   toUint8Array,
   transactionError,
   validateSamplesForDescriptor,
@@ -422,7 +422,12 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       );
 
       if (decoded === null) {
-        const id = stringProperty(row, "id");
+        const id = yield* decodeWith(SnapshotRowId, "read corrupt snapshot id", row).pipe(
+          Effect.match({
+            onFailure: () => null,
+            onSuccess: (candidate) => candidate.id,
+          }),
+        );
         if (id !== null) {
           corruptIds.push(id);
         }
