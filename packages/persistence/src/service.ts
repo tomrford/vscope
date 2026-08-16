@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 
 import { Effect, Option, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type { Row } from "effect/unstable/sql/SqlConnection";
 
 import type { PersistenceService } from "./api.ts";
 import { SnapshotNotFoundError } from "./errors.ts";
@@ -27,14 +28,15 @@ import {
 import {
   SingletonRow,
   SnapshotRow,
+  SnapshotRowId,
   SnapshotSampleRow,
   createId,
   createTimestamp,
   decodeJson,
+  decodeSqlRow,
   decodeWith,
   runSql,
   stringifyJson,
-  stringProperty,
   toUint8Array,
   transactionError,
   validateSamplesForDescriptor,
@@ -83,7 +85,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       return SettingsState.make({ settings: DEFAULT_SETTINGS, recovery: noRecovery });
     }
 
-    const decodedRow = yield* decodeWith(SingletonRow, "decode settings row", row).pipe(
+    const decodedRow = yield* decodeSqlRow(SingletonRow, "decode settings row", row).pipe(
       Effect.matchEffect({
         onFailure: () =>
           Effect.gen(function* () {
@@ -163,8 +165,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       .pipe(Effect.mapError((cause) => transactionError("patch settings transaction", cause)));
   });
 
-  const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (row: unknown) {
-    const decodedRow = yield* decodeWith(SnapshotRow, "decode snapshot row", row);
+  const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (row: Row) {
+    const decodedRow = yield* decodeSqlRow(SnapshotRow, "decode snapshot row", row);
     const channelMap = yield* decodeJson(
       Schema.Array(Schema.Number),
       "decode snapshot channel map",
@@ -422,7 +424,12 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       );
 
       if (decoded === null) {
-        const id = stringProperty(row, "id");
+        const id = yield* decodeSqlRow(SnapshotRowId, "decode corrupt snapshot id", row).pipe(
+          Effect.match({
+            onFailure: () => null,
+            onSuccess: (value) => value.id,
+          }),
+        );
         if (id !== null) {
           corruptIds.push(id);
         }
@@ -506,7 +513,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       return Option.none<SnapshotSampleBlob>();
     }
 
-    const decodedRow = yield* decodeWith(SnapshotSampleRow, "decode snapshot samples row", row);
+    const decodedRow = yield* decodeSqlRow(SnapshotSampleRow, "decode snapshot samples row", row);
     const bytes = yield* toUint8Array("decode snapshot samples blob", decodedRow.data);
     const trimmed = bytes.slice(0, Math.min(bytes.byteLength, decodedRow.byte_len));
     const blob = yield* decodeWith(SnapshotSampleBlob, "decode snapshot samples", {

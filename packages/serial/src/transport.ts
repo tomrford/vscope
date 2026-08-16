@@ -112,8 +112,10 @@ export interface SerialControlSignals {
   readonly rts?: boolean | undefined;
 }
 
+type SerialPortListItem = Awaited<ReturnType<(typeof SerialPort)["list"]>>[number];
+
 export interface SerialPortConstructor {
-  readonly list: () => Promise<ReadonlyArray<unknown>>;
+  readonly list: () => Promise<ReadonlyArray<SerialPortListItem>>;
   new (
     options: SerialOpenOptions & { readonly autoOpen?: boolean },
     callback?: SerialCallback,
@@ -121,7 +123,7 @@ export interface SerialPortConstructor {
 }
 
 export interface SerialDriver {
-  readonly list: () => Promise<ReadonlyArray<unknown>>;
+  readonly list: () => Promise<ReadonlyArray<SerialPortListItem>>;
   readonly open: (
     options: SerialOpenOptions & { readonly autoOpen: false },
     callback?: SerialCallback,
@@ -155,28 +157,41 @@ export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => (
 
 export const defaultSerialDriver: SerialDriver = makeSerialDriver(serialPortConstructor);
 
-const serialPortInfoInput = (info: unknown): SerialPortInfoInput => {
-  const value = isRecord(info) ? info : {};
-  const manufacturer = optionalStringField(value.manufacturer);
-  const serialNumber = optionalStringField(value.serialNumber);
-  const pnpId = optionalStringField(value.pnpId);
-  const locationId = optionalStringField(value.locationId);
-  const productId = optionalStringField(value.productId);
-  const vendorId = optionalStringField(value.vendorId);
-
-  return {
-    path: stringField(value.path),
-    ...(manufacturer !== undefined ? { manufacturer } : {}),
-    ...(serialNumber !== undefined ? { serialNumber } : {}),
-    ...(pnpId !== undefined ? { pnpId } : {}),
-    ...(locationId !== undefined ? { locationId } : {}),
-    ...(productId !== undefined ? { productId } : {}),
-    ...(vendorId !== undefined ? { vendorId } : {}),
-  };
+const serialPortInfoInput = (info: SerialPortListItem): SerialPortInfoInput => {
+  const input: {
+    path: string;
+    manufacturer?: string;
+    serialNumber?: string;
+    pnpId?: string;
+    locationId?: string;
+    productId?: string;
+    vendorId?: string;
+  } = { path: info.path };
+  if (info.manufacturer !== undefined) {
+    input.manufacturer = info.manufacturer;
+  }
+  if (info.serialNumber !== undefined) {
+    input.serialNumber = info.serialNumber;
+  }
+  if (info.pnpId !== undefined) {
+    input.pnpId = info.pnpId;
+  }
+  if (info.locationId !== undefined) {
+    input.locationId = info.locationId;
+  }
+  if (info.productId !== undefined) {
+    input.productId = info.productId;
+  }
+  if (info.vendorId !== undefined) {
+    input.vendorId = info.vendorId;
+  }
+  return input;
 };
 
-const decodeSerialPortInfo = (info: unknown): Effect.Effect<SerialPortInfo, SerialListError> =>
-  Schema.decodeUnknownEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
+const decodeSerialPortInfo = (
+  info: SerialPortListItem,
+): Effect.Effect<SerialPortInfo, SerialListError> =>
+  Schema.decodeEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
     Effect.mapError((cause) => new SerialListError({ cause })),
   );
 
@@ -444,12 +459,3 @@ const toBuffer = (bytes: SerialBytes): Buffer =>
   Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
 
 const copyBytes = (bytes: SerialBytes): Uint8Array => Uint8Array.from(bytes);
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-const stringField = (value: unknown): string =>
-  typeof value === "string" ? value : String(value ?? "");
-
-const optionalStringField = (value: unknown): string | undefined =>
-  typeof value === "string" ? value : undefined;

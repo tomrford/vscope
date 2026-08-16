@@ -8,6 +8,7 @@ import type {
   VScopeDeviceError,
   VScopeDeviceNotFoundError,
 } from "@vscope/serial";
+import { errorReason } from "@vscope/shared";
 
 export class RuntimeCorePersistenceError extends Data.TaggedError("RuntimeCorePersistenceError")<{
   readonly operation: string;
@@ -38,52 +39,121 @@ export type RuntimeCoreError =
 export function describeRuntimeCoreError(error: RuntimeCoreError): string {
   switch (error._tag) {
     case "RuntimeCorePersistenceError":
-      return `${error.operation}: ${describeError(error.cause)}`;
+      return `${error.operation}: ${describePersistenceError(error.cause)}`;
     case "RuntimeCorePolicyError":
       return `${error.command}: ${error.reason}`;
     case "RuntimeCoreSerialError":
-      return `${error.operation}: ${describeError(error.cause)}`;
+      return `${error.operation}: ${describeSerialCoreCause(error.cause)}`;
   }
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || describeTaggedError(error);
+function describePersistenceError(error: PersistenceError): string {
+  switch (error._tag) {
+    case "SnapshotNotFoundError":
+      return `${error._tag}: id=${JSON.stringify(error.id)}`;
+    case "PersistenceOpenError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+        ...(error.cause === undefined ? [] : [`cause=${errorReason(error.cause)}`]),
+      ]);
+    case "PersistenceMigrationError":
+      return joinTagged(error._tag, [
+        `migration=${JSON.stringify(error.migration)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+        ...(error.cause === undefined ? [] : [`cause=${errorReason(error.cause)}`]),
+      ]);
+    case "PersistenceQueryError":
+    case "PersistenceValidationError":
+      return joinTagged(error._tag, [
+        `operation=${JSON.stringify(error.operation)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+        ...(error.cause === undefined ? [] : [`cause=${errorReason(error.cause)}`]),
+      ]);
   }
-
-  return describeTaggedError(error);
 }
 
-function describeTaggedError(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return String(error);
+function describeSerialCoreCause(error: RuntimeCoreSerialError["cause"]): string {
+  switch (error._tag) {
+    case "SerialListError":
+      return joinTagged(error._tag, [`cause=${errorReason(error.cause)}`]);
+    case "SerialCloseError":
+    case "SerialOpenError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `cause=${errorReason(error.cause)}`,
+      ]);
+    case "VScopeDeviceAlreadyOpenError":
+      return joinTagged(error._tag, [`path=${JSON.stringify(error.path)}`]);
+    case "VScopeDeviceNotFoundError":
+      return joinTagged(error._tag, [`identifier=${JSON.stringify(error.identifier)}`]);
+    case "VScopeTransportError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `cause=${describeSerialIoError(error.cause)}`,
+      ]);
+    case "VScopeResponseTimeoutError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `requestType=${JSON.stringify(error.requestType)}`,
+        `timeoutMillis=${JSON.stringify(error.timeoutMillis)}`,
+      ]);
+    case "VScopeSessionClosedError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `requestType=${JSON.stringify(error.requestType)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+      ]);
+    case "VScopeFirmwareError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `requestType=${JSON.stringify(error.requestType)}`,
+        `status=${JSON.stringify(error.status)}`,
+        `statusName=${JSON.stringify(error.statusName)}`,
+      ]);
+    case "VScopeDecodeError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `messageType=${JSON.stringify(error.messageType)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+      ]);
+    case "VScopeFrameEncodeError":
+    case "VScopeFrameParseError":
+      return joinTagged(error._tag, [`reason=${JSON.stringify(error.reason)}`]);
+    case "VScopeUnexpectedResponseError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `requestType=${JSON.stringify(error.requestType)}`,
+        `responseType=${JSON.stringify(error.responseType)}`,
+      ]);
+    case "VScopeInvalidArgumentError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `operation=${JSON.stringify(error.operation)}`,
+        `reason=${JSON.stringify(error.reason)}`,
+      ]);
   }
-
-  if ("_tag" in error && typeof error._tag === "string") {
-    const fields = Object.entries(error).filter(([key]) => key !== "_tag" && key !== "stack");
-    const details = fields.map(([key, value]) => `${key}=${describeErrorField(value)}`);
-    if (
-      "cause" in error &&
-      error.cause !== null &&
-      error.cause !== undefined &&
-      !fields.some(([key]) => key === "cause")
-    ) {
-      details.push(`cause=${describeErrorField(error.cause)}`);
-    }
-    return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
-  }
-
-  return String(error);
 }
 
-function describeErrorField(value: unknown): string {
-  if (value instanceof Error) {
-    return describeError(value);
+function describeSerialIoError(
+  error: Extract<VScopeDeviceError, { readonly _tag: "VScopeTransportError" }>["cause"],
+): string {
+  switch (error._tag) {
+    case "SerialConnectionClosedError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `operation=${JSON.stringify(error.operation)}`,
+      ]);
+    case "SerialReadError":
+    case "SerialWriteError":
+    case "SerialDrainError":
+      return joinTagged(error._tag, [
+        `path=${JSON.stringify(error.path)}`,
+        `cause=${errorReason(error.cause)}`,
+      ]);
   }
+}
 
-  if (typeof value === "object" && value !== null && "_tag" in value) {
-    return describeTaggedError(value);
-  }
-
-  return JSON.stringify(value) ?? String(value);
+function joinTagged(tag: string, details: ReadonlyArray<string>): string {
+  return details.length > 0 ? `${tag}: ${details.join(", ")}` : tag;
 }

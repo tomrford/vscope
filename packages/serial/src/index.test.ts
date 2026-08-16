@@ -850,6 +850,11 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
       Array.from(byPath.values()).map((device) => ({
         path: device.path,
         manufacturer: "vscope-test",
+        serialNumber: undefined,
+        pnpId: undefined,
+        locationId: undefined,
+        productId: undefined,
+        vendorId: undefined,
       })),
   });
 

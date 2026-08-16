@@ -110,7 +110,9 @@ Defaults:
 `);
 }
 
-main().catch((error: unknown) => {
+function reportCliFailure(error: Error): void {
   console.error(error);
   process.exitCode = 1;
-});
+}
+
+main().catch(reportCliFailure);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Effect, Schema } from "effect";
+import type { Row } from "effect/unstable/sql/SqlConnection";
 import type { SqlError } from "effect/unstable/sql/SqlError";
 
 import {
@@ -11,6 +12,7 @@ import {
 } from "./errors.ts";
 import {
   PersistentId,
+  SNAPSHOT_SAMPLE_FORMAT,
   SnapshotDraft,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
@@ -28,7 +30,7 @@ export const SnapshotRow = Schema.Struct({
   device_name: Schema.String,
   channel_count: Schema.Number,
   sample_count: Schema.Number,
-  sample_format: Schema.String,
+  sample_format: Schema.Literals([SNAPSHOT_SAMPLE_FORMAT]),
   sample_rate_hz: Schema.NullOr(Schema.Number),
   total_duration_seconds: Schema.Number,
   pre_trigger_seconds: Schema.Number,
@@ -43,24 +45,21 @@ export const SnapshotRow = Schema.Struct({
 });
 
 export const SnapshotSampleRow = Schema.Struct({
-  format: Schema.String,
+  format: Schema.Literals([SNAPSHOT_SAMPLE_FORMAT]),
   byte_len: Schema.Number,
-  data: Schema.Unknown,
+  data: Schema.Union([
+    Schema.instanceOf(Uint8Array),
+    Schema.instanceOf(ArrayBuffer),
+    Schema.Array(Schema.Number),
+  ]),
   updated_at: Schema.String,
 });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+export const SnapshotRowId = Schema.Struct({
+  id: Schema.String,
+});
 
-export function stringProperty(value: unknown, key: string): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const candidate = value[key];
-  return typeof candidate === "string" ? candidate : null;
-}
+export type SqliteBlobValue = (typeof SnapshotSampleRow.fields.data)["Type"];
 
 export const createTimestamp = Effect.fn("Persistence.createTimestamp")(function* () {
   return yield* decodeWith(Timestamp, "create timestamp", new Date().toISOString());
@@ -81,24 +80,21 @@ function validationError(operation: string, cause: unknown): PersistenceValidati
 export function decodeWith<S extends Schema.Top>(
   schema: S,
   operation: string,
-  value: unknown,
+  value: S["Encoded"],
 ): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
-  return Schema.decodeUnknownEffect(schema)(value).pipe(
+  return Schema.decodeEffect(schema)(value).pipe(
     Effect.mapError((cause) => validationError(operation, cause)),
   );
 }
 
-function parseJson(
+export function decodeSqlRow<S extends Schema.Top>(
+  schema: S,
   operation: string,
-  source: string,
-): Effect.Effect<unknown, PersistenceValidationError> {
-  return Effect.try({
-    try: () => {
-      const parsed: unknown = JSON.parse(source);
-      return parsed;
-    },
-    catch: (cause) => validationError(operation, cause),
-  });
+  row: Row,
+): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
+  return Schema.decodeUnknownEffect(schema)(row).pipe(
+    Effect.mapError((cause) => validationError(operation, cause)),
+  );
 }
 
 export function decodeJson<S extends Schema.Top>(
@@ -106,19 +102,19 @@ export function decodeJson<S extends Schema.Top>(
   operation: string,
   source: string,
 ): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
-  return parseJson(operation, source).pipe(
-    Effect.flatMap((value) => decodeWith(schema, operation, value)),
+  return Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(source).pipe(
+    Effect.mapError((cause) => validationError(operation, cause)),
   );
 }
 
-export function stringifyJson(
+export function stringifyJson<A>(
   operation: string,
-  value: unknown,
+  value: A,
 ): Effect.Effect<string, PersistenceValidationError> {
   return Effect.try({
     try: () => {
       const json = JSON.stringify(value);
-      if (typeof json !== "string") {
+      if (json === undefined) {
         throw new Error("JSON value cannot be stringified");
       }
       return json;
@@ -142,12 +138,8 @@ export function runSql<A>(
   return effect.pipe(Effect.mapError((cause) => queryError(operation, cause)));
 }
 
-function isPersistenceError(cause: unknown): cause is PersistenceError {
-  if (!isRecord(cause)) {
-    return false;
-  }
-
-  switch (cause._tag) {
+function isPersistenceError(error: PersistenceError | SqlError): error is PersistenceError {
+  switch (error._tag) {
     case "PersistenceOpenError":
     case "PersistenceMigrationError":
     case "PersistenceQueryError":
@@ -159,13 +151,16 @@ function isPersistenceError(cause: unknown): cause is PersistenceError {
   }
 }
 
-export function transactionError(operation: string, cause: unknown): PersistenceError {
-  return isPersistenceError(cause) ? cause : queryError(operation, cause);
+export function transactionError(
+  operation: string,
+  error: PersistenceError | SqlError,
+): PersistenceError {
+  return isPersistenceError(error) ? error : queryError(operation, error);
 }
 
 export function toUint8Array(
   operation: string,
-  value: unknown,
+  value: SqliteBlobValue,
 ): Effect.Effect<Uint8Array, PersistenceValidationError> {
   if (value instanceof Uint8Array) {
     return Effect.succeed(Uint8Array.from(value));
@@ -175,35 +170,20 @@ export function toUint8Array(
     return Effect.succeed(new Uint8Array(value.slice(0)));
   }
 
-  if (ArrayBuffer.isView(value)) {
-    return Effect.succeed(
-      Uint8Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
-    );
-  }
-
-  if (Array.isArray(value)) {
-    const bytes = new Uint8Array(value.length);
-    for (let index = 0; index < value.length; index += 1) {
-      const byte = value[index];
-      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
-        return Effect.fail(
-          PersistenceValidationError.make({
-            operation,
-            reason: "SQLite blob array contains a non-byte value",
-          }),
-        );
-      }
-      bytes[index] = byte;
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    const byte = value[index];
+    if (byte === undefined || !Number.isInteger(byte) || byte < 0 || byte > 255) {
+      return Effect.fail(
+        PersistenceValidationError.make({
+          operation,
+          reason: "SQLite blob array contains a non-byte value",
+        }),
+      );
     }
-    return Effect.succeed(bytes);
+    bytes[index] = byte;
   }
-
-  return Effect.fail(
-    PersistenceValidationError.make({
-      operation,
-      reason: "Unsupported SQLite blob value",
-    }),
-  );
+  return Effect.succeed(bytes);
 }
 
 export function validateSnapshotDraft(
