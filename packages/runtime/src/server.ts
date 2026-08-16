@@ -28,7 +28,7 @@ import {
   PersistentId,
   Settings,
 } from "@vscope/shared";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Schema, Stream } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import {
   HttpMiddleware,
@@ -45,10 +45,8 @@ import {
   appDto,
   configDto,
   framePayload,
-  makeRuntimeApi,
   runtimePortInfo,
   statusDto,
-  type RuntimeApi,
 } from "./api";
 import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
@@ -59,14 +57,6 @@ import {
 } from "./core/errors";
 import type { CoreCommand } from "./core/model";
 import type { RuntimeCoreService } from "./core/service";
-
-class RuntimeApiService extends Context.Service<RuntimeApiService, RuntimeApi>()(
-  "@vscope/runtime/RuntimeApi",
-) {}
-
-const JsonContent = {
-  "content-type": "application/json",
-} as const;
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
@@ -165,65 +155,71 @@ class RuntimeListPortsMcpRequest extends Schema.Class<RuntimeListPortsMcpRequest
 }) {}
 
 export function makeRuntimeHttpLayer(config: RuntimeConfig) {
-  const apiLayer = Layer.effect(
-    RuntimeApiService,
-    RuntimeCore.pipe(Effect.map((core) => makeRuntimeApi(core))),
-  );
-
-  const apiRoutes = Layer.effectDiscard(
+  const httpRoutes = Layer.effectDiscard(
     Effect.gen(function* () {
-      const api = yield* RuntimeApiService;
       const router = yield* HttpRouter.HttpRouter;
 
-      yield* router.add("GET", RuntimeEndpoint.health, jsonResponse({ status: "ok" }));
-      yield* router.add(
-        "GET",
-        `${RuntimeEndpoint.snapshots}/:id/samples`,
-        handleSnapshotSamples(api),
-      );
+      yield* router.add("GET", RuntimeEndpoint.health, HttpServerResponse.json({ status: "ok" }));
+      yield* router.add("GET", `${RuntimeEndpoint.snapshots}/:id/samples`, handleSnapshotSamples());
     }),
   );
 
   const rpcHandlers = RuntimeRpcs.toLayer(
     Effect.gen(function* () {
-      const api = yield* RuntimeApiService;
+      const core = yield* RuntimeCore;
+      const dispatch = (command: CoreCommand) => core.dispatch(command);
       return RuntimeRpcs.of({
-        "runtime.getApp": () => api.rpc.getApp,
-        "runtime.app": () => api.subscriptions.app,
-        "activity.clear": () => api.rpc.clearActivity.pipe(Effect.mapError(runtimeApiError)),
+        "runtime.getApp": () => core.app.pipe(Effect.map(appDto)),
+        "runtime.app": () => core.appChanges.pipe(Stream.map(appDto)),
+        "activity.clear": () =>
+          dispatch({ type: "activity/clear" }).pipe(Effect.mapError(runtimeApiError)),
         "settings.patch": (patch) =>
-          api.rpc.patchSettings(patch).pipe(Effect.mapError(runtimeApiError)),
-        "ports.list": () => api.rpc.listPorts.pipe(Effect.mapError(runtimeApiError)),
-        "device.active.get": () => api.rpc.getActiveDevice,
-        "device.active": () => api.subscriptions.activeDevice,
+          dispatch({ type: "settings/patch", patch }).pipe(Effect.mapError(runtimeApiError)),
+        "ports.list": () =>
+          core.listPorts.pipe(
+            Effect.map((ports) => ports.map(runtimePortInfo)),
+            Effect.mapError(runtimeApiError),
+          ),
+        "device.active.get": () => core.activeDevice.pipe(Effect.map(activeDeviceDto)),
+        "device.active": () => core.activeDeviceChanges.pipe(Stream.map(activeDeviceDto)),
         "device.connect": ({ path }) =>
-          api.rpc.connectDevice(path).pipe(Effect.mapError(runtimeApiError)),
-        "device.disconnect": () => api.rpc.disconnectDevice.pipe(Effect.mapError(runtimeApiError)),
-        "device.status.get": () => api.rpc.getDeviceStatus,
-        "device.status": () => api.subscriptions.status,
-        "device.run": () => api.rpc.runDevice.pipe(Effect.mapError(runtimeApiError)),
-        "device.stop": () => api.rpc.stopDevice.pipe(Effect.mapError(runtimeApiError)),
-        "device.trigger": () => api.rpc.triggerDevice.pipe(Effect.mapError(runtimeApiError)),
-        "device.config.get": () => api.rpc.getConfig,
-        "device.config": () => api.subscriptions.config,
+          dispatch({ type: "devices/connect", path }).pipe(Effect.mapError(runtimeApiError)),
+        "device.disconnect": () =>
+          dispatch({ type: "devices/disconnect" }).pipe(Effect.mapError(runtimeApiError)),
+        "device.status.get": () => core.deviceStatus.pipe(Effect.map(statusDto)),
+        "device.status": () => core.deviceStatusChanges.pipe(Stream.map(statusDto)),
+        "device.run": () =>
+          dispatch({ type: "devices/run" }).pipe(Effect.mapError(runtimeApiError)),
+        "device.stop": () =>
+          dispatch({ type: "devices/stop" }).pipe(Effect.mapError(runtimeApiError)),
+        "device.trigger": () =>
+          dispatch({ type: "devices/trigger" }).pipe(Effect.mapError(runtimeApiError)),
+        "device.config.get": () => core.deviceConfig.pipe(Effect.map(configDto)),
+        "device.config": () => core.deviceConfigChanges.pipe(Stream.map(configDto)),
         "device.setTiming": (timing) =>
-          api.rpc.setTiming(timing).pipe(Effect.mapError(runtimeApiError)),
+          dispatch({ type: "devices/setTiming", timing }).pipe(Effect.mapError(runtimeApiError)),
         "device.setTrigger": (trigger) =>
-          api.rpc.setTrigger(trigger).pipe(Effect.mapError(runtimeApiError)),
+          dispatch({ type: "devices/setTrigger", trigger }).pipe(Effect.mapError(runtimeApiError)),
         "device.setRtValue": ({ index, value }) =>
-          api.rpc.setRtValue(index, value).pipe(Effect.mapError(runtimeApiError)),
+          dispatch({ type: "devices/setRtValue", index, value }).pipe(
+            Effect.mapError(runtimeApiError),
+          ),
         "device.setChannelMap": ({ channel, variable }) =>
-          api.rpc.setChannelMap(channel, variable).pipe(Effect.mapError(runtimeApiError)),
-        "device.frame.get": () => api.rpc.readFrame,
-        "device.frames": () => api.subscriptions.frames,
+          dispatch({ type: "devices/setChannelMap", channel, variable }).pipe(
+            Effect.mapError(runtimeApiError),
+          ),
+        "device.frame.get": () => core.lastFrame.pipe(Effect.map(framePayload)),
+        "device.frames": () => core.frames.pipe(Stream.map(framePayload)),
         "snapshots.capture": ({ label }) =>
-          api.rpc.captureSnapshot(label).pipe(Effect.mapError(runtimeApiError)),
+          dispatch({ type: "snapshots/capture", label }).pipe(Effect.mapError(runtimeApiError)),
         "snapshots.delete": ({ id }) =>
-          api.rpc.deleteSnapshot(id).pipe(Effect.mapError(runtimeApiError)),
+          dispatch({ type: "snapshots/delete", id }).pipe(Effect.mapError(runtimeApiError)),
         "snapshots.favorite": ({ id, favorite }) =>
-          api.rpc.setSnapshotFavorite(id, favorite).pipe(Effect.mapError(runtimeApiError)),
-        "snapshots.list": () => api.rpc.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
-        "snapshots.index": () => api.subscriptions.snapshots,
+          dispatch({ type: "snapshots/favorite", id, favorite }).pipe(
+            Effect.mapError(runtimeApiError),
+          ),
+        "snapshots.list": () => core.listSnapshots.pipe(Effect.mapError(runtimeApiError)),
+        "snapshots.index": () => core.snapshotChanges,
       });
     }),
   );
@@ -256,13 +252,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     global: true,
   });
 
-  return Layer.mergeAll(
-    apiRoutes,
-    rpcRoutes,
-    mcpRoutes,
-    staticRoutes,
-    mcpNotificationResponses,
-  ).pipe(Layer.provide(apiLayer));
+  return Layer.mergeAll(httpRoutes, rpcRoutes, mcpRoutes, staticRoutes, mcpNotificationResponses);
 }
 
 export function makeRuntimeServerLayer(config: RuntimeConfig): Layer.Layer<never, unknown> {
@@ -303,25 +293,18 @@ export function runtimeServerPort(config: RuntimeConfig, settings: Settings): nu
   return config.portOverride ? config.port : settings.network.port;
 }
 
-function handleSnapshotSamples(api: RuntimeApi) {
+function handleSnapshotSamples() {
   return Effect.gen(function* () {
+    const core = yield* RuntimeCore;
     const params = yield* HttpRouter.schemaPathParams(
       Schema.Struct({
         id: Schema.String.check(Schema.isMinLength(1)),
       }),
     );
     const id = yield* Schema.decodeUnknownEffect(PersistentId)(params.id);
-    const samples = yield* api.snapshots.readSamples(id);
+    const samples = yield* core.readSnapshotSamples(id);
     if (!samples) {
-      return HttpServerResponse.jsonUnsafe(
-        {
-          ok: false,
-          error: {
-            message: "Snapshot samples not found.",
-          },
-        },
-        { status: 404, headers: JsonContent },
-      );
+      return HttpServerResponse.text("Snapshot samples not found.", { status: 404 });
     }
     return HttpServerResponse.uint8Array(samples.data, {
       contentType: "application/octet-stream",
@@ -334,64 +317,15 @@ function handleSnapshotSamples(api: RuntimeApi) {
       },
     });
   }).pipe(
-    Effect.matchEffect({
-      onFailure: errorResponse,
-      onSuccess: Effect.succeed,
-    }),
-  );
-}
-
-function jsonResponse(body: unknown, status = 200) {
-  return HttpServerResponse.jsonUnsafe(body, { status, headers: JsonContent });
-}
-
-function errorResponse(error: unknown) {
-  return Effect.succeed(
-    jsonResponse(
-      {
-        ok: false,
-        error: {
-          message: describeError(error),
-        },
-      },
-      400,
+    Effect.catchIf(
+      Schema.isSchemaError,
+      () => Effect.succeed(HttpServerResponse.text("Invalid snapshot request.", { status: 400 })),
+      () =>
+        Effect.succeed(
+          HttpServerResponse.text("Failed to read snapshot samples.", { status: 400 }),
+        ),
     ),
   );
-}
-
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || describeTaggedError(error);
-  }
-
-  return describeTaggedError(error);
-}
-
-function describeTaggedError(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return String(error);
-  }
-
-  if ("_tag" in error && typeof error._tag === "string") {
-    const details = Object.entries(error)
-      .filter(([key]) => key !== "_tag" && key !== "stack")
-      .map(([key, value]) => `${key}=${describeErrorField(value)}`);
-    return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
-  }
-
-  return String(error);
-}
-
-function describeErrorField(value: unknown): string {
-  if (value instanceof Error) {
-    return describeError(value);
-  }
-
-  if (typeof value === "object" && value !== null && "_tag" in value) {
-    return describeTaggedError(value);
-  }
-
-  return JSON.stringify(value) ?? String(value);
 }
 
 function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {

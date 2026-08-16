@@ -26,8 +26,6 @@ export class SerialPortInfo extends Schema.Class<SerialPortInfo>("SerialPortInfo
   vendorId: Schema.optionalKey(Schema.String),
 }) {}
 
-type SerialPortInfoInput = Parameters<typeof SerialPortInfo.make>[0];
-
 export interface SerialOpenOptions {
   readonly path: string;
   readonly baudRate: number;
@@ -142,41 +140,19 @@ interface TransportState {
   closed: boolean;
 }
 
-// Sole external trust boundary: the `serialport` package's constructor/callback
-// types are looser than the SerialPortConstructor contract we drive it through.
-// This is the one sanctioned `as` in the codebase — do not copy it; decode or
-// validate at other boundaries instead.
-const serialPortConstructor = SerialPort as unknown as SerialPortConstructor;
-
 export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => ({
   list: () => Port.list(),
   open: (options, callback) => new Port(options, callback),
 });
 
-export const defaultSerialDriver: SerialDriver = makeSerialDriver(serialPortConstructor);
-
-const serialPortInfoInput = (info: unknown): SerialPortInfoInput => {
-  const value = isRecord(info) ? info : {};
-  const manufacturer = optionalStringField(value.manufacturer);
-  const serialNumber = optionalStringField(value.serialNumber);
-  const pnpId = optionalStringField(value.pnpId);
-  const locationId = optionalStringField(value.locationId);
-  const productId = optionalStringField(value.productId);
-  const vendorId = optionalStringField(value.vendorId);
-
-  return {
-    path: stringField(value.path),
-    ...(manufacturer !== undefined ? { manufacturer } : {}),
-    ...(serialNumber !== undefined ? { serialNumber } : {}),
-    ...(pnpId !== undefined ? { pnpId } : {}),
-    ...(locationId !== undefined ? { locationId } : {}),
-    ...(productId !== undefined ? { productId } : {}),
-    ...(vendorId !== undefined ? { vendorId } : {}),
-  };
+export const defaultSerialDriver: SerialDriver = {
+  list: () => SerialPort.list(),
+  open: (options, callback) => new SerialPort(options, callback),
 };
 
+// External boundary: serialport list results are untrusted until Schema decodes them.
 const decodeSerialPortInfo = (info: unknown): Effect.Effect<SerialPortInfo, SerialListError> =>
-  Schema.decodeUnknownEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
+  Schema.decodeUnknownEffect(SerialPortInfo)(info).pipe(
     Effect.mapError((cause) => new SerialListError({ cause })),
   );
 
@@ -444,12 +420,3 @@ const toBuffer = (bytes: SerialBytes): Buffer =>
   Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
 
 const copyBytes = (bytes: SerialBytes): Uint8Array => Uint8Array.from(bytes);
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-const stringField = (value: unknown): string =>
-  typeof value === "string" ? value : String(value ?? "");
-
-const optionalStringField = (value: unknown): string | undefined =>
-  typeof value === "string" ? value : undefined;

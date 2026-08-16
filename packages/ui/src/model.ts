@@ -733,7 +733,7 @@ const withSampleLoads = (model: Model): UpdateResult => {
     return record ? [{ id, record }] : [];
   });
   if (pending.length === 0) return [model, []];
-  const snapshotLoads: Record<string, SnapshotLoad> = { ...model.snapshotLoads };
+  const snapshotLoads = { ...model.snapshotLoads };
   for (const { id } of pending) snapshotLoads[id] = { status: "loading", message: null };
   return [
     { ...model, snapshotLoads },

@@ -1,46 +1,145 @@
 import { randomUUID } from "node:crypto";
 
-import { Effect, Schema } from "effect";
-import type { SqlError } from "effect/unstable/sql/SqlError";
+import { Effect, Schema, SchemaTransformation } from "effect";
 
 import {
+  PersistenceMigrationError,
+  PersistenceOpenError,
   PersistenceQueryError,
   PersistenceValidationError,
+  SnapshotNotFoundError,
   errorReason,
   type PersistenceError,
 } from "./errors.ts";
 import {
+  JsonObject,
   PersistentId,
-  SnapshotDraft,
+  SNAPSHOT_SAMPLE_FORMAT,
+  Settings,
+  SnapshotRecord,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
+  SnapshotTrigger,
   Timestamp,
+  snapshotSampleByteLength,
 } from "@vscope/shared";
 
-export const SingletonRow = Schema.Struct({
-  data_json: Schema.String,
-  recovery_pending: Schema.Number,
-});
+export const SettingsRow = Schema.Struct({
+  settings: Schema.fromJsonString(Settings),
+  recoveryPending: Schema.BooleanFromBit,
+}).pipe(
+  Schema.encodeKeys({
+    settings: "data_json",
+    recoveryPending: "recovery_pending",
+  }),
+);
 
-export const SnapshotRow = Schema.Struct({
+export const SettingsWrite = Schema.Struct({
+  settings: Schema.fromJsonString(Settings),
+  recoveryPending: Schema.BooleanFromBit,
+  updatedAt: Timestamp,
+}).pipe(
+  Schema.encodeKeys({
+    settings: "data_json",
+    recoveryPending: "recovery_pending",
+    updatedAt: "updated_at",
+  }),
+);
+
+const SnapshotStoredRow = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   device_name: Schema.String,
   channel_count: Schema.Number,
   sample_count: Schema.Number,
-  sample_format: Schema.String,
+  sample_format: Schema.Literals([SNAPSHOT_SAMPLE_FORMAT]),
   sample_rate_hz: Schema.NullOr(Schema.Number),
   total_duration_seconds: Schema.Number,
   pre_trigger_seconds: Schema.Number,
-  channel_map_json: Schema.String,
-  trigger_json: Schema.String,
-  rt_values_json: Schema.String,
-  metadata_json: Schema.String,
-  favorite: Schema.Number,
+  channel_map_json: Schema.fromJsonString(Schema.Array(Schema.Number)),
+  trigger_json: Schema.fromJsonString(Schema.toEncoded(SnapshotTrigger)),
+  rt_values_json: Schema.fromJsonString(Schema.Array(Schema.Number)),
+  metadata_json: Schema.fromJsonString(JsonObject),
+  favorite: Schema.BooleanFromBit,
   created_at: Schema.String,
   updated_at: Schema.String,
-  has_samples: Schema.Number,
 });
+
+type SnapshotStoredRow = Schema.Schema.Type<typeof SnapshotStoredRow>;
+
+function snapshotRecord(row: SnapshotStoredRow, stored: boolean) {
+  return {
+    id: row.id,
+    label: row.label,
+    device: {
+      name: row.device_name,
+    },
+    sample: {
+      format: row.sample_format,
+      channelCount: row.channel_count,
+      sampleCount: row.sample_count,
+      byteLength: snapshotSampleByteLength(row.channel_count, row.sample_count),
+      stored,
+    },
+    sampleRateHz: row.sample_rate_hz,
+    totalDurationSeconds: row.total_duration_seconds,
+    preTriggerSeconds: row.pre_trigger_seconds,
+    channelMap: row.channel_map_json,
+    trigger: row.trigger_json,
+    rtValues: row.rt_values_json,
+    metadata: row.metadata_json,
+    favorite: row.favorite,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function storedSnapshotRow(record: Schema.Codec.Encoded<typeof SnapshotRecord>) {
+  return {
+    id: record.id,
+    label: record.label,
+    device_name: record.device.name,
+    channel_count: record.sample.channelCount,
+    sample_count: record.sample.sampleCount,
+    sample_format: record.sample.format,
+    sample_rate_hz: record.sampleRateHz,
+    total_duration_seconds: record.totalDurationSeconds,
+    pre_trigger_seconds: record.preTriggerSeconds,
+    channel_map_json: record.channelMap,
+    trigger_json: record.trigger,
+    rt_values_json: record.rtValues,
+    metadata_json: record.metadata,
+    favorite: record.favorite,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+  };
+}
+
+export const SnapshotWrite = SnapshotStoredRow.pipe(
+  Schema.decodeTo(
+    SnapshotRecord,
+    SchemaTransformation.transform({
+      decode: (row) => snapshotRecord(row, false),
+      encode: storedSnapshotRow,
+    }),
+  ),
+);
+
+export const SnapshotRow = Schema.Struct({
+  ...SnapshotStoredRow.fields,
+  has_samples: Schema.BooleanFromBit,
+}).pipe(
+  Schema.decodeTo(
+    SnapshotRecord,
+    SchemaTransformation.transform({
+      decode: (row) => snapshotRecord(row, row.has_samples),
+      encode: (record) => ({
+        ...storedSnapshotRow(record),
+        has_samples: record.sample.stored,
+      }),
+    }),
+  ),
+);
 
 export const SnapshotSampleRow = Schema.Struct({
   format: Schema.String,
@@ -49,18 +148,19 @@ export const SnapshotSampleRow = Schema.Struct({
   updated_at: Schema.String,
 });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
+export const SnapshotRowId = Schema.Struct({
+  id: PersistentId,
+});
 
-export function stringProperty(value: unknown, key: string): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const candidate = value[key];
-  return typeof candidate === "string" ? candidate : null;
-}
+export const SnapshotFavoriteWrite = Schema.Struct({
+  id: PersistentId,
+  favorite: Schema.BooleanFromBit,
+  updatedAt: Timestamp,
+}).pipe(
+  Schema.encodeKeys({
+    updatedAt: "updated_at",
+  }),
+);
 
 export const createTimestamp = Effect.fn("Persistence.createTimestamp")(function* () {
   return yield* decodeWith(Timestamp, "create timestamp", new Date().toISOString());
@@ -81,50 +181,12 @@ function validationError(operation: string, cause: unknown): PersistenceValidati
 export function decodeWith<S extends Schema.Top>(
   schema: S,
   operation: string,
+  // SQL, JSON, and host values enter the typed application through this decoder.
   value: unknown,
 ): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
   return Schema.decodeUnknownEffect(schema)(value).pipe(
     Effect.mapError((cause) => validationError(operation, cause)),
   );
-}
-
-function parseJson(
-  operation: string,
-  source: string,
-): Effect.Effect<unknown, PersistenceValidationError> {
-  return Effect.try({
-    try: () => {
-      const parsed: unknown = JSON.parse(source);
-      return parsed;
-    },
-    catch: (cause) => validationError(operation, cause),
-  });
-}
-
-export function decodeJson<S extends Schema.Top>(
-  schema: S,
-  operation: string,
-  source: string,
-): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
-  return parseJson(operation, source).pipe(
-    Effect.flatMap((value) => decodeWith(schema, operation, value)),
-  );
-}
-
-export function stringifyJson(
-  operation: string,
-  value: unknown,
-): Effect.Effect<string, PersistenceValidationError> {
-  return Effect.try({
-    try: () => {
-      const json = JSON.stringify(value);
-      if (typeof json !== "string") {
-        throw new Error("JSON value cannot be stringified");
-      }
-      return json;
-    },
-    catch: (cause) => validationError(operation, cause),
-  });
 }
 
 function queryError(operation: string, cause: unknown): PersistenceQueryError {
@@ -135,28 +197,31 @@ function queryError(operation: string, cause: unknown): PersistenceQueryError {
   });
 }
 
-export function runSql<A>(
+export function runBound<A, E, R>(
   operation: string,
-  effect: Effect.Effect<A, SqlError>,
-): Effect.Effect<A, PersistenceQueryError> {
-  return effect.pipe(Effect.mapError((cause) => queryError(operation, cause)));
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, PersistenceError, R> {
+  return effect.pipe(
+    Effect.mapError((cause) => {
+      if (isPersistenceError(cause)) {
+        return cause;
+      }
+
+      return Schema.isSchemaError(cause)
+        ? validationError(operation, cause)
+        : queryError(operation, cause);
+    }),
+  );
 }
 
 function isPersistenceError(cause: unknown): cause is PersistenceError {
-  if (!isRecord(cause)) {
-    return false;
-  }
-
-  switch (cause._tag) {
-    case "PersistenceOpenError":
-    case "PersistenceMigrationError":
-    case "PersistenceQueryError":
-    case "PersistenceValidationError":
-    case "SnapshotNotFoundError":
-      return true;
-    default:
-      return false;
-  }
+  return (
+    cause instanceof PersistenceOpenError ||
+    cause instanceof PersistenceMigrationError ||
+    cause instanceof PersistenceQueryError ||
+    cause instanceof PersistenceValidationError ||
+    cause instanceof SnapshotNotFoundError
+  );
 }
 
 export function transactionError(operation: string, cause: unknown): PersistenceError {
@@ -165,6 +230,7 @@ export function transactionError(operation: string, cause: unknown): Persistence
 
 export function toUint8Array(
   operation: string,
+  // External boundary: Effect SQL may expose SQLite blobs in driver-native forms.
   value: unknown,
 ): Effect.Effect<Uint8Array, PersistenceValidationError> {
   if (value instanceof Uint8Array) {
@@ -204,38 +270,6 @@ export function toUint8Array(
       reason: "Unsupported SQLite blob value",
     }),
   );
-}
-
-export function validateSnapshotDraftShape(
-  draft: SnapshotDraft,
-): Effect.Effect<void, PersistenceValidationError> {
-  const invalid = (reason: string) =>
-    Effect.fail(
-      PersistenceValidationError.make({
-        operation: "validate snapshot draft",
-        reason,
-      }),
-    );
-
-  if (draft.channelMap.length !== draft.channelCount) {
-    return invalid(
-      `channelMap length ${draft.channelMap.length} does not match channelCount ${draft.channelCount}`,
-    );
-  }
-
-  if (draft.trigger.channel >= draft.channelCount) {
-    return invalid(
-      `trigger channel ${draft.trigger.channel} is outside channelCount ${draft.channelCount}`,
-    );
-  }
-
-  if (draft.preTriggerSeconds > draft.totalDurationSeconds) {
-    return invalid(
-      `preTriggerSeconds ${draft.preTriggerSeconds} exceeds totalDurationSeconds ${draft.totalDurationSeconds}`,
-    );
-  }
-
-  return Effect.void;
 }
 
 export function validateSamplesForDescriptor(

@@ -37,7 +37,6 @@ import {
   type SerialCallback,
   type SerialDriver,
   type SerialOpenOptions,
-  type SerialPortConstructor,
   type SerialPortLike,
 } from "./transport";
 import { VScopeEndianness as Endianness } from "./protocol";
@@ -378,7 +377,8 @@ describe("@vscope/serial device", () => {
         device.setTrigger({
           threshold: 0,
           channel: 0,
-          mode: "edge" as never,
+          // @ts-expect-error Exercise runtime validation with an invalid external value.
+          mode: "edge",
         }),
       );
 
@@ -830,6 +830,15 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
   const byPath = new Map(devices.map((device) => [device.path, device]));
 
   class FakePort extends MemorySerialPort {
+    static list(): Promise<ReadonlyArray<{ path: string; manufacturer: string }>> {
+      return Promise.resolve(
+        Array.from(byPath.values()).map((device) => ({
+          path: device.path,
+          manufacturer: "vscope-test",
+        })),
+      );
+    }
+
     constructor(
       options: SerialOpenOptions & { readonly autoOpen?: boolean },
       callback?: SerialCallback,
@@ -845,15 +854,7 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
     }
   }
 
-  Object.defineProperty(FakePort, "list", {
-    value: async () =>
-      Array.from(byPath.values()).map((device) => ({
-        path: device.path,
-        manufacturer: "vscope-test",
-      })),
-  });
-
-  return makeSerialDriver(FakePort as unknown as SerialPortConstructor);
+  return makeSerialDriver(FakePort);
 };
 
 class MemorySerialPort extends EventEmitter implements SerialPortLike {

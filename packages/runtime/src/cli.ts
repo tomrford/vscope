@@ -34,7 +34,8 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
   const config = makeRuntimeConfig({
     version: packageVersion,
     databasePath: paths.databasePath,
-    ...(parsed.port === undefined ? {} : { port: parsed.port, portOverride: true }),
+    port: parsed.port ?? DEFAULT_RUNTIME_PORT,
+    portOverride: parsed.port !== undefined,
     uiDistPath,
   });
 
@@ -110,7 +111,8 @@ Defaults:
 `);
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
+// External boundary: JavaScript Promise rejections can contain any value.
+main().catch((cause: unknown) => {
+  console.error(cause);
   process.exitCode = 1;
 });

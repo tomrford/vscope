@@ -176,7 +176,29 @@ export class SnapshotDraft extends Schema.Class<SnapshotDraft>("SnapshotDraft")(
   createdAt: Schema.optionalKey(Timestamp),
 }) {}
 
-export class SnapshotRecord extends Schema.Class<SnapshotRecord>("SnapshotRecord")({
+function snapshotChannelContract(record: {
+  readonly channelMap: ReadonlyArray<number>;
+  readonly trigger: { readonly channel: number };
+  readonly sample: { readonly channelCount: number };
+  readonly preTriggerSeconds: number;
+  readonly totalDurationSeconds: number;
+}): string | undefined {
+  if (record.channelMap.length !== record.sample.channelCount) {
+    return `channelMap length ${record.channelMap.length} does not match channelCount ${record.sample.channelCount}`;
+  }
+
+  if (record.trigger.channel >= record.sample.channelCount) {
+    return `trigger channel ${record.trigger.channel} is outside channelCount ${record.sample.channelCount}`;
+  }
+
+  if (record.preTriggerSeconds > record.totalDurationSeconds) {
+    return `preTriggerSeconds ${record.preTriggerSeconds} exceeds totalDurationSeconds ${record.totalDurationSeconds}`;
+  }
+
+  return undefined;
+}
+
+const SnapshotRecordModel = Schema.Struct({
   id: PersistentId,
   label: NonEmptyString,
   device: SnapshotDeviceRef,
@@ -191,7 +213,15 @@ export class SnapshotRecord extends Schema.Class<SnapshotRecord>("SnapshotRecord
   favorite: Schema.Boolean,
   createdAt: Timestamp,
   updatedAt: Timestamp,
-}) {}
+}).check(
+  Schema.makeFilter(snapshotChannelContract, {
+    expected: "consistent snapshot channel and timing metadata",
+  }),
+);
+
+export class SnapshotRecord extends Schema.Class<SnapshotRecord>("SnapshotRecord")(
+  SnapshotRecordModel,
+) {}
 
 export class SnapshotSamplesWrite extends Schema.Class<SnapshotSamplesWrite>(
   "SnapshotSamplesWrite",
