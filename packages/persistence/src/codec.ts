@@ -206,7 +206,7 @@ export function toUint8Array(
   );
 }
 
-export function validateSnapshotDraftShape(
+export function validateSnapshotDraft(
   draft: SnapshotDraft,
 ): Effect.Effect<void, PersistenceValidationError> {
   const invalid = (reason: string) =>

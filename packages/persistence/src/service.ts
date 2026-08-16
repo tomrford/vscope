@@ -38,7 +38,7 @@ import {
   toUint8Array,
   transactionError,
   validateSamplesForDescriptor,
-  validateSnapshotDraftShape,
+  validateSnapshotDraft,
 } from "./codec.ts";
 
 export const makePersistence = Effect.fn("Persistence.make")(function* (
@@ -280,7 +280,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     draft: SnapshotDraft,
     samples?: SnapshotSamplesWrite,
   ) {
-    yield* validateSnapshotDraftShape(draft);
+    yield* validateSnapshotDraft(draft);
     const id = draft.id ?? (yield* createId("snapshot"));
     const createdAt = draft.createdAt ?? (yield* createTimestamp());
     const descriptor = yield* decodeWith(
