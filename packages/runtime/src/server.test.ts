@@ -22,6 +22,7 @@ import {
 } from "effect/unstable/http";
 
 import { makeRuntimeConfig } from "./config";
+import { RuntimeCorePolicyError } from "./core/errors";
 import type {
   ActiveDeviceState,
   CoreCommand,
@@ -45,7 +46,8 @@ describe("@vscope/runtime server", () => {
   layer(testServerLayer(), { excludeTestServices: true })((it) => {
     it.effect("serves health, NDJSON RPC, and MCP tool listing", () =>
       Effect.gen(function* () {
-        const health = yield* HttpClient.get("/health").pipe(Effect.flatMap(readJson));
+        const health = yield* HttpClient.get("/health");
+        const healthBody = yield* health.json;
         const rpcState = yield* Effect.scoped(
           Effect.gen(function* () {
             const rpc = yield* makeRuntimeRpcClient(yield* testRuntimeRpcUrl);
@@ -114,7 +116,8 @@ describe("@vscope/runtime server", () => {
         )(tools);
         const toolNames = toolList.result.tools.map((tool) => tool.name);
 
-        expect(health).toEqual({ status: "ok" });
+        expect(health.status).toBe(200);
+        expect(healthBody).toEqual({ status: "ok" });
         expect(JSON.stringify(initializedBody)).toContain('"version":"0.0.0"');
         expect(initializedNotification.status).toBe(202);
         expect(rpcState.app.status).toBe("ready");
@@ -141,6 +144,21 @@ describe("@vscope/runtime server", () => {
         expect(toolNames).toContain("vscope_delete_snapshot");
         expect(toolNames).toContain("vscope_set_snapshot_favorite");
         expect(toolNames).not.toContain("vscope_capture_snapshot");
+      }),
+    );
+
+    it.effect("serves snapshot samples with native status and text errors", () =>
+      Effect.gen(function* () {
+        const missing = yield* HttpClient.get("/snapshots/snapshot:missing/samples");
+        const failed = yield* HttpClient.get("/snapshots/snapshot:fail/samples");
+        const missingBody = yield* missing.text;
+        const failedBody = yield* failed.text;
+
+        expect(missing.status).toBe(404);
+        expect(missingBody).toBe("Snapshot samples not found.");
+        expect(failed.status).toBe(400);
+        expect(failedBody).toBe("Failed to read snapshot samples.");
+        expect(failedBody).not.toContain("sqlite://secret-path");
       }),
     );
   });
@@ -526,7 +544,15 @@ function fakeCore(
       }),
     listPorts: Effect.succeed(fakePorts),
     listSnapshots: Effect.succeed(snapshots),
-    readSnapshotSamples: () => Effect.succeed(null),
+    readSnapshotSamples: (id) =>
+      id === PersistentId.make("snapshot:fail")
+        ? Effect.fail(
+            new RuntimeCorePolicyError({
+              command: "snapshots/readSamples",
+              reason: "sqlite://secret-path",
+            }),
+          )
+        : Effect.succeed(null),
     shutdown: Effect.void,
     frames: Stream.empty,
     lastFrame: Effect.succeed([10, 20]),
