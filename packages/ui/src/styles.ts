@@ -198,7 +198,7 @@ export const appStyles = stylex.create({
     animationIterationCount: "infinite",
     animationTimingFunction: "linear",
   },
-  controlShape: {
+  controlChrome: {
     boxSizing: "border-box",
     height: 32,
     minHeight: 32,
