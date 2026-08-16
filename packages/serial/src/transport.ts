@@ -2,9 +2,6 @@ import { Buffer } from "node:buffer";
 import { Cause, Data, Effect, Exit, Queue, Schema, Semaphore } from "effect";
 import { SerialPort } from "serialport";
 
-type SerialPortListItem =
-  Awaited<ReturnType<(typeof SerialPort)["list"]>> extends ReadonlyArray<infer Item> ? Item : never;
-
 const [nodeMajor = 0, nodeMinor = 0] = process.versions.node.split(".").map(Number);
 const needsSerialCallbackWakeup = nodeMajor > 26 || (nodeMajor === 26 && nodeMinor >= 4);
 
@@ -28,11 +25,6 @@ export class SerialPortInfo extends Schema.Class<SerialPortInfo>("SerialPortInfo
   productId: Schema.optionalKey(Schema.String),
   vendorId: Schema.optionalKey(Schema.String),
 }) {}
-
-type SerialPortInfoInput = Parameters<typeof SerialPortInfo.make>[0];
-type MutableSerialPortInfoInput = {
-  -readonly [K in keyof SerialPortInfoInput]: SerialPortInfoInput[K];
-};
 
 export interface SerialOpenOptions {
   readonly path: string;
@@ -119,7 +111,7 @@ export interface SerialControlSignals {
 }
 
 export interface SerialPortConstructor {
-  readonly list: typeof SerialPort.list;
+  readonly list: () => Promise<ReadonlyArray<unknown>>;
   new (
     options: SerialOpenOptions & { readonly autoOpen?: boolean },
     callback?: SerialCallback,
@@ -127,7 +119,7 @@ export interface SerialPortConstructor {
 }
 
 export interface SerialDriver {
-  readonly list: typeof SerialPort.list;
+  readonly list: () => Promise<ReadonlyArray<unknown>>;
   readonly open: (
     options: SerialOpenOptions & { readonly autoOpen: false },
     callback?: SerialCallback,
@@ -158,35 +150,12 @@ export const defaultSerialDriver: SerialDriver = {
   open: (options, callback) => new SerialPort(options, callback),
 };
 
-const serialPortInfoInput = (info: SerialPortListItem): SerialPortInfoInput => {
-  const input: MutableSerialPortInfoInput = {
-    path: info.path,
-  };
-  if (info.manufacturer !== undefined) {
-    input.manufacturer = info.manufacturer;
-  }
-  if (info.serialNumber !== undefined) {
-    input.serialNumber = info.serialNumber;
-  }
-  if (info.pnpId !== undefined) {
-    input.pnpId = info.pnpId;
-  }
-  if (info.locationId !== undefined) {
-    input.locationId = info.locationId;
-  }
-  if (info.productId !== undefined) {
-    input.productId = info.productId;
-  }
-  if (info.vendorId !== undefined) {
-    input.vendorId = info.vendorId;
-  }
-  return input;
-};
-
+// External boundary: serialport list results are untrusted until Schema decodes them.
 const decodeSerialPortInfo = (
-  info: SerialPortListItem,
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters
+  info: unknown,
 ): Effect.Effect<SerialPortInfo, SerialListError> =>
-  Schema.decodeUnknownEffect(SerialPortInfo)(serialPortInfoInput(info)).pipe(
+  Schema.decodeUnknownEffect(SerialPortInfo)(info).pipe(
     Effect.mapError((cause) => new SerialListError({ cause })),
   );
 

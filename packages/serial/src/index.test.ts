@@ -377,7 +377,8 @@ describe("@vscope/serial device", () => {
         device.setTrigger({
           threshold: 0,
           channel: 0,
-          mode: "edge" as never,
+          // @ts-expect-error Exercise runtime validation with an invalid external value.
+          mode: "edge",
         }),
       );
 

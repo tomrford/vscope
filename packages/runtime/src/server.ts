@@ -53,6 +53,7 @@ import {
 import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
 import {
+  describeError,
   describeRuntimeCoreError,
   RuntimeCorePolicyError,
   type RuntimeCoreError,
@@ -313,15 +314,7 @@ function handleSnapshotSamples(api: RuntimeApi) {
     const id = yield* Schema.decodeUnknownEffect(PersistentId)(params.id);
     const samples = yield* api.snapshots.readSamples(id);
     if (!samples) {
-      return HttpServerResponse.jsonUnsafe(
-        {
-          ok: false,
-          error: {
-            message: "Snapshot samples not found.",
-          },
-        },
-        { status: 404, headers: JsonContent },
-      );
+      return errorJsonResponse("Snapshot samples not found.", 404);
     }
     return HttpServerResponse.uint8Array(samples.data, {
       contentType: "application/octet-stream",
@@ -335,63 +328,26 @@ function handleSnapshotSamples(api: RuntimeApi) {
     });
   }).pipe(
     Effect.matchEffect({
-      onFailure: errorResponse,
+      onFailure: (cause) => Effect.succeed(errorJsonResponse(describeError(cause), 400)),
       onSuccess: Effect.succeed,
     }),
   );
 }
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: Schema.Json, status = 200) {
   return HttpServerResponse.jsonUnsafe(body, { status, headers: JsonContent });
 }
 
-function errorResponse(error: unknown) {
-  return Effect.succeed(
-    jsonResponse(
-      {
-        ok: false,
-        error: {
-          message: describeError(error),
-        },
+function errorJsonResponse(message: string, status: number) {
+  return jsonResponse(
+    {
+      ok: false,
+      error: {
+        message,
       },
-      400,
-    ),
+    },
+    status,
   );
-}
-
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || describeTaggedError(error);
-  }
-
-  return describeTaggedError(error);
-}
-
-function describeTaggedError(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return String(error);
-  }
-
-  if ("_tag" in error && typeof error._tag === "string") {
-    const details = Object.entries(error)
-      .filter(([key]) => key !== "_tag" && key !== "stack")
-      .map(([key, value]) => `${key}=${describeErrorField(value)}`);
-    return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
-  }
-
-  return String(error);
-}
-
-function describeErrorField(value: unknown): string {
-  if (value instanceof Error) {
-    return describeError(value);
-  }
-
-  if (typeof value === "object" && value !== null && "_tag" in value) {
-    return describeTaggedError(value);
-  }
-
-  return JSON.stringify(value) ?? String(value);
 }
 
 function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {

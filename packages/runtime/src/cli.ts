@@ -111,7 +111,8 @@ Defaults:
 `);
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
+// External boundary: JavaScript Promise rejections can contain any value.
+main().catch((cause: unknown) => {
+  console.error(cause);
   process.exitCode = 1;
 });

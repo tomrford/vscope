@@ -75,6 +75,8 @@ function validationError(operation: string, cause: unknown): PersistenceValidati
 export function decodeWith<S extends Schema.Top>(
   schema: S,
   operation: string,
+  // SQL, JSON, and host values enter the typed application through this decoder.
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters
   value: unknown,
 ): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
   return Schema.decodeUnknownEffect(schema)(value).pipe(
@@ -82,37 +84,28 @@ export function decodeWith<S extends Schema.Top>(
   );
 }
 
-function parseJson(
+export function decodeJson<S extends Schema.Top>(
+  schema: S,
   operation: string,
   source: string,
-): Effect.Effect<unknown, PersistenceValidationError> {
+): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
   return Effect.try({
     try: () => {
       const parsed: unknown = JSON.parse(source);
       return parsed;
     },
     catch: (cause) => validationError(operation, cause),
-  });
+  }).pipe(Effect.flatMap((value) => decodeWith(schema, operation, value)));
 }
 
-export function decodeJson<S extends Schema.Top>(
-  schema: S,
+export function stringifyJson<A>(
   operation: string,
-  source: string,
-): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
-  return parseJson(operation, source).pipe(
-    Effect.flatMap((value) => decodeWith(schema, operation, value)),
-  );
-}
-
-export function stringifyJson(
-  operation: string,
-  value: unknown,
+  value: A,
 ): Effect.Effect<string, PersistenceValidationError> {
   return Effect.try({
     try: () => {
       const json = JSON.stringify(value);
-      if (typeof json !== "string") {
+      if (json === undefined) {
         throw new Error("JSON value cannot be stringified");
       }
       return json;
@@ -152,6 +145,8 @@ export function transactionError(operation: string, cause: unknown): Persistence
 
 export function toUint8Array(
   operation: string,
+  // External boundary: Effect SQL may expose SQLite blobs in driver-native forms.
+  // oxlint-disable-next-line anti-slop/no-unknown-parameters
   value: unknown,
 ): Effect.Effect<Uint8Array, PersistenceValidationError> {
   if (value instanceof Uint8Array) {

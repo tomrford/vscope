@@ -1,4 +1,4 @@
-import { Data } from "effect";
+import { Data, Predicate } from "effect";
 import type { PersistenceError } from "@vscope/persistence";
 import type {
   SerialCloseError,
@@ -46,42 +46,41 @@ export function describeRuntimeCoreError(error: RuntimeCoreError): string {
   }
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || describeTaggedError(error);
+// Diagnostic boundary: foreign nested causes have no stronger runtime contract.
+export function describeError(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.message || describeTaggedError(cause);
   }
 
-  return describeTaggedError(error);
+  return describeTaggedError(cause);
 }
 
-function describeTaggedError(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return String(error);
+function describeTaggedError(cause: unknown): string {
+  if (!Predicate.hasProperty(cause, "_tag") || !Predicate.isString(cause._tag)) {
+    return String(cause);
   }
 
-  if ("_tag" in error && typeof error._tag === "string") {
-    const fields = Object.entries(error).filter(([key]) => key !== "_tag" && key !== "stack");
-    const details = fields.map(([key, value]) => `${key}=${describeErrorField(value)}`);
-    if (
-      "cause" in error &&
-      error.cause !== null &&
-      error.cause !== undefined &&
-      !fields.some(([key]) => key === "cause")
-    ) {
-      details.push(`cause=${describeErrorField(error.cause)}`);
-    }
-    return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
+  const fields = Object.entries(cause).filter(([key]) => key !== "_tag" && key !== "stack");
+  const details = fields.map(([key, value]) => `${key}=${describeErrorField(value)}`);
+  if (
+    Predicate.hasProperty(cause, "cause") &&
+    cause.cause !== null &&
+    cause.cause !== undefined &&
+    !fields.some(([key]) => key === "cause")
+  ) {
+    details.push(`cause=${describeErrorField(cause.cause)}`);
   }
-
-  return String(error);
+  return details.length > 0 ? `${cause._tag}: ${details.join(", ")}` : cause._tag;
 }
 
+// Diagnostic boundary: Object.entries erases each tagged error field type.
+// oxlint-disable-next-line anti-slop/no-unknown-parameters
 function describeErrorField(value: unknown): string {
   if (value instanceof Error) {
     return describeError(value);
   }
 
-  if (typeof value === "object" && value !== null && "_tag" in value) {
+  if (Predicate.hasProperty(value, "_tag")) {
     return describeTaggedError(value);
   }
 

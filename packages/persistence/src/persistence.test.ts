@@ -227,7 +227,10 @@ describe("@vscope/persistence", () => {
             path,
             Effect.gen(function* () {
               const persistence = yield* Persistence;
-              yield* persistence.patchSettings({ theme: "purple" as never });
+              yield* persistence.patchSettings({
+                // @ts-expect-error Exercise runtime validation with an invalid external value.
+                theme: "purple",
+              });
             }),
           ),
         );
@@ -429,11 +432,12 @@ describe("@vscope/persistence", () => {
                 trigger: {
                   threshold: 0.5,
                   channel: 0,
-                  mode: "edge" as never,
+                  mode: "edge",
                 },
               };
 
-              yield* persistence.createSnapshot(invalid as never);
+              // @ts-expect-error Exercise runtime validation with an invalid external value.
+              yield* persistence.createSnapshot(invalid);
             }),
           ),
         );
