@@ -165,7 +165,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
 
   const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (
     // External boundary: SQL query rows remain untrusted until SnapshotRow decodes them.
-    // oxlint-disable-next-line anti-slop/no-unknown-parameters
     row: unknown,
   ) {
     const decodedRow = yield* decodeWith(SnapshotRow, "decode snapshot row", row);
