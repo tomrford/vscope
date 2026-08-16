@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 
 import { Effect, Option, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import type { PersistenceService } from "./api.ts";
 import { SnapshotNotFoundError } from "./errors.ts";
@@ -17,28 +18,27 @@ import {
   SnapshotSampleBlob,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
-  SnapshotTrigger,
-  type Timestamp,
+  Timestamp,
   noRecovery,
   snapshotSampleByteLength,
   recovery,
   type SettingsPatch,
 } from "@vscope/shared";
 import {
-  SingletonRow,
-  SnapshotRow,
+  PrunedSnapshotId,
+  SettingsRow,
+  SettingsWrite,
+  SnapshotFavoriteWrite,
   SnapshotRowId,
   SnapshotSampleRow,
+  SnapshotSql,
   createId,
   createTimestamp,
-  decodeJson,
   decodeWith,
-  runSql,
-  stringifyJson,
+  runBound,
   toUint8Array,
   transactionError,
   validateSamplesForDescriptor,
-  validateSnapshotDraft,
 } from "./codec.ts";
 
 export const makePersistence = Effect.fn("Persistence.make")(function* (
@@ -46,85 +46,179 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
 ): Effect.fn.Return<PersistenceService, never, SqlClient.SqlClient> {
   const sql = yield* SqlClient.SqlClient;
 
+  const writeSettingsRow = SqlSchema.void({
+    Request: SettingsWrite,
+    execute: (row) => sql`
+      INSERT INTO settings (id, data_json, recovery_pending, updated_at)
+      VALUES (1, ${row.data_json}, ${row.recovery_pending}, ${row.updated_at})
+      ON CONFLICT (id) DO UPDATE SET
+        data_json = excluded.data_json,
+        recovery_pending = excluded.recovery_pending,
+        updated_at = excluded.updated_at
+    `,
+  });
+
+  const findSettingsRow = SqlSchema.findOneOption({
+    Request: Schema.Undefined,
+    Result: SettingsRow,
+    execute: () => sql`
+      SELECT data_json, recovery_pending
+      FROM settings
+      WHERE id = 1
+    `,
+  });
+
+  const findSnapshot = SqlSchema.findOneOption({
+    Request: PersistentId,
+    Result: SnapshotSql,
+    execute: (id) => sql`
+      SELECT
+        snapshots.*,
+        CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
+      FROM snapshots
+      LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
+      WHERE snapshots.id = ${id}
+    `,
+  });
+
+  const listSnapshotRows = SqlSchema.findAll({
+    Request: SnapshotListQuery,
+    Result: Schema.Unknown,
+    execute: (query) =>
+      query.limit === undefined
+        ? sql`
+            SELECT
+              snapshots.*,
+              CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
+            FROM snapshots
+            LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
+            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
+          `
+        : sql`
+            SELECT
+              snapshots.*,
+              CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
+            FROM snapshots
+            LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
+            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
+            LIMIT ${query.limit}
+          `,
+  });
+
+  const insertSnapshotRow = SqlSchema.void({
+    Request: SnapshotSql,
+    execute: (row) => sql`
+      INSERT INTO snapshots (
+        id,
+        label,
+        device_name,
+        channel_count,
+        sample_count,
+        sample_format,
+        sample_rate_hz,
+        total_duration_seconds,
+        pre_trigger_seconds,
+        channel_map_json,
+        trigger_json,
+        rt_values_json,
+        metadata_json,
+        favorite,
+        created_at,
+        updated_at
+      ) VALUES (
+        ${row.id},
+        ${row.label},
+        ${row.device_name},
+        ${row.channel_count},
+        ${row.sample_count},
+        ${row.sample_format},
+        ${row.sample_rate_hz},
+        ${row.total_duration_seconds},
+        ${row.pre_trigger_seconds},
+        ${row.channel_map_json},
+        ${row.trigger_json},
+        ${row.rt_values_json},
+        ${row.metadata_json},
+        ${row.favorite},
+        ${row.created_at},
+        ${row.updated_at}
+      )
+    `,
+  });
+
+  const updateSnapshotFavorite = SqlSchema.void({
+    Request: SnapshotFavoriteWrite,
+    execute: (row) =>
+      sql`UPDATE snapshots SET favorite = ${row.favorite}, updated_at = ${row.updated_at} WHERE id = ${row.id}`,
+  });
+
+  const pruneSnapshotRows = SqlSchema.findAll({
+    Request: Timestamp,
+    Result: PrunedSnapshotId,
+    execute: (cutoff) => sql`
+      DELETE FROM snapshots
+      WHERE favorite = 0 AND created_at < ${cutoff}
+      RETURNING id
+    `,
+  });
+
+  const findSnapshotSamples = SqlSchema.findOneOption({
+    Request: PersistentId,
+    Result: SnapshotSampleRow,
+    execute: (id) => sql`
+      SELECT format, byte_len, data, updated_at
+      FROM snapshot_samples
+      WHERE snapshot_id = ${id}
+    `,
+  });
+
   const writeSingleton = Effect.fn("Persistence.writeSingleton")(function* (
-    table: "settings",
     value: Settings,
     recoveryPending: boolean,
   ) {
-    const json = yield* stringifyJson(`write ${table}`, value);
     const updatedAt = yield* createTimestamp();
-
-    yield* runSql(
-      `write ${table}`,
-      sql`
-        INSERT INTO ${sql(table)} (id, data_json, recovery_pending, updated_at)
-        VALUES (1, ${json}, ${recoveryPending ? 1 : 0}, ${updatedAt})
-        ON CONFLICT (id) DO UPDATE SET
-          data_json = excluded.data_json,
-          recovery_pending = excluded.recovery_pending,
-          updated_at = excluded.updated_at
-      `,
+    yield* runBound(
+      "write settings",
+      writeSettingsRow({
+        settings: value,
+        recoveryPending,
+        updatedAt,
+      }),
     );
   });
 
   const readSettings = Effect.fn("Persistence.readSettings")(function* () {
-    const rows = yield* runSql(
+    const row = yield* runBound(
       "read settings",
-      sql`
-        SELECT data_json, recovery_pending
-        FROM settings
-        WHERE id = 1
-      `,
+      findSettingsRow(undefined).pipe(
+        Effect.catchIf(Schema.isSchemaError, () =>
+          writeSingleton(DEFAULT_SETTINGS, true).pipe(Effect.as("corrupt" as const)),
+        ),
+      ),
     );
 
-    const row = rows[0];
-    if (row === undefined) {
-      yield* writeSingleton("settings", DEFAULT_SETTINGS, false);
+    if (row === "corrupt") {
+      return SettingsState.make({
+        settings: DEFAULT_SETTINGS,
+        recovery: recovery("Corrupt settings were reset to defaults."),
+      });
+    }
+
+    if (Option.isNone(row)) {
+      yield* writeSingleton(DEFAULT_SETTINGS, false);
       return SettingsState.make({ settings: DEFAULT_SETTINGS, recovery: noRecovery });
     }
 
-    const decodedRow = yield* decodeWith(SingletonRow, "decode settings row", row).pipe(
-      Effect.matchEffect({
-        onFailure: () =>
-          Effect.gen(function* () {
-            yield* writeSingleton("settings", DEFAULT_SETTINGS, true);
-            return {
-              settings: DEFAULT_SETTINGS,
-              recoveryState: recovery("Corrupt settings were reset to defaults."),
-            };
-          }),
-        onSuccess: (value) =>
-          decodeJson(Settings, "decode settings", value.data_json).pipe(
-            Effect.matchEffect({
-              onFailure: () =>
-                Effect.gen(function* () {
-                  yield* writeSingleton("settings", DEFAULT_SETTINGS, true);
-                  return {
-                    settings: DEFAULT_SETTINGS,
-                    recoveryState: recovery("Corrupt settings were reset to defaults."),
-                  };
-                }),
-              onSuccess: (settings) =>
-                Effect.succeed({
-                  settings,
-                  recoveryState:
-                    value.recovery_pending === 1
-                      ? recovery("Corrupt settings were reset to defaults.")
-                      : noRecovery,
-                }),
-            }),
-          ),
-      }),
-    );
-
     return SettingsState.make({
-      settings: decodedRow.settings,
-      recovery: decodedRow.recoveryState,
+      settings: row.value.settings,
+      recovery: row.value.recoveryPending
+        ? recovery("Corrupt settings were reset to defaults.")
+        : noRecovery,
     });
   });
 
   const writeSettings = Effect.fn("Persistence.writeSettings")(function* (settings: Settings) {
-    yield* writeSingleton("settings", settings, false);
+    yield* writeSingleton(settings, false);
     return SettingsState.make({ settings, recovery: noRecovery });
   });
 
@@ -163,77 +257,8 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       .pipe(Effect.mapError((cause) => transactionError("patch settings transaction", cause)));
   });
 
-  const decodeSnapshotRow = Effect.fn("Persistence.decodeSnapshotRow")(function* (
-    // External boundary: SQL query rows remain untrusted until SnapshotRow decodes them.
-    row: unknown,
-  ) {
-    const decodedRow = yield* decodeWith(SnapshotRow, "decode snapshot row", row);
-    const channelMap = yield* decodeJson(
-      Schema.Array(Schema.Number),
-      "decode snapshot channel map",
-      decodedRow.channel_map_json,
-    );
-    const trigger = yield* decodeJson(
-      SnapshotTrigger,
-      "decode snapshot trigger",
-      decodedRow.trigger_json,
-    );
-    const rtValues = yield* decodeJson(
-      Schema.Array(Schema.Number),
-      "decode snapshot rt values",
-      decodedRow.rt_values_json,
-    );
-    const metadata = yield* decodeJson(
-      Schema.Record(Schema.String, Schema.Json),
-      "decode snapshot metadata",
-      decodedRow.metadata_json,
-    );
-
-    return yield* decodeWith(SnapshotRecord, "decode snapshot record", {
-      id: decodedRow.id,
-      label: decodedRow.label,
-      device: {
-        name: decodedRow.device_name,
-      },
-      sample: {
-        format: decodedRow.sample_format,
-        channelCount: decodedRow.channel_count,
-        sampleCount: decodedRow.sample_count,
-        byteLength: snapshotSampleByteLength(decodedRow.channel_count, decodedRow.sample_count),
-        stored: decodedRow.has_samples === 1,
-      },
-      sampleRateHz: decodedRow.sample_rate_hz,
-      totalDurationSeconds: decodedRow.total_duration_seconds,
-      preTriggerSeconds: decodedRow.pre_trigger_seconds,
-      channelMap,
-      trigger,
-      rtValues,
-      metadata,
-      favorite: decodedRow.favorite === 1,
-      createdAt: decodedRow.created_at,
-      updatedAt: decodedRow.updated_at,
-    });
-  });
-
   const getSnapshot = Effect.fn("Persistence.getSnapshot")(function* (id: PersistentId) {
-    const rows = yield* runSql(
-      "get snapshot",
-      sql`
-        SELECT
-          snapshots.*,
-          CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-        FROM snapshots
-        LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-        WHERE snapshots.id = ${id}
-      `,
-    );
-
-    const row = rows[0];
-    if (row === undefined) {
-      return Option.none<SnapshotRecord>();
-    }
-
-    return Option.some(yield* decodeSnapshotRow(row));
+    return yield* runBound("get snapshot", findSnapshot(id));
   });
 
   const requireSnapshot = Effect.fn("Persistence.requireSnapshot")(function* (id: PersistentId) {
@@ -255,7 +280,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     return yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          yield* runSql(
+          yield* runBound(
             "write snapshot samples",
             sql`
             INSERT INTO snapshot_samples (snapshot_id, format, byte_len, data, updated_at)
@@ -267,7 +292,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
               updated_at = excluded.updated_at
           `,
           );
-          yield* runSql(
+          yield* runBound(
             "touch snapshot after sample write",
             sql`UPDATE snapshots SET updated_at = ${updatedAt} WHERE id = ${record.id}`,
           );
@@ -283,7 +308,6 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     draft: SnapshotDraft,
     samples?: SnapshotSamplesWrite,
   ) {
-    yield* validateSnapshotDraft(draft);
     const id = draft.id ?? (yield* createId("snapshot"));
     const createdAt = draft.createdAt ?? (yield* createTimestamp());
     const descriptor = yield* decodeWith(
@@ -317,57 +341,14 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       samples === undefined
         ? undefined
         : yield* validateSamplesForDescriptor(record.sample, samples).pipe(Effect.as(samples));
-    const channelMapJson = yield* stringifyJson("encode snapshot channel map", record.channelMap);
-    const triggerJson = yield* stringifyJson("encode snapshot trigger", record.trigger);
-    const rtValuesJson = yield* stringifyJson("encode snapshot rt values", record.rtValues);
-    const metadataJson = yield* stringifyJson("encode snapshot metadata", record.metadata);
 
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          yield* runSql(
-            "create snapshot",
-            sql`
-            INSERT INTO snapshots (
-              id,
-              label,
-              device_name,
-              channel_count,
-              sample_count,
-              sample_format,
-              sample_rate_hz,
-              total_duration_seconds,
-              pre_trigger_seconds,
-              channel_map_json,
-              trigger_json,
-              rt_values_json,
-              metadata_json,
-              favorite,
-              created_at,
-              updated_at
-            ) VALUES (
-              ${record.id},
-              ${record.label},
-              ${record.device.name},
-              ${record.sample.channelCount},
-              ${record.sample.sampleCount},
-              ${record.sample.format},
-              ${record.sampleRateHz},
-              ${record.totalDurationSeconds},
-              ${record.preTriggerSeconds},
-              ${channelMapJson},
-              ${triggerJson},
-              ${rtValuesJson},
-              ${metadataJson},
-              ${record.favorite ? 1 : 0},
-              ${record.createdAt},
-              ${record.updatedAt}
-            )
-          `,
-          );
+          yield* runBound("create snapshot", insertSnapshotRow(record));
 
           if (decodedSamples !== undefined) {
-            yield* runSql(
+            yield* runBound(
               "create snapshot samples",
               sql`
               INSERT INTO snapshot_samples (snapshot_id, format, byte_len, data, updated_at)
@@ -391,33 +372,12 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
   const listSnapshots = Effect.fn("Persistence.listSnapshots")(function* (
     query: SnapshotListQuery = SnapshotListQuery.make({}),
   ) {
-    const rows = yield* runSql(
-      "list snapshots",
-      query.limit === undefined
-        ? sql`
-            SELECT
-              snapshots.*,
-              CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-            FROM snapshots
-            LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
-          `
-        : sql`
-            SELECT
-              snapshots.*,
-              CASE WHEN snapshot_samples.snapshot_id IS NULL THEN 0 ELSE 1 END AS has_samples
-            FROM snapshots
-            LEFT JOIN snapshot_samples ON snapshot_samples.snapshot_id = snapshots.id
-            ORDER BY snapshots.favorite DESC, snapshots.created_at DESC, snapshots.id DESC
-            LIMIT ${query.limit}
-          `,
-    );
-
+    const rows = yield* runBound("list snapshots", listSnapshotRows(query));
     const snapshots: Array<SnapshotRecord> = [];
     const corruptIds: Array<string> = [];
 
     for (const row of rows) {
-      const decoded = yield* decodeSnapshotRow(row).pipe(
+      const decoded = yield* decodeWith(SnapshotSql, "decode snapshot row", row).pipe(
         Effect.match({
           onFailure: () => null,
           onSuccess: (snapshot) => snapshot,
@@ -440,7 +400,7 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     }
 
     for (const id of corruptIds) {
-      yield* runSql("drop corrupt snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
+      yield* runBound("drop corrupt snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
       yield* Effect.logWarning(`Corrupt snapshot metadata dropped: ${id}`);
     }
 
@@ -462,29 +422,26 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       updatedAt,
     });
 
-    yield* runSql(
+    yield* runBound(
       "set snapshot favorite",
-      sql`UPDATE snapshots SET favorite = ${updated.favorite ? 1 : 0}, updated_at = ${updated.updatedAt} WHERE id = ${updated.id}`,
+      updateSnapshotFavorite({
+        id: updated.id,
+        favorite: updated.favorite,
+        updatedAt: updated.updatedAt,
+      }),
     );
 
     return updated;
   });
 
   const deleteSnapshot = Effect.fn("Persistence.deleteSnapshot")(function* (id: PersistentId) {
-    yield* runSql("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
+    yield* runBound("delete snapshot", sql`DELETE FROM snapshots WHERE id = ${id}`);
   });
 
   const pruneSnapshotsBefore = Effect.fn("Persistence.pruneSnapshotsBefore")(function* (
     cutoff: Timestamp,
   ) {
-    const deleted = yield* runSql(
-      "prune snapshots",
-      sql`
-        DELETE FROM snapshots
-        WHERE favorite = 0 AND created_at < ${cutoff}
-        RETURNING id
-      `,
-    );
+    const deleted = yield* runBound("prune snapshots", pruneSnapshotRows(cutoff));
     return deleted.length;
   });
 
@@ -500,31 +457,22 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
     id: PersistentId,
   ) {
     const record = yield* requireSnapshot(id);
-    const rows = yield* runSql(
-      "read snapshot samples",
-      sql`
-        SELECT format, byte_len, data, updated_at
-        FROM snapshot_samples
-        WHERE snapshot_id = ${record.id}
-      `,
-    );
-    const row = rows[0];
+    const row = yield* runBound("read snapshot samples", findSnapshotSamples(record.id));
 
-    if (row === undefined) {
+    if (Option.isNone(row)) {
       return Option.none<SnapshotSampleBlob>();
     }
 
-    const decodedRow = yield* decodeWith(SnapshotSampleRow, "decode snapshot samples row", row);
-    const bytes = yield* toUint8Array("decode snapshot samples blob", decodedRow.data);
-    const trimmed = bytes.slice(0, Math.min(bytes.byteLength, decodedRow.byte_len));
+    const bytes = yield* toUint8Array("decode snapshot samples blob", row.value.data);
+    const trimmed = bytes.slice(0, Math.min(bytes.byteLength, row.value.byte_len));
     const blob = yield* decodeWith(SnapshotSampleBlob, "decode snapshot samples", {
       snapshotId: record.id,
-      format: decodedRow.format,
+      format: row.value.format,
       channelCount: record.sample.channelCount,
       sampleCount: record.sample.sampleCount,
-      byteLength: decodedRow.byte_len,
+      byteLength: row.value.byte_len,
       data: trimmed,
-      updatedAt: decodedRow.updated_at,
+      updatedAt: row.value.updated_at,
     });
     yield* validateSamplesForDescriptor(
       record.sample,

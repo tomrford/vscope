@@ -1,7 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Schema } from "effect";
 
-import { DEFAULT_SERIAL_CONFIG, Timestamp } from "./model.ts";
+import {
+  DEFAULT_SERIAL_CONFIG,
+  PersistentId,
+  SnapshotRecord,
+  SnapshotTrigger,
+  Timestamp,
+} from "./model.ts";
 
 describe("default serial configuration", () => {
   it("matches the vscope firmware link", () => {
@@ -27,5 +33,63 @@ describe("timestamp contract", () => {
     expect(() => decodeTimestamp("not-a-date")).toThrow();
     expect(() => decodeTimestamp("2026-02-31T00:00:00.000Z")).toThrow();
     expect(() => decodeTimestamp("2026-07-15T20:42:03.123+02:00")).toThrow();
+  });
+});
+
+describe("snapshot record contract", () => {
+  const valid = {
+    id: PersistentId.make("snapshot:test"),
+    label: "Boot trace",
+    device: { name: "probe-a" },
+    sample: {
+      format: "f32le-interleaved-v1" as const,
+      channelCount: 2,
+      sampleCount: 1,
+      byteLength: 8,
+      stored: false,
+    },
+    sampleRateHz: 1_000,
+    totalDurationSeconds: 0.001,
+    preTriggerSeconds: 0,
+    channelMap: [0, 1],
+    trigger: SnapshotTrigger.make({
+      threshold: 0.5,
+      channel: 1,
+      mode: "rising",
+    }),
+    rtValues: [0, 1],
+    metadata: {},
+    favorite: false,
+    createdAt: Timestamp.make("2026-06-13T08:00:00.000Z"),
+    updatedAt: Timestamp.make("2026-06-13T08:00:00.000Z"),
+  };
+
+  it("accepts consistent channel and timing metadata", () => {
+    expect(SnapshotRecord.make(valid).channelMap).toEqual([0, 1]);
+  });
+
+  it("rejects channel and timing mismatches", () => {
+    expect(() =>
+      SnapshotRecord.make({
+        ...valid,
+        channelMap: [0],
+      }),
+    ).toThrow();
+    expect(() =>
+      SnapshotRecord.make({
+        ...valid,
+        trigger: SnapshotTrigger.make({
+          threshold: 0.5,
+          channel: 2,
+          mode: "rising",
+        }),
+      }),
+    ).toThrow();
+    expect(() =>
+      SnapshotRecord.make({
+        ...valid,
+        preTriggerSeconds: 1,
+      }),
+    ).toThrow();
   });
 });

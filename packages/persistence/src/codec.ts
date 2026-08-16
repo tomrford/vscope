@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { Effect, Schema } from "effect";
-import type { SqlError } from "effect/unstable/sql/SqlError";
+import { Effect, Schema, SchemaTransformation } from "effect";
 
 import {
   PersistenceMigrationError,
@@ -13,37 +12,110 @@ import {
   type PersistenceError,
 } from "./errors.ts";
 import {
+  JsonObject,
   PersistentId,
-  SnapshotDraft,
+  SNAPSHOT_SAMPLE_FORMAT,
+  Settings,
+  SnapshotRecord,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
+  SnapshotTrigger,
   Timestamp,
+  snapshotSampleByteLength,
 } from "@vscope/shared";
 
-export const SingletonRow = Schema.Struct({
-  data_json: Schema.String,
-  recovery_pending: Schema.Number,
-});
+export const SettingsRow = Schema.Struct({
+  settings: Schema.fromJsonString(Settings),
+  recoveryPending: Schema.BooleanFromBit,
+}).pipe(
+  Schema.encodeKeys({
+    settings: "data_json",
+    recoveryPending: "recovery_pending",
+  }),
+);
 
-export const SnapshotRow = Schema.Struct({
+export const SettingsWrite = Schema.Struct({
+  settings: Schema.fromJsonString(Settings),
+  recoveryPending: Schema.BooleanFromBit,
+  updatedAt: Timestamp,
+}).pipe(
+  Schema.encodeKeys({
+    settings: "data_json",
+    recoveryPending: "recovery_pending",
+    updatedAt: "updated_at",
+  }),
+);
+
+const SnapshotSqlFields = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   device_name: Schema.String,
   channel_count: Schema.Number,
   sample_count: Schema.Number,
-  sample_format: Schema.String,
+  sample_format: Schema.Literals([SNAPSHOT_SAMPLE_FORMAT]),
   sample_rate_hz: Schema.NullOr(Schema.Number),
   total_duration_seconds: Schema.Number,
   pre_trigger_seconds: Schema.Number,
-  channel_map_json: Schema.String,
-  trigger_json: Schema.String,
-  rt_values_json: Schema.String,
-  metadata_json: Schema.String,
-  favorite: Schema.Number,
+  channel_map_json: Schema.fromJsonString(Schema.Array(Schema.Number)),
+  trigger_json: Schema.fromJsonString(Schema.toEncoded(SnapshotTrigger)),
+  rt_values_json: Schema.fromJsonString(Schema.Array(Schema.Number)),
+  metadata_json: Schema.fromJsonString(JsonObject),
+  favorite: Schema.BooleanFromBit,
   created_at: Schema.String,
   updated_at: Schema.String,
-  has_samples: Schema.Number,
+  has_samples: Schema.BooleanFromBit,
 });
+
+export const SnapshotSql = SnapshotSqlFields.pipe(
+  Schema.decodeTo(
+    SnapshotRecord,
+    SchemaTransformation.transform({
+      decode: (row) => ({
+        id: row.id,
+        label: row.label,
+        device: {
+          name: row.device_name,
+        },
+        sample: {
+          format: row.sample_format,
+          channelCount: row.channel_count,
+          sampleCount: row.sample_count,
+          byteLength: snapshotSampleByteLength(row.channel_count, row.sample_count),
+          stored: row.has_samples,
+        },
+        sampleRateHz: row.sample_rate_hz,
+        totalDurationSeconds: row.total_duration_seconds,
+        preTriggerSeconds: row.pre_trigger_seconds,
+        channelMap: row.channel_map_json,
+        trigger: row.trigger_json,
+        rtValues: row.rt_values_json,
+        metadata: row.metadata_json,
+        favorite: row.favorite,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+      encode: (record) => ({
+        id: record.id,
+        label: record.label,
+        device_name: record.device.name,
+        channel_count: record.sample.channelCount,
+        sample_count: record.sample.sampleCount,
+        sample_format: record.sample.format,
+        sample_rate_hz: record.sampleRateHz,
+        total_duration_seconds: record.totalDurationSeconds,
+        pre_trigger_seconds: record.preTriggerSeconds,
+        channel_map_json: record.channelMap,
+        trigger_json: record.trigger,
+        rt_values_json: record.rtValues,
+        metadata_json: record.metadata,
+        favorite: record.favorite,
+        created_at: record.createdAt,
+        updated_at: record.updatedAt,
+        has_samples: record.sample.stored,
+      }),
+    }),
+  ),
+);
 
 export const SnapshotSampleRow = Schema.Struct({
   format: Schema.String,
@@ -53,6 +125,20 @@ export const SnapshotSampleRow = Schema.Struct({
 });
 
 export const SnapshotRowId = Schema.Struct({
+  id: Schema.String,
+});
+
+export const SnapshotFavoriteWrite = Schema.Struct({
+  id: PersistentId,
+  favorite: Schema.BooleanFromBit,
+  updatedAt: Timestamp,
+}).pipe(
+  Schema.encodeKeys({
+    updatedAt: "updated_at",
+  }),
+);
+
+export const PrunedSnapshotId = Schema.Struct({
   id: Schema.String,
 });
 
@@ -83,36 +169,6 @@ export function decodeWith<S extends Schema.Top>(
   );
 }
 
-export function decodeJson<S extends Schema.Top>(
-  schema: S,
-  operation: string,
-  source: string,
-): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
-  return Effect.try({
-    try: () => {
-      const parsed: unknown = JSON.parse(source);
-      return parsed;
-    },
-    catch: (cause) => validationError(operation, cause),
-  }).pipe(Effect.flatMap((value) => decodeWith(schema, operation, value)));
-}
-
-export function stringifyJson<A>(
-  operation: string,
-  value: A,
-): Effect.Effect<string, PersistenceValidationError> {
-  return Effect.try({
-    try: () => {
-      const json = JSON.stringify(value);
-      if (json === undefined) {
-        throw new Error("JSON value cannot be stringified");
-      }
-      return json;
-    },
-    catch: (cause) => validationError(operation, cause),
-  });
-}
-
 function queryError(operation: string, cause: unknown): PersistenceQueryError {
   return PersistenceQueryError.make({
     operation,
@@ -121,11 +177,21 @@ function queryError(operation: string, cause: unknown): PersistenceQueryError {
   });
 }
 
-export function runSql<A>(
+export function runBound<A, E, R>(
   operation: string,
-  effect: Effect.Effect<A, SqlError>,
-): Effect.Effect<A, PersistenceQueryError> {
-  return effect.pipe(Effect.mapError((cause) => queryError(operation, cause)));
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, PersistenceError, R> {
+  return effect.pipe(
+    Effect.mapError((cause) => {
+      if (isPersistenceError(cause)) {
+        return cause;
+      }
+
+      return Schema.isSchemaError(cause)
+        ? validationError(operation, cause)
+        : queryError(operation, cause);
+    }),
+  );
 }
 
 function isPersistenceError(cause: unknown): cause is PersistenceError {
@@ -184,38 +250,6 @@ export function toUint8Array(
       reason: "Unsupported SQLite blob value",
     }),
   );
-}
-
-export function validateSnapshotDraft(
-  draft: SnapshotDraft,
-): Effect.Effect<void, PersistenceValidationError> {
-  const invalid = (reason: string) =>
-    Effect.fail(
-      PersistenceValidationError.make({
-        operation: "validate snapshot draft",
-        reason,
-      }),
-    );
-
-  if (draft.channelMap.length !== draft.channelCount) {
-    return invalid(
-      `channelMap length ${draft.channelMap.length} does not match channelCount ${draft.channelCount}`,
-    );
-  }
-
-  if (draft.trigger.channel >= draft.channelCount) {
-    return invalid(
-      `trigger channel ${draft.trigger.channel} is outside channelCount ${draft.channelCount}`,
-    );
-  }
-
-  if (draft.preTriggerSeconds > draft.totalDurationSeconds) {
-    return invalid(
-      `preTriggerSeconds ${draft.preTriggerSeconds} exceeds totalDurationSeconds ${draft.totalDurationSeconds}`,
-    );
-  }
-
-  return Effect.void;
 }
 
 export function validateSamplesForDescriptor(
