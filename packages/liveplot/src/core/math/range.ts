@@ -8,16 +8,7 @@ import type { LivePoint, LiveSeries } from "../types";
 
 const MIN_RANGE = 1e-3;
 
-export type SeriesRange = {
-  min: number;
-  max: number;
-};
-
-export type MultiRange = SeriesRange & {
-  range: number;
-};
-
-export const computeSeriesRange = (points: LivePoint[]): SeriesRange => {
+export const computeSeriesRange = (points: LivePoint[]): { min: number; max: number } => {
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
 
@@ -42,7 +33,7 @@ export const computeSeriesRange = (points: LivePoint[]): SeriesRange => {
 
 export const computeMultiRange = (
   visibleSeries: Array<{ series: LiveSeries; points: LivePoint[] }>,
-): MultiRange => {
+): { min: number; max: number; range: number } => {
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
 

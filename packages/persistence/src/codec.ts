@@ -76,7 +76,6 @@ export function decodeWith<S extends Schema.Top>(
   schema: S,
   operation: string,
   // SQL, JSON, and host values enter the typed application through this decoder.
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters
   value: unknown,
 ): Effect.Effect<S["Type"], PersistenceValidationError, S["DecodingServices"]> {
   return Schema.decodeUnknownEffect(schema)(value).pipe(
@@ -146,7 +145,6 @@ export function transactionError(operation: string, cause: unknown): Persistence
 export function toUint8Array(
   operation: string,
   // External boundary: Effect SQL may expose SQLite blobs in driver-native forms.
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters
   value: unknown,
 ): Effect.Effect<Uint8Array, PersistenceValidationError> {
   if (value instanceof Uint8Array) {

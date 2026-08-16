@@ -18,14 +18,10 @@ type StyleInput =
   | undefined;
 type HtmlFactory<Message> = ReturnType<typeof html<Message>>;
 
-interface HtmlStyleRecord {
-  [property: string]: string;
-}
-
 const toStyleRecord = (
   style: Readonly<{ readonly [key: string]: string | number }> | undefined,
-): HtmlStyleRecord => {
-  const record: HtmlStyleRecord = {};
+): Record<string, string> => {
+  const record: Record<string, string> = {};
   if (!style) return record;
   for (const [key, value] of Object.entries(style)) record[key] = String(value);
   return record;
@@ -202,7 +198,7 @@ export const appStyles = stylex.create({
     animationIterationCount: "infinite",
     animationTimingFunction: "linear",
   },
-  controlChrome: {
+  controlShape: {
     boxSizing: "border-box",
     height: 32,
     minHeight: 32,

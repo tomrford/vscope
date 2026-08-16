@@ -151,10 +151,7 @@ export const defaultSerialDriver: SerialDriver = {
 };
 
 // External boundary: serialport list results are untrusted until Schema decodes them.
-const decodeSerialPortInfo = (
-  // oxlint-disable-next-line anti-slop/no-unknown-parameters
-  info: unknown,
-): Effect.Effect<SerialPortInfo, SerialListError> =>
+const decodeSerialPortInfo = (info: unknown): Effect.Effect<SerialPortInfo, SerialListError> =>
   Schema.decodeUnknownEffect(SerialPortInfo)(info).pipe(
     Effect.mapError((cause) => new SerialListError({ cause })),
   );

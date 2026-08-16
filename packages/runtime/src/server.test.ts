@@ -446,19 +446,7 @@ function initializeMcp() {
   });
 }
 
-type McpToolCallArguments = {
-  readonly polling?: { readonly stateHz: number };
-  readonly timing?: { readonly totalDurationSeconds: number };
-  readonly values?: Readonly<Record<string, number>>;
-  readonly channels?: Readonly<Record<string, number>>;
-  readonly vendorId?: string;
-  readonly productId?: string;
-  readonly label?: string;
-  readonly id?: string;
-  readonly favorite?: boolean;
-};
-
-function callMcpTool(sessionId: string, id: number, name: string, args: McpToolCallArguments) {
+function callMcpTool(sessionId: string, id: number, name: string, args: Record<string, unknown>) {
   return HttpClientRequest.post("/mcp").pipe(
     HttpClientRequest.setHeaders({
       "Mcp-Session-Id": sessionId,

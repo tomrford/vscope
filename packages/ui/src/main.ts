@@ -160,7 +160,7 @@ const viewButton = (
       ...(options.title ? [h.Title(options.title)] : []),
       ...sx(
         h,
-        appStyles.controlChrome,
+        appStyles.controlShape,
         appStyles.btn,
         options.small && appStyles.btnSmall,
         options.variant === "primary" && appStyles.btnPrimary,
@@ -186,7 +186,7 @@ const viewField = (
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.input([
         h.Attribute("type", "number"),
-        ...sx(h, appStyles.controlChrome, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(value),
         h.OnInput(onInput),
         h.Disabled(options.disabled ?? false),
@@ -240,7 +240,7 @@ const viewConnection = (model: Model, h: H): Html => {
               h.Title(model.selectedPort || "Select a serial port"),
               ...sx(
                 h,
-                appStyles.controlChrome,
+                appStyles.controlShape,
                 appStyles.btn,
                 appStyles.btnSmall,
                 appStyles.portSelector,
@@ -333,7 +333,7 @@ const viewPortRow = (model: Model, port: RuntimePortInfo, h: H): Html => {
               h.Disabled(isBusy(model)),
               ...sx(
                 h,
-                appStyles.controlChrome,
+                appStyles.controlShape,
                 appStyles.portChoice,
                 selected && appStyles.portChoiceSelected,
               ),
@@ -354,17 +354,12 @@ const usbId = (port: RuntimePortInfo): string =>
 
 type Tone = "run" | "acquire" | "halt" | "fault" | "idle";
 
-type StateDescriptor = {
-  readonly label: string;
-  readonly tone: Tone;
-};
-
-const stateDescriptor = (model: Model): StateDescriptor => {
+const stateDescriptor = (model: Model): { readonly label: string; readonly tone: Tone } => {
   if (!model.linkUp || !isConnected(model)) return { label: "Disconnected", tone: "idle" };
   const state = deviceState(model);
   if (state === null) return { label: "Connecting", tone: "idle" };
   return Match.value(state).pipe(
-    Match.withReturnType<StateDescriptor>(),
+    Match.withReturnType<{ readonly label: string; readonly tone: Tone }>(),
     Match.when("running", () => ({ label: "Running", tone: "run" })),
     Match.when("acquiring", () => ({ label: "Acquiring", tone: "acquire" })),
     Match.when("halted", () => ({ label: "Halted", tone: "halt" })),
@@ -509,7 +504,7 @@ const viewActivityMenuButton = (model: Model, h: H): Html => {
           h.Title(label),
           ...sx(
             h,
-            appStyles.controlChrome,
+            appStyles.controlShape,
             appStyles.btn,
             open && appStyles.btnActive,
             appStyles.activityButton,
@@ -687,7 +682,7 @@ const viewTriggerPopover = (model: Model, h: H): Html => {
           h.span([...sx(h, appStyles.fieldLabel)], ["Channel"]),
           h.select(
             [
-              ...sx(h, appStyles.controlChrome, appStyles.select),
+              ...sx(h, appStyles.controlShape, appStyles.select),
               h.Attribute("value", model.triggerChannelDraft),
               h.OnChange((value) => TriggerChannelChanged({ value })),
             ],
@@ -713,7 +708,7 @@ const viewTriggerPopover = (model: Model, h: H): Html => {
           h.span([...sx(h, appStyles.fieldLabel)], ["Mode"]),
           h.select(
             [
-              ...sx(h, appStyles.controlChrome, appStyles.select),
+              ...sx(h, appStyles.controlShape, appStyles.select),
               h.Attribute("value", model.triggerModeDraft),
               h.OnChange((mode) => TriggerModeChanged({ mode: parseTriggerMode(mode) })),
             ],
@@ -754,7 +749,7 @@ const viewChannelsPopover = (model: Model, h: H): Html => {
               h.span([...sx(h, appStyles.mappingIndex)], [`Channel ${channel + 1}`]),
               h.select(
                 [
-                  ...sx(h, appStyles.controlChrome, appStyles.select),
+                  ...sx(h, appStyles.controlShape, appStyles.select),
                   h.Attribute("value", value),
                   h.OnChange((next) => ChannelMapChanged({ channel, value: next })),
                   h.Disabled(!canConfigure(model)),
@@ -814,7 +809,7 @@ const viewRtDialog = (model: Model, h: H): Html => {
                   h.span([...sx(h, appStyles.fieldLabel)], [labels[index] || `RT ${index + 1}`]),
                   h.input([
                     h.Attribute("type", "number"),
-                    ...sx(h, appStyles.controlChrome, appStyles.input),
+                    ...sx(h, appStyles.controlShape, appStyles.input),
                     h.Value(value),
                     h.OnInput((next) => RtValueChanged({ index, value: next })),
                     h.OnChange((next) => RtValueCommitted({ index, value: next })),
@@ -841,7 +836,7 @@ const viewSettingsSelect = (
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.select(
         [
-          ...sx(h, appStyles.controlChrome, appStyles.select),
+          ...sx(h, appStyles.controlShape, appStyles.select),
           h.Attribute("value", value),
           h.OnChange(onChange),
         ],
@@ -872,7 +867,7 @@ const viewSettingsTextField = (
       h.span([...sx(h, appStyles.fieldLabel)], [label]),
       h.input([
         h.Attribute("type", type),
-        ...sx(h, appStyles.controlChrome, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(value),
         h.OnInput((next) => SettingsTextChanged({ field, value: next })),
       ]),
@@ -1037,7 +1032,7 @@ const viewSaveSnapshotPopover = (model: Model, h: H): Html => {
     [
       viewPopoverHeader(h, "Save snapshot", "capture ready"),
       h.input([
-        ...sx(h, appStyles.controlChrome, appStyles.input),
+        ...sx(h, appStyles.controlShape, appStyles.input),
         h.Value(model.snapshotLabelDraft),
         h.OnInput((value) => SnapshotLabelChanged({ value })),
         h.OnKeyDownPreventDefault((key) =>
@@ -1071,7 +1066,7 @@ const viewLinkButton = (
       h.Target("_blank"),
       ...sx(
         h,
-        appStyles.controlChrome,
+        appStyles.controlShape,
         appStyles.btn,
         appStyles.linkBtn,
         options.small && appStyles.btnSmall,
@@ -1099,7 +1094,7 @@ const viewFavoriteButton = (
       h.Title(actionLabel),
       ...sx(
         h,
-        appStyles.controlChrome,
+        appStyles.controlShape,
         appStyles.btn,
         appStyles.btnSmall,
         appStyles.iconButton,
@@ -1142,13 +1137,7 @@ const viewDeleteButton = (model: Model, h: H, id: PersistentId, label: string): 
           h.AriaExpanded(confirming),
           h.AriaHasPopup("dialog"),
           h.Title(actionLabel),
-          ...sx(
-            h,
-            appStyles.controlChrome,
-            appStyles.btn,
-            appStyles.btnSmall,
-            appStyles.iconButton,
-          ),
+          ...sx(h, appStyles.controlShape, appStyles.btn, appStyles.btnSmall, appStyles.iconButton),
         ],
         [viewBinIcon(h)],
       ),
@@ -1373,7 +1362,7 @@ const viewViewerHeader = (h: H, subtitle: string, meta: string): Html =>
       h.a(
         [
           h.Href(liveHref()),
-          ...sx(h, appStyles.controlChrome, appStyles.btn, appStyles.btnSmall, appStyles.linkBtn),
+          ...sx(h, appStyles.controlShape, appStyles.btn, appStyles.btnSmall, appStyles.linkBtn),
         ],
         ["Live scope"],
       ),

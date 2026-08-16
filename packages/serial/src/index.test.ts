@@ -795,22 +795,6 @@ describe("@vscope/serial manager", () => {
   });
 });
 
-interface FakeFirmwareTiming {
-  divider: number;
-  preTrig: number;
-}
-
-interface FakeControlSignals {
-  dtr: boolean;
-  rts: boolean;
-}
-
-interface FakeTrigger {
-  threshold: number;
-  channel: number;
-  mode: VScopeTriggerModeValue;
-}
-
 interface FakeFirmwareResponse {
   readonly requestType: VScopeMessageType;
   readonly bytes: Uint8Array;
@@ -991,14 +975,14 @@ class FakeFirmware {
   readonly onResponseReady: ((type: VScopeMessageType) => void) | undefined;
   closeAttempts = 0;
   #closeFailures: number;
-  timing: FakeFirmwareTiming = { divider: 1, preTrig: 0 };
+  timing = { divider: 1, preTrig: 0 };
   state: VScopeStateValue = VScopeState.Halted;
   requestedState: VScopeStateValue = VScopeState.Halted;
   acquisitionReadsRemaining = 0;
   snapshotValid: boolean;
-  controlSignals: FakeControlSignals = { dtr: false, rts: false };
+  controlSignals: { dtr: boolean; rts: boolean } = { dtr: false, rts: false };
   channelMap = [0, 1, 2, 3, 4];
-  trigger: FakeTrigger = {
+  trigger: { threshold: number; channel: number; mode: VScopeTriggerModeValue } = {
     threshold: 0,
     channel: 0,
     mode: VScopeTriggerMode.Disabled,

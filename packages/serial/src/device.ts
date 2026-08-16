@@ -683,12 +683,10 @@ const decodeTimingResponse = (reader: ByteReader, info: VScopeDeviceInfo): VScop
   return decodeTiming(info, divider, preTrig);
 };
 
-interface FirmwareTiming {
-  readonly divider: number;
-  readonly preTrig: number;
-}
-
-const encodeTiming = (info: VScopeDeviceInfo, timing: VScopeTiming): FirmwareTiming => {
+const encodeTiming = (
+  info: VScopeDeviceInfo,
+  timing: VScopeTiming,
+): { readonly divider: number; readonly preTrig: number } => {
   const sampleRateHz = baseSampleRateHz(info);
   const totalSamples = Math.round(timing.totalDurationSeconds * sampleRateHz);
   const divider = Math.round(totalSamples / info.bufferSize);

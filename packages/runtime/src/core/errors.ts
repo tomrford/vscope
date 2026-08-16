@@ -46,7 +46,6 @@ export function describeRuntimeCoreError(error: RuntimeCoreError): string {
   }
 }
 
-// Diagnostic boundary: foreign nested causes have no stronger runtime contract.
 export function describeError(cause: unknown): string {
   if (cause instanceof Error) {
     return cause.message || describeTaggedError(cause);
@@ -73,8 +72,6 @@ function describeTaggedError(cause: unknown): string {
   return details.length > 0 ? `${cause._tag}: ${details.join(", ")}` : cause._tag;
 }
 
-// Diagnostic boundary: Object.entries erases each tagged error field type.
-// oxlint-disable-next-line anti-slop/no-unknown-parameters
 function describeErrorField(value: unknown): string {
   if (value instanceof Error) {
     return describeError(value);
