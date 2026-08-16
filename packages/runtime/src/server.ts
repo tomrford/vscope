@@ -321,7 +321,9 @@ function handleSnapshotSamples() {
       Schema.isSchemaError,
       () => Effect.succeed(HttpServerResponse.text("Invalid snapshot request.", { status: 400 })),
       () =>
-        Effect.succeed(HttpServerResponse.text("Failed to read snapshot samples.", { status: 400 })),
+        Effect.succeed(
+          HttpServerResponse.text("Failed to read snapshot samples.", { status: 400 }),
+        ),
     ),
   );
 }
