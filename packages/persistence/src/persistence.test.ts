@@ -174,7 +174,25 @@ describe("@vscope/persistence", () => {
             expect(settings.settings).toEqual(DEFAULT_SETTINGS);
             expect(settings.recovery.pending).toBe(true);
             expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
+          }),
+        );
 
+        const recoveryPending = yield* runWithSql(
+          path,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const rows = yield* sql<{ recovery_pending: number }>`
+              SELECT recovery_pending FROM settings WHERE id = 1
+            `;
+            return rows[0]?.recovery_pending;
+          }),
+        );
+        expect(recoveryPending).toBe(1);
+
+        yield* runWithPersistence(
+          path,
+          Effect.gen(function* () {
+            const persistence = yield* Persistence;
             const resetSettings = yield* persistence.resetSettings;
             expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
             expect(resetSettings.recovery.pending).toBe(false);
@@ -567,122 +585,6 @@ describe("@vscope/persistence", () => {
           }),
           favorite: 1,
         });
-      }),
-    ),
-  );
-
-  it.effect("drops well-formed snapshot rows that fail the record contract", () =>
-    withTempPath((path) =>
-      Effect.gen(function* () {
-        const snapshot = yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            return yield* persistence.createSnapshot(snapshotDraft("Valid trace", 1));
-          }),
-        );
-
-        yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            yield* sql`
-            INSERT INTO snapshots (
-              id,
-              label,
-              device_name,
-              channel_count,
-              sample_count,
-              sample_format,
-              sample_rate_hz,
-              total_duration_seconds,
-              pre_trigger_seconds,
-              channel_map_json,
-              trigger_json,
-              rt_values_json,
-              metadata_json,
-              created_at,
-              updated_at
-            ) VALUES (
-              ${"snapshot:inconsistent"},
-              ${"Inconsistent trace"},
-              ${"probe-a"},
-              ${2},
-              ${1},
-              ${SNAPSHOT_SAMPLE_FORMAT},
-              ${1_000},
-              ${0.001},
-              ${0},
-              ${"[0]"},
-              ${JSON.stringify({ threshold: 0.5, channel: 1, mode: "rising" })},
-              ${"[0,1]"},
-              ${"{}"},
-              ${"2026-06-13T08:00:00.000Z"},
-              ${"2026-06-13T08:00:00.000Z"}
-            )
-          `;
-          }),
-        );
-
-        const listed = yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            return yield* persistence.listSnapshots();
-          }),
-        );
-        expect(listed).toEqual([snapshot]);
-
-        const ids = yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            const rows = yield* sql<{ id: string }>`SELECT id FROM snapshots ORDER BY id`;
-            return rows.map((row) => row.id);
-          }),
-        );
-        expect(ids).toEqual([snapshot.id]);
-      }),
-    ),
-  );
-
-  it.effect("keeps recovery_pending as an integer bit after settings reset", () =>
-    withTempPath((path) =>
-      Effect.gen(function* () {
-        yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            yield* persistence.readSettings;
-          }),
-        );
-        yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            yield* sql`UPDATE settings SET data_json = ${"{"} WHERE id = 1`;
-          }),
-        );
-        yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            const settings = yield* persistence.readSettings;
-            expect(settings.recovery.pending).toBe(true);
-          }),
-        );
-
-        const pending = yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            const rows = yield* sql<{ recovery_pending: number }>`
-              SELECT recovery_pending FROM settings WHERE id = 1
-            `;
-            return rows[0]?.recovery_pending;
-          }),
-        );
-        expect(pending).toBe(1);
       }),
     ),
   );

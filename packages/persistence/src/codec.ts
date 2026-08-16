@@ -46,7 +46,7 @@ export const SettingsWrite = Schema.Struct({
   }),
 );
 
-const SnapshotSqlFields = Schema.Struct({
+const SnapshotStoredRow = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   device_name: Schema.String,
@@ -63,54 +63,78 @@ const SnapshotSqlFields = Schema.Struct({
   favorite: Schema.BooleanFromBit,
   created_at: Schema.String,
   updated_at: Schema.String,
-  has_samples: Schema.BooleanFromBit,
 });
 
-export const SnapshotSql = SnapshotSqlFields.pipe(
+type SnapshotStoredRow = Schema.Schema.Type<typeof SnapshotStoredRow>;
+
+function snapshotRecord(row: SnapshotStoredRow, stored: boolean) {
+  return {
+    id: row.id,
+    label: row.label,
+    device: {
+      name: row.device_name,
+    },
+    sample: {
+      format: row.sample_format,
+      channelCount: row.channel_count,
+      sampleCount: row.sample_count,
+      byteLength: snapshotSampleByteLength(row.channel_count, row.sample_count),
+      stored,
+    },
+    sampleRateHz: row.sample_rate_hz,
+    totalDurationSeconds: row.total_duration_seconds,
+    preTriggerSeconds: row.pre_trigger_seconds,
+    channelMap: row.channel_map_json,
+    trigger: row.trigger_json,
+    rtValues: row.rt_values_json,
+    metadata: row.metadata_json,
+    favorite: row.favorite,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function storedSnapshotRow(record: Schema.Codec.Encoded<typeof SnapshotRecord>) {
+  return {
+    id: record.id,
+    label: record.label,
+    device_name: record.device.name,
+    channel_count: record.sample.channelCount,
+    sample_count: record.sample.sampleCount,
+    sample_format: record.sample.format,
+    sample_rate_hz: record.sampleRateHz,
+    total_duration_seconds: record.totalDurationSeconds,
+    pre_trigger_seconds: record.preTriggerSeconds,
+    channel_map_json: record.channelMap,
+    trigger_json: record.trigger,
+    rt_values_json: record.rtValues,
+    metadata_json: record.metadata,
+    favorite: record.favorite,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+  };
+}
+
+export const SnapshotWrite = SnapshotStoredRow.pipe(
   Schema.decodeTo(
     SnapshotRecord,
     SchemaTransformation.transform({
-      decode: (row) => ({
-        id: row.id,
-        label: row.label,
-        device: {
-          name: row.device_name,
-        },
-        sample: {
-          format: row.sample_format,
-          channelCount: row.channel_count,
-          sampleCount: row.sample_count,
-          byteLength: snapshotSampleByteLength(row.channel_count, row.sample_count),
-          stored: row.has_samples,
-        },
-        sampleRateHz: row.sample_rate_hz,
-        totalDurationSeconds: row.total_duration_seconds,
-        preTriggerSeconds: row.pre_trigger_seconds,
-        channelMap: row.channel_map_json,
-        trigger: row.trigger_json,
-        rtValues: row.rt_values_json,
-        metadata: row.metadata_json,
-        favorite: row.favorite,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      }),
+      decode: (row) => snapshotRecord(row, false),
+      encode: storedSnapshotRow,
+    }),
+  ),
+);
+
+export const SnapshotRow = Schema.Struct({
+  ...SnapshotStoredRow.fields,
+  has_samples: Schema.BooleanFromBit,
+}).pipe(
+  Schema.decodeTo(
+    SnapshotRecord,
+    SchemaTransformation.transform({
+      decode: (row) => snapshotRecord(row, row.has_samples),
       encode: (record) => ({
-        id: record.id,
-        label: record.label,
-        device_name: record.device.name,
-        channel_count: record.sample.channelCount,
-        sample_count: record.sample.sampleCount,
-        sample_format: record.sample.format,
-        sample_rate_hz: record.sampleRateHz,
-        total_duration_seconds: record.totalDurationSeconds,
-        pre_trigger_seconds: record.preTriggerSeconds,
-        channel_map_json: record.channelMap,
-        trigger_json: record.trigger,
-        rt_values_json: record.rtValues,
-        metadata_json: record.metadata,
-        favorite: record.favorite,
-        created_at: record.createdAt,
-        updated_at: record.updatedAt,
+        ...storedSnapshotRow(record),
         has_samples: record.sample.stored,
       }),
     }),
@@ -125,7 +149,7 @@ export const SnapshotSampleRow = Schema.Struct({
 });
 
 export const SnapshotRowId = Schema.Struct({
-  id: Schema.String,
+  id: PersistentId,
 });
 
 export const SnapshotFavoriteWrite = Schema.Struct({
@@ -137,10 +161,6 @@ export const SnapshotFavoriteWrite = Schema.Struct({
     updatedAt: "updated_at",
   }),
 );
-
-export const PrunedSnapshotId = Schema.Struct({
-  id: Schema.String,
-});
 
 export const createTimestamp = Effect.fn("Persistence.createTimestamp")(function* () {
   return yield* decodeWith(Timestamp, "create timestamp", new Date().toISOString());

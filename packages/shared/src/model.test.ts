@@ -4,7 +4,9 @@ import { Schema } from "effect";
 import {
   DEFAULT_SERIAL_CONFIG,
   PersistentId,
+  SNAPSHOT_SAMPLE_FORMAT,
   SnapshotRecord,
+  SnapshotSampleDescriptor,
   SnapshotTrigger,
   Timestamp,
 } from "./model.ts";
@@ -41,13 +43,13 @@ describe("snapshot record contract", () => {
     id: PersistentId.make("snapshot:test"),
     label: "Boot trace",
     device: { name: "probe-a" },
-    sample: {
-      format: "f32le-interleaved-v1" as const,
+    sample: SnapshotSampleDescriptor.make({
+      format: SNAPSHOT_SAMPLE_FORMAT,
       channelCount: 2,
       sampleCount: 1,
       byteLength: 8,
       stored: false,
-    },
+    }),
     sampleRateHz: 1_000,
     totalDurationSeconds: 0.001,
     preTriggerSeconds: 0,
