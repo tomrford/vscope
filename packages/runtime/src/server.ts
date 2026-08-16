@@ -51,17 +51,12 @@ import {
 import { RuntimeEndpoint, type RuntimeConfig } from "./config";
 import { RuntimeCore, RuntimeCoreLive } from "./core";
 import {
-  describeError,
   describeRuntimeCoreError,
   RuntimeCorePolicyError,
   type RuntimeCoreError,
 } from "./core/errors";
 import type { CoreCommand } from "./core/model";
 import type { RuntimeCoreService } from "./core/service";
-
-const JsonContent = {
-  "content-type": "application/json",
-} as const;
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
@@ -164,7 +159,7 @@ export function makeRuntimeHttpLayer(config: RuntimeConfig) {
     Effect.gen(function* () {
       const router = yield* HttpRouter.HttpRouter;
 
-      yield* router.add("GET", RuntimeEndpoint.health, jsonResponse({ status: "ok" }));
+      yield* router.add("GET", RuntimeEndpoint.health, HttpServerResponse.json({ status: "ok" }));
       yield* router.add("GET", `${RuntimeEndpoint.snapshots}/:id/samples`, handleSnapshotSamples());
     }),
   );
@@ -309,7 +304,7 @@ function handleSnapshotSamples() {
     const id = yield* Schema.decodeUnknownEffect(PersistentId)(params.id);
     const samples = yield* core.readSnapshotSamples(id);
     if (!samples) {
-      return errorJsonResponse("Snapshot samples not found.", 404);
+      return HttpServerResponse.text("Snapshot samples not found.", { status: 404 });
     }
     return HttpServerResponse.uint8Array(samples.data, {
       contentType: "application/octet-stream",
@@ -322,26 +317,14 @@ function handleSnapshotSamples() {
       },
     });
   }).pipe(
-    Effect.matchEffect({
-      onFailure: (cause) => Effect.succeed(errorJsonResponse(describeError(cause), 400)),
-      onSuccess: Effect.succeed,
-    }),
-  );
-}
-
-function jsonResponse(body: Schema.Json, status = 200) {
-  return HttpServerResponse.jsonUnsafe(body, { status, headers: JsonContent });
-}
-
-function errorJsonResponse(message: string, status: number) {
-  return jsonResponse(
-    {
-      ok: false,
-      error: {
-        message,
-      },
-    },
-    status,
+    Effect.catchIf(
+      Schema.isSchemaError,
+      () => Effect.succeed(HttpServerResponse.text("Invalid snapshot request.", { status: 400 })),
+      () =>
+        Effect.succeed(
+          HttpServerResponse.text("Failed to read snapshot samples.", { status: 400 }),
+        ),
+    ),
   );
 }
 
