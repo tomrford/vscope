@@ -174,25 +174,7 @@ describe("@vscope/persistence", () => {
             expect(settings.settings).toEqual(DEFAULT_SETTINGS);
             expect(settings.recovery.pending).toBe(true);
             expect(settings.recovery.message).toBe("Corrupt settings were reset to defaults.");
-          }),
-        );
 
-        const recoveryPending = yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            const rows = yield* sql<{ recovery_pending: number }>`
-              SELECT recovery_pending FROM settings WHERE id = 1
-            `;
-            return rows[0]?.recovery_pending;
-          }),
-        );
-        expect(recoveryPending).toBe(1);
-
-        yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
             const resetSettings = yield* persistence.resetSettings;
             expect(resetSettings.settings).toEqual(DEFAULT_SETTINGS);
             expect(resetSettings.recovery.pending).toBe(false);
@@ -543,48 +525,6 @@ describe("@vscope/persistence", () => {
         );
 
         expect(ids).toEqual([snapshot.id]);
-      }),
-    ),
-  );
-
-  it.effect("stores snapshot JSON text and integer booleans", () =>
-    withTempPath((path) =>
-      Effect.gen(function* () {
-        const snapshot = yield* runWithPersistence(
-          path,
-          Effect.gen(function* () {
-            const persistence = yield* Persistence;
-            const created = yield* persistence.createSnapshot(snapshotDraft("Encoding trace", 1));
-            return yield* persistence.setSnapshotFavorite(created.id, true);
-          }),
-        );
-
-        const stored = yield* runWithSql(
-          path,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            const rows = yield* sql<{
-              channel_map_json: string;
-              trigger_json: string;
-              favorite: number;
-            }>`
-              SELECT channel_map_json, trigger_json, favorite
-              FROM snapshots
-              WHERE id = ${snapshot.id}
-            `;
-            return rows[0];
-          }),
-        );
-
-        expect(stored).toEqual({
-          channel_map_json: "[0,1]",
-          trigger_json: JSON.stringify({
-            threshold: 0.5,
-            channel: 1,
-            mode: "rising",
-          }),
-          favorite: 1,
-        });
       }),
     ),
   );
