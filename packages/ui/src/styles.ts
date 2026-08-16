@@ -18,10 +18,14 @@ type StyleInput =
   | undefined;
 type HtmlFactory<Message> = ReturnType<typeof html<Message>>;
 
+interface HtmlStyleRecord {
+  [property: string]: string;
+}
+
 const toStyleRecord = (
   style: Readonly<{ readonly [key: string]: string | number }> | undefined,
-): Record<string, string> => {
-  const record: Record<string, string> = {};
+): HtmlStyleRecord => {
+  const record: HtmlStyleRecord = {};
   if (!style) return record;
   for (const [key, value] of Object.entries(style)) record[key] = String(value);
   return record;

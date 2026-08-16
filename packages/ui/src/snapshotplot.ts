@@ -243,12 +243,14 @@ export const snapshotsCompatible = (left: SnapshotRecord, right: SnapshotRecord)
 // A comparison shares one time axis, one set of channel labels and one trigger
 // marker, all taken from the leading capture. Snapshot routes are raw input, so
 // the set is filtered here as well as in the picker.
-export const partitionByCompatibility = (
-  records: ReadonlyArray<SnapshotRecord>,
-): {
+export interface SnapshotCompatibilityPartition {
   readonly compatible: ReadonlyArray<SnapshotRecord>;
   readonly incompatible: ReadonlyArray<SnapshotRecord>;
-} => {
+}
+
+export const partitionByCompatibility = (
+  records: ReadonlyArray<SnapshotRecord>,
+): SnapshotCompatibilityPartition => {
   const anchor = records[0];
   if (!anchor) return { compatible: [], incompatible: [] };
 
