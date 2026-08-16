@@ -354,12 +354,17 @@ const usbId = (port: RuntimePortInfo): string =>
 
 type Tone = "run" | "acquire" | "halt" | "fault" | "idle";
 
-const stateDescriptor = (model: Model): { readonly label: string; readonly tone: Tone } => {
+type StateDescriptor = {
+  readonly label: string;
+  readonly tone: Tone;
+};
+
+const stateDescriptor = (model: Model): StateDescriptor => {
   if (!model.linkUp || !isConnected(model)) return { label: "Disconnected", tone: "idle" };
   const state = deviceState(model);
   if (state === null) return { label: "Connecting", tone: "idle" };
   return Match.value(state).pipe(
-    Match.withReturnType<{ readonly label: string; readonly tone: Tone }>(),
+    Match.withReturnType<StateDescriptor>(),
     Match.when("running", () => ({ label: "Running", tone: "run" })),
     Match.when("acquiring", () => ({ label: "Acquiring", tone: "acquire" })),
     Match.when("halted", () => ({ label: "Halted", tone: "halt" })),
