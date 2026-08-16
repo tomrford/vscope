@@ -4,8 +4,11 @@ import { Effect, Schema } from "effect";
 import type { SqlError } from "effect/unstable/sql/SqlError";
 
 import {
+  PersistenceMigrationError,
+  PersistenceOpenError,
   PersistenceQueryError,
   PersistenceValidationError,
+  SnapshotNotFoundError,
   errorReason,
   type PersistenceError,
 } from "./errors.ts";
@@ -49,18 +52,9 @@ export const SnapshotSampleRow = Schema.Struct({
   updated_at: Schema.String,
 });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-export function stringProperty(value: unknown, key: string): string | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const candidate = value[key];
-  return typeof candidate === "string" ? candidate : null;
-}
+export const SnapshotRowId = Schema.Struct({
+  id: Schema.String,
+});
 
 export const createTimestamp = Effect.fn("Persistence.createTimestamp")(function* () {
   return yield* decodeWith(Timestamp, "create timestamp", new Date().toISOString());
@@ -143,20 +137,13 @@ export function runSql<A>(
 }
 
 function isPersistenceError(cause: unknown): cause is PersistenceError {
-  if (!isRecord(cause)) {
-    return false;
-  }
-
-  switch (cause._tag) {
-    case "PersistenceOpenError":
-    case "PersistenceMigrationError":
-    case "PersistenceQueryError":
-    case "PersistenceValidationError":
-    case "SnapshotNotFoundError":
-      return true;
-    default:
-      return false;
-  }
+  return (
+    cause instanceof PersistenceOpenError ||
+    cause instanceof PersistenceMigrationError ||
+    cause instanceof PersistenceQueryError ||
+    cause instanceof PersistenceValidationError ||
+    cause instanceof SnapshotNotFoundError
+  );
 }
 
 export function transactionError(operation: string, cause: unknown): PersistenceError {
