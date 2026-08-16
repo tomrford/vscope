@@ -7,7 +7,7 @@ import {
   type TimeDomain,
 } from "@vscope/liveplot";
 import { RuntimeEndpoint, type SnapshotRecord, type Theme } from "@vscope/shared";
-import { Effect } from "effect";
+import { Effect, Exit, Schema } from "effect";
 
 import { channelColor } from "./liveplot.ts";
 
@@ -204,11 +204,11 @@ export const loadSnapshotSamples = Effect.fn("SnapshotSamples.load")(function* (
 
 // --- channel labels -----------------------------------------------------
 
+const SnapshotVariableNames = Schema.Array(Schema.String);
+
 const metadataVariables = (record: SnapshotRecord): ReadonlyArray<string> => {
-  const variables = record.metadata["variables"];
-  return Array.isArray(variables)
-    ? variables.map((entry) => (typeof entry === "string" ? entry : ""))
-    : [];
+  const decoded = Schema.decodeUnknownExit(SnapshotVariableNames)(record.metadata["variables"]);
+  return Exit.isSuccess(decoded) ? decoded.value : [];
 };
 
 export const snapshotChannelLabels = (record: SnapshotRecord): ReadonlyArray<string> => {

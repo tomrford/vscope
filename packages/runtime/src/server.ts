@@ -345,13 +345,13 @@ function jsonResponse(body: unknown, status = 200) {
   return HttpServerResponse.jsonUnsafe(body, { status, headers: JsonContent });
 }
 
-function errorResponse(error: unknown) {
+function errorResponse(error: Schema.SchemaError | RuntimeCoreError) {
   return Effect.succeed(
     jsonResponse(
       {
         ok: false,
         error: {
-          message: describeError(error),
+          message: describeHttpError(error),
         },
       },
       400,
@@ -359,39 +359,12 @@ function errorResponse(error: unknown) {
   );
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || describeTaggedError(error);
+function describeHttpError(error: Schema.SchemaError | RuntimeCoreError): string {
+  if (Schema.isSchemaError(error)) {
+    return error.message;
   }
 
-  return describeTaggedError(error);
-}
-
-function describeTaggedError(error: unknown): string {
-  if (typeof error !== "object" || error === null) {
-    return String(error);
-  }
-
-  if ("_tag" in error && typeof error._tag === "string") {
-    const details = Object.entries(error)
-      .filter(([key]) => key !== "_tag" && key !== "stack")
-      .map(([key, value]) => `${key}=${describeErrorField(value)}`);
-    return details.length > 0 ? `${error._tag}: ${details.join(", ")}` : error._tag;
-  }
-
-  return String(error);
-}
-
-function describeErrorField(value: unknown): string {
-  if (value instanceof Error) {
-    return describeError(value);
-  }
-
-  if (typeof value === "object" && value !== null && "_tag" in value) {
-    return describeTaggedError(value);
-  }
-
-  return JSON.stringify(value) ?? String(value);
+  return describeRuntimeCoreError(error);
 }
 
 function runtimeApiError(error: RuntimeCoreError): RuntimeApiError {

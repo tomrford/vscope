@@ -34,7 +34,7 @@ import {
   decodeWith,
   runSql,
   stringifyJson,
-  stringProperty,
+  SnapshotRowId,
   toUint8Array,
   transactionError,
   validateSamplesForDescriptor,
@@ -422,7 +422,12 @@ export const makePersistence = Effect.fn("Persistence.make")(function* (
       );
 
       if (decoded === null) {
-        const id = stringProperty(row, "id");
+        const id = yield* decodeWith(SnapshotRowId, "decode corrupt snapshot id", row).pipe(
+          Effect.match({
+            onFailure: () => null,
+            onSuccess: (decodedRow) => decodedRow.id,
+          }),
+        );
         if (id !== null) {
           corruptIds.push(id);
         }
