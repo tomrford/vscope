@@ -72,7 +72,7 @@ describe("liveplot math", () => {
       bezierCurveTo: (...args: number[]) => {
         calls.push(args);
       },
-    } as unknown as CanvasRenderingContext2D;
+    };
 
     const pts: Array<[number, number]> = [
       [0, 0],
