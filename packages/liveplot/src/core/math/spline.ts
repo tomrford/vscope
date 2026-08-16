@@ -3,10 +3,15 @@
  * Source commit: a913578832784bb6abdb148b6af9cf1739be2759
  */
 
+export interface SplineStroke {
+  lineTo(x: number, y: number): void;
+  bezierCurveTo(cp1x: number, cp1y: number, cp2x: number, cp2y: number, x: number, y: number): void;
+}
+
 /**
  * Draw monotone cubic spline through points using Fritsch-Carlson tangents.
  */
-export const drawSpline = (ctx: CanvasRenderingContext2D, pts: Array<[number, number]>): void => {
+export const drawSpline = (ctx: SplineStroke, pts: Array<[number, number]>): void => {
   if (pts.length < 2) return;
   if (pts.length === 2) {
     ctx.lineTo(pts[1][0], pts[1][1]);

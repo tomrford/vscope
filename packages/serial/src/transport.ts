@@ -142,18 +142,15 @@ interface TransportState {
   closed: boolean;
 }
 
-// Sole external trust boundary: the `serialport` package's constructor/callback
-// types are looser than the SerialPortConstructor contract we drive it through.
-// This is the one sanctioned `as` in the codebase — do not copy it; decode or
-// validate at other boundaries instead.
-const serialPortConstructor = SerialPort as unknown as SerialPortConstructor;
-
 export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => ({
   list: () => Port.list(),
   open: (options, callback) => new Port(options, callback),
 });
 
-export const defaultSerialDriver: SerialDriver = makeSerialDriver(serialPortConstructor);
+export const defaultSerialDriver: SerialDriver = {
+  list: () => SerialPort.list(),
+  open: (options, callback) => new SerialPort(options, callback),
+};
 
 const serialPortInfoInput = (info: unknown): SerialPortInfoInput => {
   const value = isRecord(info) ? info : {};
