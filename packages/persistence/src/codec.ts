@@ -14,10 +14,13 @@ import {
 } from "./errors.ts";
 import {
   PersistentId,
+  Settings,
   SnapshotDraft,
   SnapshotSampleDescriptor,
   SnapshotSamplesWrite,
+  SnapshotTrigger,
   Timestamp,
+  type JsonObject,
 } from "@vscope/shared";
 
 export const SingletonRow = Schema.Struct({
@@ -105,9 +108,11 @@ export function decodeJson<S extends Schema.Top>(
   );
 }
 
+export type PersistableJson = Settings | SnapshotTrigger | JsonObject | ReadonlyArray<number>;
+
 export function stringifyJson(
   operation: string,
-  value: string | number | boolean | null | object,
+  value: PersistableJson,
 ): Effect.Effect<string, PersistenceValidationError> {
   return Effect.try({
     try: () => JSON.stringify(value),
