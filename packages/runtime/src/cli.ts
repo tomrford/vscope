@@ -34,7 +34,8 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
   const config = makeRuntimeConfig({
     version: packageVersion,
     databasePath: paths.databasePath,
-    ...(parsed.port === undefined ? {} : { port: parsed.port, portOverride: true }),
+    port: parsed.port ?? DEFAULT_RUNTIME_PORT,
+    portOverride: parsed.port !== undefined,
     uiDistPath,
   });
 

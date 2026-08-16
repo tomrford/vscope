@@ -30,6 +30,9 @@ export class SerialPortInfo extends Schema.Class<SerialPortInfo>("SerialPortInfo
 }) {}
 
 type SerialPortInfoInput = Parameters<typeof SerialPortInfo.make>[0];
+type MutableSerialPortInfoInput = {
+  -readonly [K in keyof SerialPortInfoInput]: SerialPortInfoInput[K];
+};
 
 export interface SerialOpenOptions {
   readonly path: string;
@@ -155,15 +158,30 @@ export const defaultSerialDriver: SerialDriver = {
   open: (options, callback) => new SerialPort(options, callback),
 };
 
-const serialPortInfoInput = (info: SerialPortListItem): SerialPortInfoInput => ({
-  path: info.path,
-  ...(info.manufacturer !== undefined ? { manufacturer: info.manufacturer } : {}),
-  ...(info.serialNumber !== undefined ? { serialNumber: info.serialNumber } : {}),
-  ...(info.pnpId !== undefined ? { pnpId: info.pnpId } : {}),
-  ...(info.locationId !== undefined ? { locationId: info.locationId } : {}),
-  ...(info.productId !== undefined ? { productId: info.productId } : {}),
-  ...(info.vendorId !== undefined ? { vendorId: info.vendorId } : {}),
-});
+const serialPortInfoInput = (info: SerialPortListItem): SerialPortInfoInput => {
+  const input: MutableSerialPortInfoInput = {
+    path: info.path,
+  };
+  if (info.manufacturer !== undefined) {
+    input.manufacturer = info.manufacturer;
+  }
+  if (info.serialNumber !== undefined) {
+    input.serialNumber = info.serialNumber;
+  }
+  if (info.pnpId !== undefined) {
+    input.pnpId = info.pnpId;
+  }
+  if (info.locationId !== undefined) {
+    input.locationId = info.locationId;
+  }
+  if (info.productId !== undefined) {
+    input.productId = info.productId;
+  }
+  if (info.vendorId !== undefined) {
+    input.vendorId = info.vendorId;
+  }
+  return input;
+};
 
 const decodeSerialPortInfo = (
   info: SerialPortListItem,
