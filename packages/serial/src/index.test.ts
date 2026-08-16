@@ -32,12 +32,10 @@ import {
   type VScopeTriggerMode as VScopeTriggerModeValue,
 } from "./protocol";
 import {
-  makeSerialDriver,
   SerialCloseError,
   type SerialCallback,
   type SerialDriver,
   type SerialOpenOptions,
-  type SerialPortConstructor,
   type SerialPortLike,
 } from "./transport";
 import { VScopeEndianness as Endianness } from "./protocol";
@@ -376,9 +374,9 @@ describe("@vscope/serial device", () => {
       );
       const invalidTriggerMode = yield* Effect.exit(
         device.setTrigger({
-          threshold: 0,
+          threshold: Number.NaN,
           channel: 0,
-          mode: "edge" as never,
+          mode: "rising",
         }),
       );
 
@@ -845,15 +843,14 @@ const fakeDriver = (devices: ReadonlyArray<FakeFirmware>): SerialDriver => {
     }
   }
 
-  Object.defineProperty(FakePort, "list", {
-    value: async () =>
+  return {
+    list: async () =>
       Array.from(byPath.values()).map((device) => ({
         path: device.path,
         manufacturer: "vscope-test",
       })),
-  });
-
-  return makeSerialDriver(FakePort as unknown as SerialPortConstructor);
+    open: (options, callback) => new FakePort(options, callback),
+  };
 };
 
 class MemorySerialPort extends EventEmitter implements SerialPortLike {

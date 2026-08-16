@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import { clampDomain, panDomain, zoomDomain } from "./math/domain";
 import { lerp } from "./math/lerp";
-import { drawSpline } from "./math/spline";
+import { drawSpline, type SplinePath } from "./math/spline";
 import { formatDomainSeconds, niceTimeInterval, formatRelativeSeconds } from "./math/intervals";
 
 describe("liveplot math", () => {
@@ -67,12 +67,12 @@ describe("liveplot math", () => {
 
   it("spline control points stay in segment x-bounds", () => {
     const calls: number[][] = [];
-    const ctx = {
+    const ctx: SplinePath = {
       lineTo: () => {},
       bezierCurveTo: (...args: number[]) => {
         calls.push(args);
       },
-    } as unknown as CanvasRenderingContext2D;
+    };
 
     const pts: Array<[number, number]> = [
       [0, 0],

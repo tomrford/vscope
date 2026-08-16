@@ -142,11 +142,10 @@ interface TransportState {
   closed: boolean;
 }
 
-// Sole external trust boundary: the `serialport` package's constructor/callback
-// types are looser than the SerialPortConstructor contract we drive it through.
-// This is the one sanctioned `as` in the codebase — do not copy it; decode or
-// validate at other boundaries instead.
-const serialPortConstructor = SerialPort as unknown as SerialPortConstructor;
+// SAFETY: `serialport` exports this Node native binding as the port constructor.
+// The published package type is not SerialPortConstructor; the runtime value is
+// that same construct function, including static `list`.
+const serialPortConstructor = SerialPort as SerialPortConstructor;
 
 export const makeSerialDriver = (Port: SerialPortConstructor): SerialDriver => ({
   list: () => Port.list(),

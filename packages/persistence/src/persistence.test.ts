@@ -227,7 +227,7 @@ describe("@vscope/persistence", () => {
             path,
             Effect.gen(function* () {
               const persistence = yield* Persistence;
-              yield* persistence.patchSettings({ theme: "purple" as never });
+              yield* persistence.patchSettings({ polling: { stateHz: 0 } });
             }),
           ),
         );
@@ -420,24 +420,13 @@ describe("@vscope/persistence", () => {
         expect(impossibleError).toMatchObject({ _tag: "PersistenceValidationError" });
 
         const triggerModeError = yield* Effect.flip(
-          runWithPersistence(
-            path,
-            Effect.gen(function* () {
-              const persistence = yield* Persistence;
-              const invalid = {
-                ...snapshotDraft("Invalid trigger mode", 1),
-                trigger: {
-                  threshold: 0.5,
-                  channel: 0,
-                  mode: "edge" as never,
-                },
-              };
-
-              yield* persistence.createSnapshot(invalid as never);
-            }),
-          ),
+          Schema.decodeUnknownEffect(SnapshotTrigger)({
+            threshold: 0.5,
+            channel: 0,
+            mode: "edge",
+          }),
         );
-        expect(triggerModeError).toMatchObject({ _tag: "PersistenceValidationError" });
+        expect(triggerModeError._tag).toBe("ParseError");
 
         yield* runWithPersistence(
           path,
