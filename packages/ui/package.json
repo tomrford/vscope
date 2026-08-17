@@ -9,7 +9,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
-    "test": "VITEST=1 vitest run src"
+    "test": "vitest run src"
   },
   "dependencies": {
     "@effect/platform-browser": "4.0.0-beta.78",
