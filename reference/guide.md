@@ -1,7 +1,5 @@
 # vscope firmware integration
 
-You are wiring this firmware project to [vscope](https://github.com/tomrford/vscope), a local host that plots variables over USB serial.
-
 These files are the protocol for the installed vscope release. Do not invent a second protocol. Do not edit `vscope.c` or `vscope.h` unless the user asks.
 
 ## Files

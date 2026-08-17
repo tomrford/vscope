@@ -39,22 +39,15 @@ vscope stores settings and snapshots in your operating system's application data
 
 ## Add the firmware
 
-From your firmware project, write the matching sources into `./vscope`:
+The npm package includes the matching [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h) files. Add both files to your firmware project, or copy them with `npx vscope device-setup`.
 
-```bash
-npx vscope device-setup
-```
+1. Implement `vscopeTxBytes` for your USB serial transport.
+2. Register acquisition variables with `vscopeRegisterVar`. Register writable real-time values with `vscopeRegisterRtBuffer` if you need them.
+3. Call `vscopeInit` once after registering variables.
+4. Pass received serial bytes and a microsecond timestamp to `vscopeRxHandler`.
+5. Call `vscopeAcquire` from a timer interrupt at the rate passed to `vscopeInit`.
 
-That command copies [`reference/vscope.c`](reference/vscope.c), [`reference/vscope.h`](reference/vscope.h), and an agent brief at `vscope/prompt.md`. Re-run with `--force` to replace files that already exist.
-
-1. Compile `vscope.c` with your firmware. Implement `vscopeTxBytes` for USB serial.
-2. Register at least 5 acquisition variables with `vscopeRegisterVar` before init.
-3. Register writable real-time values with `vscopeRegisterRtBuffer` if you need them.
-4. Call `vscopeInit` once after registration. Registration is locked after that.
-5. Pass received serial bytes and a microsecond timestamp to `vscopeRxHandler`.
-6. Call `vscopeAcquire` from a timer interrupt at the rate passed to `vscopeInit`.
-
-These files define the firmware protocol for this release. Give `vscope/prompt.md` to an agent if you want it to do the wiring.
+These files define the firmware protocol for this release.
 
 ## Work with a device
 
