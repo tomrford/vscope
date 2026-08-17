@@ -10,12 +10,17 @@ export function writeDeviceSetup(force: boolean): string {
 
   fs.mkdirSync(directory, { recursive: true });
 
-  for (const name of FILES) {
-    const destination = path.join(directory, name);
-    if (!force && fs.existsSync(destination)) {
-      throw new Error(`${destination} already exists. Re-run with --force to overwrite.`);
+  if (!force) {
+    for (const name of FILES) {
+      const destination = path.join(directory, name);
+      if (fs.existsSync(destination)) {
+        throw new Error(`${destination} already exists. Re-run with --force to overwrite.`);
+      }
     }
-    fs.copyFileSync(path.join(sourceDir, name), destination);
+  }
+
+  for (const name of FILES) {
+    fs.copyFileSync(path.join(sourceDir, name), path.join(directory, name));
   }
 
   return directory;
