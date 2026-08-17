@@ -14,7 +14,7 @@ import {
   runDeviceSetup,
 } from "./device-setup";
 
-const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const repoRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 describe("device-setup", () => {
   it.effect("writes the packaged firmware sources into ./vscope", () =>
@@ -94,7 +94,10 @@ describe("device-setup", () => {
       Effect.gen(function* () {
         const packageRoot = path.join(cwd, "pkg");
         fs.mkdirSync(packageRoot);
-        fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "vscope" }));
+        fs.writeFileSync(
+          path.join(packageRoot, "package.json"),
+          JSON.stringify({ name: "vscope" }),
+        );
 
         const failure = yield* runDeviceSetup({
           cwd: path.join(cwd, "project"),
@@ -110,7 +113,9 @@ describe("device-setup", () => {
 
   it("walks up from the CLI to the published vscope package root", () => {
     expect(resolveVscopePackageRoot(fileURLToPath(new URL(".", import.meta.url)))).toBe(repoRoot);
-    expect(resolveVscopePackageRoot(path.join(os.tmpdir(), "vscope-missing-package"))).toBeUndefined();
+    expect(
+      resolveVscopePackageRoot(path.join(os.tmpdir(), "vscope-missing-package")),
+    ).toBeUndefined();
   });
 });
 

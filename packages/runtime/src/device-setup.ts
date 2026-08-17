@@ -57,12 +57,9 @@ export function resolveVscopePackageRoot(startDir: string): string | undefined {
   }
 }
 
-export const runDeviceSetup = Effect.fn("runDeviceSetup")(function* (
-  options: DeviceSetupOptions,
-) {
+export const runDeviceSetup = Effect.fn("runDeviceSetup")(function* (options: DeviceSetupOptions) {
   const packageRoot =
-    options.packageRoot ??
-    resolveVscopePackageRoot(fileURLToPath(new URL(".", import.meta.url)));
+    options.packageRoot ?? resolveVscopePackageRoot(fileURLToPath(new URL(".", import.meta.url)));
   if (packageRoot === undefined) {
     return yield* new DeviceSetupError({
       reason: "Could not locate the installed vscope package.",
@@ -80,8 +77,9 @@ export const runDeviceSetup = Effect.fn("runDeviceSetup")(function* (
     });
   }
 
+  const existingFiles = existing.kind === "directory" ? existing.files : {};
   const conflicts = DEVICE_SETUP_FILES.filter((name) => {
-    const current = existing.files[name];
+    const current = existingFiles[name];
     return current !== undefined && !current.equals(planned[name]) && !options.force;
   });
   if (conflicts[0] !== undefined) {
@@ -96,7 +94,7 @@ export const runDeviceSetup = Effect.fn("runDeviceSetup")(function* (
   const unchanged: Array<DeviceSetupFile> = [];
 
   for (const name of DEVICE_SETUP_FILES) {
-    const current = existing.files[name];
+    const current = existingFiles[name];
     const next = planned[name];
     if (current !== undefined && current.equals(next)) {
       unchanged.push(name);
@@ -133,7 +131,6 @@ type PlannedFiles = Record<DeviceSetupFile, Buffer>;
 type TargetInspection =
   | {
       readonly kind: "missing";
-      readonly files: Partial<PlannedFiles>;
     }
   | {
       readonly kind: "directory";
@@ -154,7 +151,7 @@ const readReferenceFiles = Effect.fn("readReferenceFiles")(function* (referenceD
 const inspectTargetFiles = Effect.fn("inspectTargetFiles")(function* (directory: string) {
   const stats = yield* stat(directory);
   if (stats === undefined) {
-    return { kind: "missing", files: {} } satisfies TargetInspection;
+    return { kind: "missing" } satisfies TargetInspection;
   }
   if (!stats.isDirectory()) {
     return { kind: "file" } satisfies TargetInspection;

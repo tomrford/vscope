@@ -5,7 +5,7 @@ import { Effect, Schema } from "effect";
 
 import { parseArgs } from "./cli-args";
 import { DEFAULT_RUNTIME_PORT, makeRuntimeConfig, resolveRuntimePaths } from "./config";
-import { formatDeviceSetupOutput, runDeviceSetup } from "./device-setup";
+import { DeviceSetupError, formatDeviceSetupOutput, runDeviceSetup } from "./device-setup";
 import { runRuntimeServer } from "./server";
 
 const PackageJson = Schema.Struct({
@@ -34,12 +34,10 @@ export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)):
         printDeviceSetupHelp();
         return;
       }
-      await Effect.runPromise(
-        runDeviceSetup({ cwd: process.cwd(), force: parsed.force }).pipe(
-          Effect.tap((result) => Effect.sync(() => console.log(formatDeviceSetupOutput(result)))),
-          Effect.catchTag("DeviceSetupError", (error) => Effect.fail(new Error(error.reason))),
-        ),
+      const result = await Effect.runPromise(
+        runDeviceSetup({ cwd: process.cwd(), force: parsed.force }),
       );
+      console.log(formatDeviceSetupOutput(result));
       return;
     case "serve": {
       const paths = resolveRuntimePaths();
@@ -105,6 +103,6 @@ The command writes:
 
 // External boundary: JavaScript Promise rejections can contain any value.
 main().catch((cause: unknown) => {
-  console.error(cause);
+  console.error(cause instanceof DeviceSetupError ? cause.reason : cause);
   process.exitCode = 1;
 });
