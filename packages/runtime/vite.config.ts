@@ -11,6 +11,7 @@ export default defineConfig({
         "@effect/sql-sqlite-node",
         "better-sqlite3",
         "effect",
+        "effect/unstable/cli",
         "serialport",
       ],
       input: "src/cli.ts",

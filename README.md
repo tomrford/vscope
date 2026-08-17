@@ -39,7 +39,7 @@ vscope stores settings and snapshots in your operating system's application data
 
 ## Add the firmware
 
-The npm package includes the matching [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h) files. Add both files to your firmware project.
+The npm package includes the matching [`reference/vscope.c`](reference/vscope.c) and [`reference/vscope.h`](reference/vscope.h) files. Add both files to your firmware project, or copy them with `npx vscope device-setup`.
 
 1. Implement `vscopeTxBytes` for your USB serial transport.
 2. Register acquisition variables with `vscopeRegisterVar`. Register writable real-time values with `vscopeRegisterRtBuffer` if you need them.

@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Schema } from "effect";
+import { NodeRuntime, NodeServices } from "@effect/platform-node";
+import { Console, Effect, Option, Schema } from "effect";
+import { Command, Flag } from "effect/unstable/cli";
 
 import { DEFAULT_RUNTIME_PORT, makeRuntimeConfig, resolveRuntimePaths } from "./config";
+import { writeDeviceSetup } from "./device-setup";
 import { runRuntimeServer } from "./server";
 
 const PackageJson = Schema.Struct({
@@ -17,102 +21,52 @@ const packageVersion = packageJson.version ?? "0.0.0";
 
 const uiDistPath = fileURLToPath(new URL("./ui", import.meta.url));
 
-export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)): Promise<void> {
-  const parsed = parseArgs(argv);
+const deviceSetup = Command.make(
+  "device-setup",
+  {
+    force: Flag.boolean("force").pipe(
+      Flag.withDescription("Overwrite existing files in ./vscope."),
+    ),
+  },
+  Effect.fn("device-setup")(function* ({ force }) {
+    const directory = writeDeviceSetup(force);
+    yield* Console.log(`Wrote ${directory}`);
+    yield* Console.log(`See ${path.join(directory, "guide.md")}`);
+  }),
+).pipe(Command.withDescription("Write the matching firmware sources into ./vscope."));
 
-  if (parsed.help) {
-    printHelp();
-    return;
-  }
+const vscope = Command.make(
+  "vscope",
+  {
+    port: Flag.integer("port").pipe(
+      Flag.withAlias("p"),
+      Flag.filterMap(
+        (value) => (value >= 1 && value <= 65535 ? Option.some(value) : Option.none()),
+        (value) => `Invalid port: ${value}`,
+      ),
+      Flag.optional,
+      Flag.withDescription("Override the persisted server port for this run."),
+    ),
+  },
+  Effect.fn("vscope")(function* ({ port }) {
+    const paths = resolveRuntimePaths();
+    const config = makeRuntimeConfig({
+      version: packageVersion,
+      databasePath: paths.databasePath,
+      port: Option.getOrElse(port, () => DEFAULT_RUNTIME_PORT),
+      portOverride: Option.isSome(port),
+      uiDistPath,
+    });
 
-  if (parsed.version) {
-    console.log(packageVersion);
-    return;
-  }
+    yield* Console.log(`vscope ${packageVersion}`);
+    yield* Console.log(`Data:    ${paths.dataDir}`);
+    return yield* runRuntimeServer(config);
+  }),
+).pipe(
+  Command.withDescription("Local daemon and browser UI for vscope-capable devices."),
+  Command.withSubcommands([deviceSetup]),
+);
 
-  const paths = resolveRuntimePaths();
-  const config = makeRuntimeConfig({
-    version: packageVersion,
-    databasePath: paths.databasePath,
-    port: parsed.port ?? DEFAULT_RUNTIME_PORT,
-    portOverride: parsed.port !== undefined,
-    uiDistPath,
-  });
-
-  console.log(`vscope ${packageVersion}`);
-  console.log(`Data:    ${paths.dataDir}`);
-
-  await Effect.runPromise(runRuntimeServer(config));
-}
-
-type CliArgs = {
-  readonly help: boolean;
-  readonly version: boolean;
-  readonly port: number | undefined;
-};
-
-function parseArgs(argv: ReadonlyArray<string>): CliArgs {
-  let port: number | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === "--help" || arg === "-h") {
-      return { help: true, version: false, port: undefined };
-    }
-    if (arg === "--version" || arg === "-v") {
-      return { help: false, version: true, port: undefined };
-    }
-    if (arg === "--port" || arg === "-p") {
-      const value = argv[index + 1];
-      if (!value) {
-        throw new Error("--port requires a value.");
-      }
-      port = parsePort(value);
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--port=")) {
-      port = parsePort(arg.slice("--port=".length));
-      continue;
-    }
-    throw new Error(`Unknown option: ${arg}`);
-  }
-
-  return { help: false, version: false, port };
-}
-
-function parsePort(value: string): number {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid port: ${value}`);
-  }
-  return port;
-}
-
-function printHelp(): void {
-  console.log(`vscope ${packageVersion}
-
-Usage:
-  vscope [--port <port>]
-  vscope --help
-  vscope --version
-
-Options:
-  -p, --port <port>   Override the persisted server port for this run.
-  -h, --help          Show this help.
-  -v, --version       Show the version.
-
-Defaults:
-  host: 127.0.0.1
-  port: ${DEFAULT_RUNTIME_PORT}
-`);
-}
-
-// External boundary: JavaScript Promise rejections can contain any value.
-main().catch((cause: unknown) => {
-  console.error(cause);
-  process.exitCode = 1;
-});
+NodeRuntime.runMain(
+  Command.run(vscope, { version: packageVersion }).pipe(Effect.provide(NodeServices.layer)),
+);
