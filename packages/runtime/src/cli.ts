@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 
 import { Effect, Schema } from "effect";
 
+import { parseArgs } from "./cli-args";
 import { DEFAULT_RUNTIME_PORT, makeRuntimeConfig, resolveRuntimePaths } from "./config";
+import { formatDeviceSetupOutput, runDeviceSetup } from "./device-setup";
 import { runRuntimeServer } from "./server";
 
 const PackageJson = Schema.Struct({
@@ -20,76 +22,42 @@ const uiDistPath = fileURLToPath(new URL("./ui", import.meta.url));
 export async function main(argv: ReadonlyArray<string> = process.argv.slice(2)): Promise<void> {
   const parsed = parseArgs(argv);
 
-  if (parsed.help) {
-    printHelp();
-    return;
-  }
-
-  if (parsed.version) {
-    console.log(packageVersion);
-    return;
-  }
-
-  const paths = resolveRuntimePaths();
-  const config = makeRuntimeConfig({
-    version: packageVersion,
-    databasePath: paths.databasePath,
-    port: parsed.port ?? DEFAULT_RUNTIME_PORT,
-    portOverride: parsed.port !== undefined,
-    uiDistPath,
-  });
-
-  console.log(`vscope ${packageVersion}`);
-  console.log(`Data:    ${paths.dataDir}`);
-
-  await Effect.runPromise(runRuntimeServer(config));
-}
-
-type CliArgs = {
-  readonly help: boolean;
-  readonly version: boolean;
-  readonly port: number | undefined;
-};
-
-function parseArgs(argv: ReadonlyArray<string>): CliArgs {
-  let port: number | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === "--help" || arg === "-h") {
-      return { help: true, version: false, port: undefined };
-    }
-    if (arg === "--version" || arg === "-v") {
-      return { help: false, version: true, port: undefined };
-    }
-    if (arg === "--port" || arg === "-p") {
-      const value = argv[index + 1];
-      if (!value) {
-        throw new Error("--port requires a value.");
+  switch (parsed.kind) {
+    case "help":
+      printHelp();
+      return;
+    case "version":
+      console.log(packageVersion);
+      return;
+    case "device-setup":
+      if (parsed.help) {
+        printDeviceSetupHelp();
+        return;
       }
-      port = parsePort(value);
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("--port=")) {
-      port = parsePort(arg.slice("--port=".length));
-      continue;
-    }
-    throw new Error(`Unknown option: ${arg}`);
-  }
+      await Effect.runPromise(
+        runDeviceSetup({ cwd: process.cwd(), force: parsed.force }).pipe(
+          Effect.tap((result) => Effect.sync(() => console.log(formatDeviceSetupOutput(result)))),
+          Effect.catchTag("DeviceSetupError", (error) => Effect.fail(new Error(error.reason))),
+        ),
+      );
+      return;
+    case "serve": {
+      const paths = resolveRuntimePaths();
+      const config = makeRuntimeConfig({
+        version: packageVersion,
+        databasePath: paths.databasePath,
+        port: parsed.port ?? DEFAULT_RUNTIME_PORT,
+        portOverride: parsed.port !== undefined,
+        uiDistPath,
+      });
 
-  return { help: false, version: false, port };
-}
+      console.log(`vscope ${packageVersion}`);
+      console.log(`Data:    ${paths.dataDir}`);
 
-function parsePort(value: string): number {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid port: ${value}`);
+      await Effect.runPromise(runRuntimeServer(config));
+      return;
+    }
   }
-  return port;
 }
 
 function printHelp(): void {
@@ -97,17 +65,41 @@ function printHelp(): void {
 
 Usage:
   vscope [--port <port>]
+  vscope device-setup [--force]
   vscope --help
   vscope --version
 
+Commands:
+  device-setup        Write the matching firmware sources into ./vscope.
+
 Options:
   -p, --port <port>   Override the persisted server port for this run.
+      --force         Overwrite existing files written by device-setup.
   -h, --help          Show this help.
   -v, --version       Show the version.
 
 Defaults:
   host: 127.0.0.1
   port: ${DEFAULT_RUNTIME_PORT}
+`);
+}
+
+function printDeviceSetupHelp(): void {
+  console.log(`vscope device-setup
+
+Write the firmware sources for this vscope release into ./vscope.
+
+Usage:
+  vscope device-setup [--force]
+
+Options:
+      --force         Overwrite existing vscope.c, vscope.h, and prompt.md.
+  -h, --help          Show this help.
+
+The command writes:
+  ./vscope/vscope.c
+  ./vscope/vscope.h
+  ./vscope/prompt.md
 `);
 }
 
