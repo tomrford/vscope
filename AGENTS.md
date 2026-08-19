@@ -47,11 +47,10 @@ Serial requests use FIFO admission. Snapshot pages are queued one at a time. Sta
 
 - keep the package publishable as `vscope`
 - keep the runtime on localhost unless the security model changes
-- use Node.js 26 and the matching pnpm wrapper from the Nix development shell
+- use Node.js 24 and the pnpm version pinned in `package.json`
 - keep `noUncheckedIndexedAccess` enabled for core packages through the root TypeScript configuration
 - keep `@vscope/ui` and `@vscope/liveplot` covered by `pnpm run typecheck` while their package configurations leave `noUncheckedIndexedAccess` off
 
 ## Tooling
 
-- use `nix develop -c` for all repository commands
 - use pnpm because vscope depends on native Node.js support for serial and SQLite

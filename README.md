@@ -78,23 +78,23 @@ vscope listens only on localhost and does not use authentication. Do not expose 
 
 ## Develop vscope
 
-Use the Nix development shell so Node.js and pnpm match the repository:
+Use Node.js 24 and pnpm 11.5.1, matching CI:
 
 ```bash
-nix develop -c pnpm install
-nix develop -c pnpm run check
+pnpm install
+pnpm run check
 ```
 
 After the check has built the runtime, start it in one terminal:
 
 ```bash
-nix develop -c node bin/vscope.js
+node bin/vscope.js
 ```
 
 Start the UI development server in another terminal:
 
 ```bash
-nix develop -c pnpm run dev:ui
+pnpm run dev:ui
 ```
 
 The development UI runs at <http://127.0.0.1:5173> and connects to the runtime at <http://127.0.0.1:5174>.
