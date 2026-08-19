@@ -3,7 +3,6 @@ dist/
 out/
 .DS_Store
 *.log
-.direnv
 .repos/*
 !.repos/.lock
 grepo/*
