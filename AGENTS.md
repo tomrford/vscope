@@ -4,7 +4,8 @@ Local daemon and browser UI for embedded-device debugging.
 
 ## Commands
 
-Use pnpm and the toolchain requirements in `package.json`.
+Use Node.js 24 and the pnpm version pinned in `package.json`.
+Node.js 26.4 and later can stall serialport callbacks on Windows; see [upstream issue #3148](https://github.com/serialport/node-serialport/issues/3148).
 
 ```sh
 pnpm install --frozen-lockfile
