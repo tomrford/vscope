@@ -3,7 +3,5 @@ dist/
 out/
 .DS_Store
 *.log
-.repos/*
-!.repos/.lock
-grepo/*
+.repos/
 .claude/settings.local.json

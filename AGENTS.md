@@ -20,3 +20,10 @@ Run `check` before handoff.
 - `bin/vscope.js` is the CLI entry point.
 - `packages/` contains the runtime, UI, and supporting workspace packages.
 - `reference/vscope.c` and `reference/vscope.h` define the firmware protocol.
+
+## Reference sources
+
+Clone upstream sources into `.repos/` (gitignored) only when needed.
+
+- Effect: https://github.com/Effect-TS/effect-smol at the tag matching `effect` in `package.json`; see `.agents/skills/effect-ts`.
+- liveline: https://github.com/benjitaylor/liveline, origin of `packages/liveplot` (snapshot in `THIRD_PARTY_NOTICES.md`).
