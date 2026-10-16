@@ -11,7 +11,7 @@ Expert guidance for programming with the Effect library, covering error handling
 
 Before doing any other Effect-related work, check that `./.repos/effect` exists at the root of the repository where the skill is being used.
 
-If it does not exist, stop and prompt the user with the setup task documented in `./references/setup.md`.
+If it does not exist, shallow-clone `https://github.com/Effect-TS/effect-smol` into `./.repos/effect` (gitignored) at the tag matching the `effect` version in `package.json` (e.g. `effect@4.0.0-beta.78`).
 
 ## Research Strategy
 
@@ -188,4 +188,3 @@ When providing solutions, explain the Effect concepts being used and why they fi
 - `./references/guide-schema.md`
 - `./references/guide-sql.md`
 - `./references/guide-testing.md`
-- `./references/setup.md`

@@ -27,13 +27,5 @@
     ]
   },
   "include": ["packages/**/*.ts", "src/**/*.ts"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "out",
-    "grepo",
-    "reference",
-    "packages/ui",
-    "packages/liveplot"
-  ]
+  "exclude": ["node_modules", "dist", "out", "reference", "packages/ui", "packages/liveplot"]
 }
