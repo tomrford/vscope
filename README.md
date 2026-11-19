@@ -78,11 +78,11 @@ vscope listens only on localhost and does not use authentication. Do not expose 
 
 ## Develop vscope
 
-Use Node.js 24 and pnpm 11.5.1, matching CI:
+Use Node.js 24 and pnpm 11.5.1, matching CI. [Nix](https://nixos.org/download/) with flakes enabled provides this toolchain via `flake.nix` (and `.envrc` for direnv):
 
 ```bash
-pnpm install
-pnpm run check
+nix develop -c pnpm install --frozen-lockfile
+nix develop -c pnpm run check
 ```
 
 After the check has built the runtime, start it in one terminal:

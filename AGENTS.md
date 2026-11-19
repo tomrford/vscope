@@ -4,13 +4,13 @@ Local daemon and browser UI for embedded-device debugging.
 
 ## Commands
 
-Use Node.js 24 and the pnpm version pinned in `package.json`.
+Use the Nix development environment (`flake.nix` / `.envrc`), which provides Node.js 24 and pnpm (matching `package.json`).
 Node.js 26.4 and later can stall serialport callbacks on Windows; see [upstream issue #3148](https://github.com/serialport/node-serialport/issues/3148).
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm run dev:ui
-pnpm run check
+nix develop -c pnpm install --frozen-lockfile
+nix develop -c pnpm run dev:ui
+nix develop -c pnpm run check
 ```
 
 Run `check` before handoff.
